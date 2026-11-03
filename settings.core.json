@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"{{KESSELRUNNER}}/bin/kesselrunner.mjs\" sync --quiet", "timeout": 120 },
+          { "type": "command", "command": "node \"{{KESSELRUNNER}}/scripts/codex-bridge/generate.mjs\"" },
+          { "type": "command", "command": "node \"{{KESSELRUNNER}}/scripts/delegate/run.mjs\" status --hook", "timeout": 20 },
+          { "type": "command", "command": "\"{{DOCSIC}}\" hook session-start", "timeout": 30 },
+          { "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" hook session-start", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "\"{{DOCSIC}}\" hook prompt-submit", "timeout": 30 }] },
+      { "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" hook prompt-submit", "timeout": 10 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "{{PRE_TOOL_MATCHER}}", "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/scripts/hooks/pre-tool-use.mjs\" \"{{OVERLAY}}\"", "timeout": 10 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|AskUserQuestion", "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/scripts/hooks/post-tool-use.mjs\"", "timeout": 10 }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "\"{{DOCSIC}}\" hook stop", "timeout": 30 }] },
+      { "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" hook stop", "timeout": 10 }] }
+    ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" hook stop-failure", "timeout": 10 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "\"{{DOCSIC}}\" hook session-end", "timeout": 30 }] },
+      { "hooks": [{ "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" hook session-end", "timeout": 10 }] }
+    ]
+  },
+  "statusLine": { "type": "command", "command": "node \"{{KESSELRUNNER}}/packages/rollcall/bin/rollcall.mjs\" statusline", "refreshInterval": 5 },
+  "enabledPlugins": {
+    "playwright@claude-plugins-official": true,
+    "rollcall-band@kesselrunner": true,
+    "pr-band@kesselrunner": true,
+    "clickable@kesselrunner": true
+  },
+  "extraKnownMarketplaces": {
+    "kesselrunner": { "source": { "source": "directory", "path": "{{KESSELRUNNER}}" } }
+  }
+}

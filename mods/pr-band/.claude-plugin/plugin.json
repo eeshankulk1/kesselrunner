@@ -1,0 +1,9 @@
+{
+  "name": "pr-band",
+  "version": "0.1.0",
+  "description": "A line above the prompt for the pull request this session is shipping: checks, merge state, and after the merge what it deployed.",
+  "author": {
+    "name": "kesselrunner"
+  },
+  "types": "./types/index.d.ts"
+}

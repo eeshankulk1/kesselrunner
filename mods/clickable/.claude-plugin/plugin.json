@@ -1,0 +1,8 @@
+{
+  "name": "clickable",
+  "version": "0.1.0",
+  "description": "Click to copy a code block, and click to open a path, in the classic terminal view.",
+  "author": {
+    "name": "kesselrunner"
+  }
+}

@@ -1,0 +1,57 @@
+# Session data
+sessions/
+session-env/
+history.jsonl
+
+# Project data (session transcripts, auto-managed memory)
+projects/
+
+# Plans (ephemeral session plans)
+/plans/
+
+# Plugin runtime data
+plugins/cache/
+plugins/data/
+plugins/marketplaces/
+plugins/installed_plugins.json
+plugins/install-counts-cache.json
+plugins/known_marketplaces.json
+plugins/plugin-catalog-cache.json
+plugins/.last_inuse_sweep
+
+# Daemon / runtime state - per-machine, not config
+daemon/
+daemon.lock
+daemon.log
+daemon.status.json
+daemon-auth-cooldown
+daemon-auth-status.json
+jobs/
+.last-cleanup
+.last-update-result.json
+mcp-needs-auth-cache.json
+gh-pr-status-cache.json
+
+# Secrets for scripts
+.env
+.env.local
+
+# Caches and temp files
+file-history/
+cache/
+image-cache/
+paste-cache/
+downloads/
+backups/
+tasks/
+telemetry/
+shell-snapshots/
+worktrees/
+.DS_Store
+
+# Python bytecode (from skill scripts)
+__pycache__/
+*.pyc
+
+# Mod type declarations Claude Code writes beside a mod loaded with --plugin-dir
+mods/*/.claude-plugin/types/

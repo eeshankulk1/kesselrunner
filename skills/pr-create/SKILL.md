@@ -1,0 +1,188 @@
+---
+name: pr-create
+description: "The standard way changes ship: quality pass scaled to the diff, worklog entry, commit, PR, a watch on the PR's CI, and - on 'ship it' - the merge and the project's release steps (e.g. TestFlight from merged main). Use for every PR beyond super-simple changes. Trigger when: user says 'create a pr', 'ship it', 'done with this', 'feature complete', 'finalize this', 'open a pr', or '/pr-create'. Also PROACTIVELY suggest after finishing an implementation: 'Want me to run /pr-create?'"
+argument-hint: <summary of what changed and why>
+---
+
+# PR Create
+
+Ships the current change set as a PR with rigor proportional to the diff: the same quality gates every time, sized to the change instead of one heavyweight ceremony. Every "spawn" below follows "Delegation" in the global instructions (Agent tool, or the Codex backend when configured).
+
+This is the **ship phase** (global CLAUDE.md "Build phase vs ship phase"). It starts on the user's word - offer it in one line when an implementation lands, rather than launching it yourself. Once triggered, run every step below to completion in one pass: no progress check-ins, no "shall I continue"; the user gets one PR URL and a CI verdict at the end. Stop only for a real blocker (a gate that fails and cannot be fixed) or a destructive action.
+
+**How far it goes depends on the words.** "Ship it", "finalize", "done with this", "feature complete", or any ask to merge: the whole chain - PR, green CI, merge, deploy watch, the project's release steps (Steps 6-7). When the manifest has `release.production`, that chain ends on staging: production is a separate step with its own word (Step 7), and this skill never takes it. "Create a PR", "open a PR", or a bare `/pr-create`: stop after Step 5 with the PR open. Say which one you are running in the tier line.
+
+**Division of labor.** CI owns the deterministic suites; this skill owns judgment. Stacks with any `ci` value in `.claude/test-manifest.json` (`"pr"` runs on the PR's checks, `"nightly"` on the schedule) are never re-run locally - that duplicate run was the slowest and most expensive part of shipping. Locally you run the checks that take seconds and the tests for what changed (to avoid spending CI minutes on an obvious failure), the review, the docs gate, any UI verification the change warrants, and whatever CI doesn't cover. A suite CI runs on the PR is not also run in full here, `tier: "fast"` or not: on one iOS + web project the 4-minute backend suite ran two or three times per ship before CI ran it again, and a suite that drives a browser flaked on the loaded Mac, which cost a further full run each time. A project with no `ci` fields has no CI: then the local test run covers every stack (below). One exception, the manifest's `ci.prePush`: a suite whose only CI home is one self-hosted machine runs here instead, on the shipper's machine, and its pass is attested to CI (Step 2). A suite that queued every open PR behind every other on a single runner (that project's iOS suite) costs no queue at all when each ship runs its own.
+
+**The budget.** A ship is measured from the user's word to the merge: about 20 minutes for a Standard change, of which CI is 7, and one CI run. Measured over 40 ships of one iOS + web project (2026-10-01 to 10-03) the median was over an hour and 20-56M input tokens, with CI itself never the slow part. The hour went to four reviewers and a second review on nearly every PR, the same suites run locally and then in CI, a 25-minute suite repeated after a review fix, branches re-merged with main because it had moved, and a red main found only when the PR's checks failed. Each rule below that says "once", "only when" or "not a reason" is there for one of those.
+
+**Where it runs.** The ship itself runs in a fresh context (Step 0): the build phase leaves a session carrying hundreds of thousands of tokens that every one of the ship's ~150-200 turns would otherwise re-read. The session that did the build writes the brief and relays the result; a shipper agent does Steps 1-8.
+
+**Waiting.** Everything a ship waits on announces its own end: a spawned agent hands back its report, a background Bash command exits. So start it in the background (long commands with `run_in_background: true`), then end your turn with one line naming what you are waiting for - no tool call - but only while something you started is still pending. The harness re-invokes you the moment it finishes. This holds for the shipper too: a turn that ends without the final report is a pause, not the end of the run, and the run is not over until the Step 8 report is written (one shipper waited this way 11 times in a ship and was woken within seconds each time). Never wait on a timer: a fixed `sleep`, or a loop that sleeps to a deadline without checking anything, kept two shippers asleep 10-17 minutes per ship past agents that had already reported. Polling is for state nothing announces (a queued run you have no watch on): check the condition itself every 15-20 seconds and leave the loop the moment it holds. Each wake-up is a turn that re-reads the whole ship, so spend none on narration: when one of several things you are waiting for comes back, note it only if it changes what you do next, and never restate the list of what is still pending.
+
+**Stages.** As each stage below starts, run `rollcall task stage here "<stage>"`, with these words exactly: `checks` (Step 2), `docs` (Step 3), `CI` (Step 5), `merge queue` (Step 6), `release` (Step 7), and `rollcall task stage here done` at the end. It is one line outside a task too, where it does nothing. The task's tab shows the stage and its minutes against the usual time, so the owner can tell slow from stuck without asking anyone to look at a log.
+
+## Step 0: Hand the ship to a fresh context
+
+Skip this step and start at Step 1 when you are already the shipper (your prompt says so) or when `/pr-create` is the first task this session did - there is no build context to shed.
+
+Otherwise:
+
+1. **Write the brief** - everything the shipper needs that only this conversation knows:
+   - repo root, the task worktree's absolute path, branch and base branch
+   - the scope: "PR only" or "ship chain" (merge + release), with the user's own words
+   - in a task's worktree (`rollcall task show here` prints a task: a supervisor's worker), the owner's words it prints, copied verbatim under their own heading: they are the acceptance criteria, kept apart from your description of the change
+   - what changed and why, per area (backend / web / iOS / docs), including decisions made during the build and their reasons - the reviewer and the docs pass judge against this intent
+   - what the build phase already verified (which fast suites, which targeted UI check, what was seen) so it isn't redone, and what was deliberately left unchecked
+   - known risks, open questions, anything the user flagged; related issues (`Closes #N`), migrations, contract changes
+2. **Spawn the shipper**: the Agent tool with `subagent_type: "general-purpose"` (it inherits this session's model; never `fork`, which would copy the very context this step sheds). Prompt: "You are the shipper. Read `~/.claude/kesselrunner/skills/pr-create/SKILL.md` and run it from Step 1 through Step 8 to completion, in one pass, for the change below. Spawn the named agents per the global Delegation rules; invoke `/update-docs`, `/frontend-test` and the project's ship skill through the Skill tool, or read their SKILL.md and follow it if that tool isn't available. Work only in the worktree named below. Your final message is the Step 8 report, verbatim." - then the brief.
+3. **End the turn.** The shipper reports when it finishes; relay its Step 8 block to the user unchanged, plus anything it needs the user to decide. If it stopped on a blocker (a gate it couldn't fix, a destructive action), that is the report - don't continue the ship in this session. While the shipper waits (on a reviewer, on CI) it pauses, and a pause can reach you as a "finished" notification with no Step 8 report: that is not the end. Give the user at most one status line and end the turn again; only the Step 8 report or a blocker ends the ship. The same goes for a `[rollcall] merge queue:` line: the shipper has that news from its `queue wait`, so read no log and fix nothing beside it.
+
+A question the shipper can't answer from the brief comes back in its report, never as a guess; answer it and re-spawn with the brief amended.
+
+## Step 1: Scope the change
+
+```bash
+git status && git diff --stat && git log --oneline -5
+```
+
+Confirm you're on a feature branch in a task worktree (global CLAUDE.md "Worktrees"; if the work somehow sits in the main checkout, move it into a worktree first). Combine the diff with the user's summary to build the change context.
+
+**Is main green?** One call before anything else: `gh run list --branch <default> --limit 12 --json databaseId,workflowName,conclusion,status,event,createdAt` (skip when the repo has no CI). Take the newest completed run of each workflow that gates PRs or runs nightly. One of them red, or an open "red on main" issue (`gh issue list --search "red on main in:title" --state open`), means this PR's checks will likely fail for a reason that is not its own: read the failure now (`gh run view <databaseId> --log-failed | grep -E -m 20 'FAIL|Error|failed|✘|error:'`; the log's tail is only job cleanup). If this diff does not fix it, say so in your first status line and carry on with Steps 2-4, but treat that check as known-red in Step 5 instead of debugging it there, and report it as the blocker if it is a required check. Three ships of one project each found the same red nightly e2e test only after their own 7-minute CI run, and stalled 20-30 minutes apiece.
+
+Then pick the tier:
+
+| Tier | When | Gates |
+|------|------|-------|
+| **Simple** | <=~30 lines, no logic risk (config, copy, docs, one-liner fix) | Quick checks -> commit -> PR -> CI |
+| **Standard** | Everything else, whatever its size | Quick checks + one code-reviewer pass + local-only stacks -> commit -> PR -> CI |
+| **Deep** | Security-adjacent (auth, permissions, payments, deleting or exporting user data, secrets), a migration that rewrites existing rows, or the user asks for a deep review | Standard + a second, independent review of the risky part itself |
+
+Size alone never makes a change Deep: a long diff gets a reviewer per area (Step 2), not more rounds. When every PR over ~300 lines was "Full", nearly every PR was, and each paid for six review agents and 15-40 minutes before its PR opened.
+
+State the chosen tier in one line before proceeding; the user can override. A `ci.prePush` suite (Step 2) runs in every tier whenever the diff matches its `when`: it replaces the CI run, so a Simple change that touches its paths still runs it.
+
+**See who else is landing.** Other sessions ship in this repo at the same time; rollcall's merge queue orders them, and only when each is ready (Step 6). Run `rollcall queue status` from the worktree (it reads local state: no network): it shows the train landing now and the PRs waiting, and marks each one that touches this branch's files (`<- touches your files: ...`). Name those PRs in the tier line, since this ship may get a conflict back from the queue later. Nothing waits on them: every gate below runs now, on this branch as it is. Don't merge another branch or main in ahead of time and don't wait for another ship: when this PR's turn comes, the lander merges it onto main with what landed before it and tests that tree.
+
+## Step 2: Local quality loop
+
+**Pre-push suites start first.** For each manifest `ci.prePush` entry whose `when` globs match a changed file, start its `ship` command now (its `command` when it has no `ship`) as a background Bash call (`run_in_background: true`, `timeout` 3600000) and go on with the steps below: it runs beside the review, not after it. `ship` runs only the suites the diff names directly; the merge queue's train runs the rest with `command` (Step 6), so each suite runs once. When the entry has `notes`, they say how to scope the command to this diff (which suites to name in a placeholder such as `<suites>`): fill it in from the diff, and name what ran in the report. It is a script, not an agent: one command, one wake-up. Collect it before Step 4's push. A failure is a test failure like any other (fix, then run the command again). A test it reports as flaky (failed, then passed on the suite's own retry) is named in the report, never re-run for. If a later step changed a file matching `when` after the run started (a reviewer's fix), run the command again on the final code and wait for it; Step 4's `attest` refuses code that did not pass, so skipping this only moves the wait to after the push. No entry matches: nothing starts and nothing is attested.
+
+1. **Quick checks, always.** What catches an obvious failure in about a minute, run directly (no agent): the compile / type-check / build-free checks (`tsc --noEmit`, a migration or lint script), plus the tests for what changed - the test files this diff edits and the ones covering the modules it touches (`pytest tests/test_x.py tests/area/`, the runner's equivalent). A `tier: "fast"` stack with no `ci` field has no other home and runs in full. A fast stack CI runs on the PR does not: CI runs all of it once, on the commit that matters. Fix failures before anything else.
+2. **Review (Standard/Deep): one pass.** First commit the change as it stands (a local commit, nothing pushed): the reviewer's fixes are then the working-tree `git diff` (with the docs agent's edits beside them: files under docs/, and README.md when it is due), which is what a second reader needs and what the report counts. Spawn **code-reviewer** with the change summary + file list (and, for a task's worktree, the owner's words from the brief, verbatim and labelled as the acceptance criteria), in the same message as the docs agent (Step 3) so they run side by side; it fixes issues directly, and its brief covers cleanup (reuse, dead code, needless complexity) as well as bugs, so no separate cleanup pass follows. A diff that spans areas a single reader would skim (backend and iOS, say, past ~600 hand-written lines) gets one reviewer per area in that same message, never a second round. Then:
+   - Its fixes were small or mechanical (its report says "Logic changed by fixes: no"): done. Re-run the quick checks for the files it touched.
+   - Its fixes changed logic: spawn **code-reviewer** once more on that delta only (`git diff` of what it changed, minus the docs agent's files (docs/ and README.md), not the whole PR), then the quick checks. That is the only second review Standard gets.
+   - **Deep** adds one more **code-reviewer**, in that same first message, reading only the risky part (the migration, the auth or payment path) with the question that makes it risky spelled out ("can this lose or expose a user's data?"). Tell it to report findings and not edit, since the first reviewer is editing the same files; you fix what it finds, then run the quick checks. Two independent reads of the dangerous code, not more rounds on the rest. No `/simplify` here: the reviewer's cleanup step covers it, and in a timed run four cleanup agents on top returned mostly what the reviewer already had.
+   - The docs agent runs beside the review, so a review fix that changes behavior can leave a doc it just wrote stale: correct that sentence yourself after the fix (before Step 3's final gate run), no second docs pass.
+3. **Local-only stacks (Standard/Deep).** CI-owned means any `ci` value: `"pr"` stacks run on this PR's checks, `"nightly"` stacks on the schedule, and neither is re-run locally (the one exception, a suite named by `ci.prePush`, is started at the top of this step and is not an agent's job; a persona suite run locally at ship cost 20+ minutes and up to 30M tokens per iOS PR, for coverage the nightly already gives). Only `tier: "full"` stacks with no `ci` field that the diff touches run here: spawn **test-runner** in **local tier** (tell it so explicitly) with the change summary; it runs just those and validates the feature itself (curl new routes, schema consistency). Nothing left -> skip the agent and say why. When the diff touches what a nightly suite covers (the stack's manifest `notes` or the project's ship skill say which flows), dispatch just those suites on CI - the manifest's `ci.notes` give the command (e.g. `gh workflow run ios.yml --ref <branch> -f suites="<Suite>"`) - and watch that run in Step 5 next to the PR's checks. No `ci` fields anywhere in the manifest -> the project has no CI and local tier is every stack.
+4. **UI verification - a judgment call, not a rule.** CI's e2e suites (when the project has them) cover existing golden paths on every PR. Run `/frontend-test {summary}` (web) or `/ios-sim {summary}` (iOS: the ios-driver agent taps through the changed flows in the simulator and returns screenshots; a project's ship skill may say what else its visual check needs) when the change warrants eyes on it: a new screen or route, an explicitly visual change (layout, theming, spacing, motion), or a change to a shared surface many screens render (shell, nav, design tokens, a core component) - then scale its breadth to the risk, up to every affected route. Skip it for UI-adjacent changes CI already exercises (copy, a prop threaded through, a fixed handler with e2e coverage), and say why in the report. PASS -> proceed; WARN -> ask the user; FAIL -> treat as a test failure. With no e2e in CI at all, run it for any UI change.
+
+If anything fails: fix (failures classified as test bugs go to `/update-tests` with the diagnosis), re-run what failed - the failed tests themselves (`pytest --lf`, or the runner's equivalent), not the whole suite. Loop until clean. Before the push, the quick checks are green on the final code: one run after the last change, not one per fix. The full run of a CI-owned suite is CI's, in Step 5. Do not proceed with known failures - report them instead.
+
+## Step 3: Docs & memory
+
+- **Docs - the trigger is deterministic, the content is yours** (same for every tier):
+  1. Run the gate: `npx -y @eeshkulk/docsic gate --json` (base `origin/main`; it counts uncommitted files too).
+  2. `owners: 0` in the result (no doc in the repo declares `owns:` yet - `required`/`unowned` are always empty in this case, so check this first): run `/update-docs {summary}` in change mode as before, and suggest once in the report that `/update-docs` can draft `owns:` frontmatter so the gate can run. Skip the rest of these steps.
+  3. Otherwise, the gate lists the **required** docs - every doc whose `owns:` frontmatter matches a changed file, plus files `docs/gate.json` `owns` maps (e.g. the test manifest) - with the files that triggered each, and the **unowned** changed code no doc covers.
+  4. Nothing required, nothing unowned, and nothing in your own read of the change that a doc claims (a cross-cutting behavior change the globs can't see) -> skip the docs agent entirely; Docs line "none required (gate)".
+  5. Otherwise run `/update-docs` in **gate mode** with the summary and the gate JSON. The docs-updater edits the required docs, returns a one-line waiver (`Docs-skip: <doc> - <reason>`, reason 10+ characters or the gate rejects it) for any required doc that truly needs no change, fixes coverage for unowned paths (extends a doc's `owns:` or adds it to `ignore` in `docs/gate.json`), and may edit other docs it finds affected through the hub index.
+  6. Write the waiver lines (if any) to a temp file and re-run `npx -y @eeshkulk/docsic gate --json --body-file <temp file>`. If it still reports a required doc as missing (edit not recognized, or a waiver reason too short), send that output back to `/update-docs` gate mode for another pass; loop until it exits 0. The final waiver lines go into the PR body in Step 4 as `Docs-skip: <doc> - <reason>` lines, which CI's `Docs gate` check re-reads.
+  7. **README due** (the gate JSON's `readme` block has `due: true`; advisory, never blocks): refresh README.md in this PR. Pass `/update-docs` (whichever mode already runs, or README mode alone when nothing else needed docs) the `readme` block plus the worklog entries since its `date`: `{ cat docs/worklog.jsonl; find docs/worklog -name '*.json' -exec cat {} +; } 2>/dev/null | jq -c --arg d "<readme.date>" 'select(.date >= $d)'`. Docs line gains "README refreshed (<reason>)". Older docsic without a `readme` block: skip.
+- **Worklog**: write one entry file, `docs/worklog/<YYYY-MM>/<YYYY-MM-DD>-<branch with / as ->.json` (e.g. `docs/worklog/2026-10/2026-10-01-fix-ios-queue.json` for branch `fix/ios-queue`; if that path already exists for a different PR, e.g. a reused branch name on the same day, add `-2` before `.json` rather than overwrite it; a later push of this same PR updates its own file), holding one JSON object on a single line plus a trailing newline, so it rides this PR. One file per entry, never a shared file: when every PR appended to one `docs/worklog.jsonl`, each merge made every other open PR conflict (GitHub does not apply a `merge=union` rule), a conflicting PR's checks do not start until main is merged in, and each such merge re-ran CI - a quarter of one project's merges of main were forced by that file alone. A repo's existing `docs/worklog.jsonl` is history: never append to it, never delete it; readers read both. Keep the entry an index, not a changelog: `summary` at most 2 sentences (~300 characters) naming what shipped and why it matters, `why` at most 1 sentence; the PR body holds the detail and `pr` links to it. Write `"pr": 0` now; Step 4 fills in the real number once `gh pr create` returns it. Never predict the number: a wrong guess cost a red docs gate and a second full CI run.
+  ```json
+  {"date": "<ISO date>", "project": "<slug>", "summary": "<1-2 sentences: what shipped and why it matters>", "pr": 0, "why": "<optional rationale>"}
+  ```
+  `project` is the repo's memory slug (its hub project folder name when docsic has a hub configured), else the repo name.
+- **Memory**: if project state moved or a durable decision/gotcha surfaced, record it with `docsic_save` (state or note). A `state` save replaces the whole snapshot and is capped at 800 tokens: trim what's stale, don't append. Then run any post-ship step your personal instructions define (e.g. a knowledge-base sync).
+
+## Step 4: Commit, push, PR
+
+Stage specific files (never .env, credentials, or large binaries). Commit with a clear message ending in the standard co-author line; when Step 2.2 already made the local commit, stage the reviewer's fixes, the docs and the worklog, then fold them into that commit with the final message (`git commit --amend -m "<message>"`), so one commit is pushed. End the message with a `[skip ci]` line, a paragraph of its own: this first push's commit is replaced seconds later (the worklog number below), and that line keeps every `push`/`pull_request` workflow from starting a run for it. The replacement's run cancels such a run, but only after a billed minute for each job that had started (on one project, 83 of 85 cancelled PR runs in ten days, a tenth of all minutes).
+
+**Check for a conflict with main before the push, not after.** `git fetch origin && git merge-tree --write-tree --name-only HEAD origin/<default>`: exit 0 means it merges cleanly, so push it as it is (main having moved is not a reason to merge it). Exit 1 lists the conflicted files below the tree line: a PR that conflicts starts no checks at all, so the push would be wasted and the conflict would show up minutes later as a watch with nothing to watch (once: a docs edit collided with a PR merged during the ship, about 3 minutes lost). Then `git merge origin/<default>`, resolve with this change on top, re-run the quick checks for the files the merge touched in common with this diff, and push. Then:
+
+```bash
+git push -u origin HEAD
+gh pr create --title "<short title, <70 chars>" --body "$(cat <<'EOF'
+## Summary
+<1-3 bullets: what and why>
+
+## Quality pass
+- Review: {clean | N issues fixed | N issues fixed, fix delta re-reviewed | skipped (simple tier)}
+- Local tests: {quick checks result; local-only stacks result | all full stacks CI-owned}
+- CI: pending (updated after Step 5)
+- UI: {PASS/WARN via /frontend-test or /ios-sim | skipped: <why> | not applicable}
+- Docs: {updated: <files> | none required (gate)}
+
+{one `Docs-skip: <doc> - <reason>` line per waived doc, or nothing}
+
+## Test plan
+- [ ] {feature-specific verification steps}
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+If the work resolves a GitHub issue, put `Closes #N` in the summary section.
+
+**Then the worklog number.** Put the PR's real number into the worklog entry file (`gh pr view --json number -q .number`; edit `"pr": 0` to it), amend it into the same commit and push again:
+
+```bash
+git add docs/worklog
+git commit --amend -m "$(git log -1 --format=%B | sed '/^\[skip ci\]$/d')"   # the final message: the marker line gone
+git push --force-with-lease
+```
+
+This push's run is the PR's first and only: the replaced commit started none. `gh run list --branch <branch> --limit 10 --json headSha,workflowName` should show one run per workflow for the amended head and nothing for the first commit; a run for the first commit means the marker was not the HEAD commit's own line (a leading space, or folded into another line) - fix the message and push again. A self-hosted workflow with `cancel-in-progress: false` runs a replaced commit in full before the real one (22 minutes per iOS PR on one project before this); if `gh run list` shows that happening, fix the workflow (`/ci-setup` has the pattern) rather than waiting it out. `--force-with-lease` is safe on the branch this ship just created; never force-push a branch with someone else's commits. /recap and anything else that reads the worklog key on this number.
+
+**Then attest.** Attest only the head this amend push just published (the first push's commit is already replaced; never attest it). Right after this push - and after every later push to the PR (a CI fix in Step 5, a fix the merge queue asked for in Step 6) - run the `attest` command of each `ci.prePush` entry that ran in Step 2. It tells CI that this commit's code passed here, and CI's gate waits only seconds for it before sending the commit to the runner, so nothing goes between the push and the attest. When it refuses (the manifest's `ci.notes` give the exit code: the code under test changed since the run), run the entry's `command` again, then attest. When it fails any other way (the machine has no access to post: CLI not logged in, no write access), say so in the report and carry on: CI falls back to its own runner for that commit, slower but the same suite.
+
+## Step 5: Watch CI
+
+If the repo has PR checks (manifest `ci` block, or workflows with a `pull_request` trigger):
+
+```bash
+gh pr checks <pr> --watch --interval 30      # or the manifest's ci.watch
+```
+
+The amend push (Step 4) re-triggers every workflow, and for a minute or so a path-filtered workflow has no check runs yet (its `changes` job is still deciding what to spawn) - `gh pr checks --watch` would report "all green" on the docs gate alone. So first wait until `gh run list --branch <branch> --limit 10 --json headSha,status,workflowName` shows a run for the amended head SHA from every workflow with a `pull_request` trigger that can run for this diff (poll it every 15-20 seconds, per "Waiting"), then watch. A workflow whose trigger has `paths:` the diff does not match never creates a run, so don't wait for one: a PR with no iOS change spent 3 of its 5 minutes waiting on `ios.yml`. Run the watch as a **background** Bash call (`run_in_background: true`, `timeout` 2700000 = 45 minutes) and end the turn: it re-invokes you when the checks settle. Never in the foreground with the default 2-minute timeout - that killed the watch mid-run and cost 4-6 re-polls per ship, each a full-context turn. The same goes for `gh run watch <id> --exit-status` on a dispatched suite (Step 2.3) or a release run (Step 7).
+
+- **Green**: PR-only scope: update the PR body's CI line now (`gh pr edit --body`). Ship chain: leave the body until after the merge (Step 6) - editing it re-runs the docs gate on `pull_request: edited`, and `rollcall queue add` refuses a PR whose check is still running.
+- **Red**: read the failure, not the whole log: `gh run view <run-id> --log-failed | tail -150` (manifest `ci.failedLogs`). First ask whether it is this PR's: a test in code the diff does not touch, that is also red on the default branch's last run (Step 1's preflight) or on another open PR, is not. Then classify like test-runner does: implementation bug -> fix; test bug -> `/update-tests`; flaky (passes on a re-read of the diff, timing/infra error, a job that hit its timeout) -> `gh run rerun <run-id> --failed` once; red on main too -> stop and report it as the blocker with the failing test and the run (the fix is its own small PR, shipped first; this one then needs only `gh run rerun --failed` when the failing job reads the fixed code from main, or one merge of main); setup/secret/infra -> report, don't guess. A red check is never a reason to merge main in on its own: that re-runs every job to change nothing. Before pushing a fix, re-run the quick checks for it (and, when the fix touches files a `ci.prePush` entry's `when` matches, that entry's `command`; attest right after the push, Step 4) and reproduce the failing test locally when it's cheap to; batch every fix into one push. Loop until green.
+- **Refused over billing** (jobs fail in seconds with no steps, and an annotation names billing or a spending limit): nothing is wrong with the PR. In a task, run `rollcall task wait-for billing` and end the turn: rollcall tells the owner once, retries the run and brings you back. No question to the owner.
+- **Queued forever**: a self-hosted runner (e.g. an iOS Mac runner) can be busy or offline. If the watch times out with only self-hosted checks still queued, report them as queued, not failed.
+
+## Step 6: Land through the merge queue (ship chain only)
+
+The user's "ship it" is the approval: they are the only human on their repos, and the required checks are the review gate. The merge itself is the lander's: rollcall's script, one per repo, which lands ready PRs in the order they became ready, in trains of up to 4 (one at a time where PRs squash), each train tested once as one tree and merged as that tree. This skill never runs `gh pr merge`, and merges `origin/<default>` into the branch only when the queue sends back a conflict.
+
+1. Join only when every check is green; a skipped check is green (a path filter, or a gate that found the same tree already passed). Checks still queued on a self-hosted runner (Step 5) or red: stop, leave the PR open, and report why.
+2. `rollcall queue add` from the worktree. It refuses a PR that is not open, pushed and green, or a worktree with uncommitted work, and says what to fix; fix it and run it again. It prints this PR's place in line and starts the lander when none runs. A task's worktree turns `queued` on its own.
+3. Start `rollcall queue wait --timeout 55` as a background Bash call (`run_in_background: true`, `timeout` 3600000) and end the turn ("Waiting"): it exits when this PR has news. Exit 124 means nothing happened yet: start it again. Claude Code may stop this wait when memory runs low and say not to restart it unasked; the wait only reads, so start it again once without asking, and report a second stop as a blocker. Push nothing to the branch while it waits: a new head takes the PR out of the queue.
+4. Act on its line, `queue: <kind> - <text>`; the text names the next step:
+   - `landed`: the PR is on main, at the commit the text names (in a train, the train PR's merge brings this PR's head in, and GitHub marks this PR merged). When the text says it was merged outside the queue, it names no commit: `gh pr view <pr> --json mergeCommit -q .mergeCommit.oid` gives it. When it names a known flake (a pre-push suite failed only on a test the project lists as flaky, and that test passed when the lander ran it again alone), name that test in the report. Go on to item 5.
+   - `conflict`: the text names the files. `git fetch origin && git merge origin/<default>`, resolve with this change on top, re-run the quick checks for the files the merge touched in common with this diff, push once, attest (Step 4; a refusal means the merge changed the code a `ci.prePush` suite covers, so that suite runs again first), watch CI (Step 5), then items 2-4 again.
+   - `failed`: a check failed on the tree the lander built; the text names it, links it, and says whether the lander merged `origin/<default>` into this branch first (then `git pull --ff-only` before anything else). Read the failure (Step 5, "Red"), fix it, push, attest, watch CI, then items 2-4 again. A pre-push suite that failed in the part this ship left to the train (the text says so) gets the entry's `command` before the push, which skips what already passed, so the fix is tested here and not first on the next train.
+   - `left`: the PR was closed, gained a new head since it joined, or carries a PR that left without landing; the text says which. A closed PR is a blocker: report it. Otherwise, once its checks are green again (and a carried PR has landed or joined again), items 2-4.
+   - `parked`: stop and report it, with the text, as the blocker: a third bounce, a fix that changed what its tests check (removed or skipped tests, edited workflows), a red check no entry's change explains, or a merge the lander could not do. That call is the user's: never `rollcall queue leave` and re-add to get past it.
+   - A `[rollcall] merge queue:` notice that the PR is stuck, moving again, or going again in the next train is news, not an end: `queue wait` keeps waiting. A stuck notice may name a command for the user (`gh auth login`); pass it on, and push nothing.
+   - A message from another session also ends the wait (the line quotes it): act on it if it concerns this ship, then start the wait again.
+   If the ship stops after joining (a blocker, or the user calls it off), `rollcall queue leave "<why>"` takes the PR out.
+5. Update the PR body's CI line now (`gh pr edit --body`; the merged PR's page keeps it).
+6. Start the memory update (Step 3) now if it is still owed, in the same turn as the next spawn: it does not depend on the deploy. Spawn **deploy-watcher** on the merge commit (the `landed` line names it) yourself and wait for its verdict ("Waiting" above: its report wakes you), because Step 7 depends on it. The post-merge `[deploy-watch]` hook never fires here: the lander, not a session, ran the merge. A red deploy stops the chain: report it with the watcher's failure details. When the manifest has `release.production`, the merge deploys staging: give the watcher that entry's `notes` so it judges the staging deployments, and have it confirm the merge commit got no production deployment.
+
+## Step 7: Release steps (ship chain only)
+
+Run each `release.afterMerge` entry in the manifest whose `when` globs match a file the PR changed (no `when`: every merge), in order: invoke its `skill` with its `args` (e.g. the project's iOS ship skill in `post-merge` mode, which uploads from merged main; external testers are the user's step), or run its `command` from the repo root. An entry that fails stops the rest; report it. No `release` block: the merge and its deploys are the whole release.
+
+**Production is not a release step here.** When the manifest has `release.production`, stop after `afterMerge`: the change is on staging, and production moves only when the user says one of that entry's `words`, which runs its `skill` or `command` (the project's own production release). Never run it as part of "ship it", and never offer to in the middle of the ship: the Step 8 report says it once.
+
+Steps that stay the user's (App Store submission, prod writes nobody named, compliance answers) are reported as their steps, never guessed at.
+
+## Step 8: Report
+
+One compact block: tier and scope used (PR only, or ship chain), minutes from start to merge (or to the open PR) and the number of CI runs it took, PR URL, review/local-test/CI/UI outcomes, and for the ship chain the merge commit, deploy verdicts and release-step outcomes (e.g. build number and external-beta status), plus worklog + memory status. With `release.production` in the manifest, name the environment each deploy verdict is for and end with one line: production is unchanged, and the word that releases it. If any gate was skipped, say which and why. The task worktree needs no cleanup step: once the PR merges and this session ends, `rollcall gc` removes it (or run `rollcall gc` right after the merge).
+
+**Graduation nudge.** If the local test run in Step 2 took more than ~10 minutes of wall time (test-runner reports it), or the project has no CI and two or more `tier: "full"` stacks, end the report with one line: "Local ship tests took ~N min: `/ci-setup` would move <stacks> into CI." Say it once per project per session; never run `/ci-setup` without the user's word.

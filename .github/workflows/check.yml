@@ -1,0 +1,220 @@
+name: Check
+
+# kesselrunner's test stacks on every PR (.claude/test-manifest.json marks them
+# `ci: "pr"`, so /pr-create stops running them locally and watches this
+# workflow). Every suite fakes what it drives (codex, claude, pbcopy) in a
+# throwaway HOME, so all of it runs on hosted Linux; the mods stack
+# (`claude plugin test`) stays local.
+#
+# Minutes: free on the public repo, but a private fork bills each job rounded up to the minute.
+# Jobs are path-filtered, and the first job does the cheap things at once:
+# which stacks changed, the worklog check, and on a push to main whether
+# there is anything to re-test. A push to main is the merge of a PR that
+# already passed here; it re-runs the suites only when the merge's tree
+# differs from the PR head's (the PR was behind main), and never the
+# install sandbox.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# paths-filter lists a PR's files through the API.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      scripts: ${{ steps.filter.outputs.scripts }}
+      rollcall: ${{ steps.filter.outputs.rollcall }}
+      supervisor: ${{ steps.filter.outputs.supervisor }}
+      sandbox: ${{ steps.filter.outputs.sandbox }}
+      # Pushes only: 'false' when main's tree is the merged PR head's tree.
+      retest: ${{ steps.skew.outputs.retest || 'true' }}
+    env:
+      BASE_REF: ${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The skew check reads the merge's second parent; the worklog check diffs against the base.
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            scripts:
+              - 'bin/**'
+              - 'lib/**'
+              - 'scripts/**'
+              - 'hooks/**'
+              - 'rules/**'
+              - 'agents/**'
+              - 'migrations/**'
+              - 'packages/*/bin/**'
+              - 'packages/*/src/**'
+              - 'CLAUDE.md'
+              - 'settings.core.json'
+              - 'package.json'
+              - 'CHANGELOG.md'
+              - 'test/**'
+              - '.github/workflows/check.yml'
+            rollcall:
+              - 'packages/rollcall/**'
+              - 'skills/supervisor/SKILL.md'
+              - 'mods/rollcall-band/hooks/register.tsx'
+              - '.github/workflows/check.yml'
+            supervisor:
+              - 'packages/rollcall/**'
+              - 'scripts/supervisor/**'
+              - 'skills/supervisor/SKILL.md'
+              - 'test/supervisor.test.mjs'
+              - '.github/workflows/check.yml'
+            sandbox:
+              # test/sandbox.sh runs a whole install: it links every skill and agent, reads CLAUDE.md, the
+              # rules, the guards, settings.core.json, the mods marketplace and the packages' bins.
+              - 'install.sh'
+              - 'bin/**'
+              - 'lib/**'
+              - 'migrations/**'
+              - 'skills/**'
+              - 'agents/**'
+              - 'rules/**'
+              - 'hooks/**'
+              - 'mods/**'
+              - '.claude-plugin/**'
+              - 'scripts/**'
+              - 'packages/*/bin/**'
+              - 'packages/*/package.json'
+              - 'CLAUDE.md'
+              - 'settings.core.json'
+              - 'package.json'
+              - 'test/sandbox.sh'
+              - '.github/workflows/check.yml'
+      - name: Does main hold a tree a PR already passed with?
+        id: skew
+        if: github.event_name == 'push'
+        run: |
+          # A merge commit whose tree equals its second parent's (the PR head) added nothing to what
+          # the PR's checks ran on. Anything else (a PR behind main, a direct push) is re-tested.
+          if git rev-parse -q --verify 'HEAD^2' >/dev/null \
+             && [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'HEAD^2^{tree}')" ]; then
+            echo "retest=false" >> "$GITHUB_OUTPUT"
+            echo "main's tree is the merged PR head's: its checks already passed on it"
+          else
+            echo "retest=true" >> "$GITHUB_OUTPUT"
+            echo "main's tree differs from the merged PR head's (or this is not a merge): re-testing"
+          fi
+      # /pr-create's worklog entry: a file of its own under docs/worklog/<YYYY-MM>/ (a line in the
+      # older docs/worklog.jsonl counts too). Last, so a missing entry still leaves the filter outputs.
+      - name: Worklog entry
+        # A merge-queue train PR (mq/<n>) carries its members' entries, each checked on its own PR before it joined, and none for its own number.
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'mq/')
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if git diff "origin/$BASE_REF"...HEAD -- docs/worklog docs/worklog.jsonl \
+            | grep -qE "^\+.*\"pr\": *${PR_NUMBER}([^0-9]|\$)"; then
+            echo "The worklog has an entry for PR #${PR_NUMBER}."
+          else
+            echo "::error::No worklog entry for PR #${PR_NUMBER}: add docs/worklog/<YYYY-MM>/<date>-<branch>.json with \"pr\": ${PR_NUMBER} (/pr-create writes it)."
+            exit 1
+          fi
+
+  scripts:
+    name: Scripts
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.scripts == 'true' && (github.event_name != 'push' || needs.changes.outputs.retest == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: git config --global user.name ci && git config --global user.email ci@example.com && git config --global init.defaultBranch main
+      - name: syntax
+        run: for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs; do node --check "$f"; done
+      - name: delegate
+        run: bash test/delegate.sh
+      - name: hooks, ios-sim, copy-helper, rules, release
+        run: node --test test/hooks.test.mjs test/ios-sim.test.mjs test/copy-helper.test.mjs test/rules.test.mjs test/release.test.mjs
+
+  rollcall:
+    name: rollcall
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rollcall == 'true' && (github.event_name != 'push' || needs.changes.outputs.retest == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: git config --global user.name ci && git config --global user.email ci@example.com && git config --global init.defaultBranch main
+      - run: npm test
+        working-directory: packages/rollcall
+
+  supervisor:
+    name: Supervisor
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.supervisor == 'true' && (github.event_name != 'push' || needs.changes.outputs.retest == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # The suite drives workers on a private tmux server; without tmux it skips every test.
+      - run: (command -v tmux || (sudo apt-get update -qq && sudo apt-get install -y -qq tmux)) && tmux -V
+      - run: git config --global user.name ci && git config --global user.email ci@example.com && git config --global init.defaultBranch main
+      - run: node --test test/supervisor.test.mjs
+
+  sandbox:
+    name: Install sandbox
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.changes.outputs.sandbox == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # test/sandbox.sh case 8 installs the commit from before the rename
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: git config --global user.name ci && git config --global user.email ci@example.com && git config --global init.defaultBranch main
+      # The runner has no claude CLI. Without one, every sync warns that it could not register the
+      # docsic MCP server, so the second sync is never "already in sync". This stand-in remembers
+      # `claude mcp add` per HOME and answers `claude mcp get`; any other call fails.
+      - name: Stand-in claude CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/claude" <<'EOF'
+          #!/usr/bin/env bash
+          reg="$HOME/.claude-standin-mcp"
+          [ "${1:-}" = mcp ] || exit 1
+          op=$2; shift 2
+          [ "${1:-}" = --scope ] && shift 2
+          case $op in
+            add) echo "$1" >> "$reg" ;;
+            get) grep -qxF -- "$1" "$reg" 2>/dev/null ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/claude"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: bash test/sandbox.sh

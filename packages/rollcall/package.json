@@ -1,0 +1,44 @@
+{
+  "name": "rollcall",
+  "version": "0.1.0",
+  "description": "Awareness layer for parallel AI coding-agent sessions on one machine: who else is in this repo, shared-checkout edit blocking, file-overlap warnings, main-moved notices, claims, messages, and wait.",
+  "license": "MIT",
+  "author": "eeshankulk1",
+  "homepage": "https://github.com/eeshankulk1/kesselrunner/tree/main/packages/rollcall#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eeshankulk1/kesselrunner.git",
+    "directory": "packages/rollcall"
+  },
+  "bugs": {
+    "url": "https://github.com/eeshankulk1/kesselrunner/issues"
+  },
+  "type": "module",
+  "bin": {
+    "rollcall": "bin/rollcall.mjs",
+    "falcon": "bin/falcon.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs && node --test test/latency.bench.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "agents",
+    "hooks",
+    "git-worktree",
+    "coordination"
+  ]
+}

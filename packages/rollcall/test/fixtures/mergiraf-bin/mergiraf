@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// A fake mergiraf for the merge-queue tests: `solve <file>` keeps both sides of every diff3 conflict
+// (ours, then theirs), the way mergiraf joins two additions it can place, and exits 0; `--version` exits 0.
+import { readFileSync, writeFileSync } from "node:fs";
+
+const [cmd, ...rest] = process.argv.slice(2);
+if (cmd === "--version") process.exit(0);
+if (cmd !== "solve") process.exit(2);
+const file = rest.filter((a) => !a.startsWith("-")).pop();
+const text = readFileSync(file, "utf8");
+const out = text.replace(/^<<<<<<< .*\n([\s\S]*?)^\|\|\|\|\|\|\| .*\n[\s\S]*?^=======\n([\s\S]*?)^>>>>>>> .*\n/gm, "$1$2");
+if (out === text || /^<<<<<<< /m.test(out)) process.exit(1);
+writeFileSync(file, out);

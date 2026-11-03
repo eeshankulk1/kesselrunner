@@ -1,0 +1,9 @@
+{
+  "name": "rollcall-band",
+  "version": "0.1.0",
+  "description": "A line above the prompt: this session's repo, branch and checkout, and the other agent sessions rollcall sees in the repo.",
+  "author": {
+    "name": "kesselrunner"
+  },
+  "types": "./types/index.d.ts"
+}

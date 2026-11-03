@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for mergiraf on PATH, saying it is unavailable (--version fails).
+exit 1

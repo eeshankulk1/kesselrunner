@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+// A fake gh for the merge-queue tests: PRs, their checks and merges, against the sandbox's bare origin
+// (FAKE_GH_ORIGIN), with its state in a JSON file (FAKE_GH_STATE). Like GitHub, a merge marks every other
+// open PR whose head is now in the base branch merged too.
+//   state: { next, prs: [{ number, headRefName, baseRefName, state, title, body, isDraft, mergeCommit, comments }],
+//            ci: [{ name, failIfFiles?: [paths], failIfGrep?: regex, paths?: [pathspecs], pending?: true,
+//                   status?: true (a passing commit status, like an attest's), late?: ms (no check run until that long
+//                   after a head is first viewed), required?: true (branch protection: BLOCKED until it passes) }],
+//            lag?: ms (GitHub behind itself: pr view shows each PR as it stood that long ago, a new PR is not there yet,
+//                 and a merge is refused until the head it names has shown), failView?: text (pr view fails with it),
+//            annotations?: { <job id>: [{ message }] }, reruns: { <run id>: n }, calls: [argv...] }
+// A check fails when every file in failIfFiles exists at the PR's head, or failIfGrep matches there.
+import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const STATE = process.env.FAKE_GH_STATE;
+const ORIGIN = process.env.FAKE_GH_ORIGIN;
+const URL = "https://github.com/t/repo";
+const s = JSON.parse(readFileSync(STATE, "utf8"));
+s.calls ??= [];
+s.reruns ??= {};
+s.seen ??= {};
+s.history ??= {};
+const argv = process.argv.slice(2);
+s.calls.push(argv);
+const save = () => writeFileSync(STATE, JSON.stringify(s, null, 2));
+const git = (...args) => execFileSync("git", ["-C", ORIGIN, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+const gitOk = (...args) => spawnSync("git", ["-C", ORIGIN, ...args], { stdio: "ignore" }).status === 0;
+const die = (msg, code = 1) => { save(); process.stderr.write(`${msg}\n`); process.exit(code); };
+const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
+const has = (name) => argv.includes(name);
+const head = (pr) => (gitOk("rev-parse", "--verify", "-q", `refs/heads/${pr.headRefName}`) ? git("rev-parse", `refs/heads/${pr.headRefName}`) : pr.lastHead ?? null);
+
+function find(ref) {
+  const n = Number(String(ref).replace(/^.*\/pull\//, ""));
+  if (n) return s.prs.find((p) => p.number === n);
+  return s.prs.filter((p) => p.headRefName === ref).sort((a, b) => (a.state === "OPEN") - (b.state === "OPEN") || a.number - b.number).pop();
+}
+
+function checks(pr, sha = head(pr)) {
+  if (!sha) return [];
+  s.seen[sha] ??= Date.now();
+  return (s.ci ?? []).flatMap((c, i) => {
+    if (c.status) return { __typename: "StatusContext", context: c.name, state: "SUCCESS", targetUrl: null };
+    if (c.late && Date.now() - s.seen[sha] < c.late) return [];
+    const run = 100 + i;
+    const link = `${URL}/actions/runs/${run}/job/1`;
+    if (c.pending) return { __typename: "CheckRun", name: c.name, status: "IN_PROGRESS", conclusion: "", detailsUrl: link };
+    const byFiles = Array.isArray(c.failIfFiles) && c.failIfFiles.every((f) => gitOk("cat-file", "-e", `${sha}:${f}`));
+    const byGrep = c.failIfGrep && gitOk("grep", "-q", "-E", c.failIfGrep, sha, "--", ...(c.paths ?? []));
+    return { __typename: "CheckRun", name: c.name, status: "COMPLETED", conclusion: byFiles || byGrep ? "FAILURE" : "SUCCESS", detailsUrl: link };
+  });
+}
+
+const blocked = (pr, sha = head(pr)) => (s.ci ?? []).some((c) => c.required && !checks(pr, sha).some((x) => x.name === c.name && x.conclusion === "SUCCESS"));
+
+/** Every field as it stands now, kept each time it changes: what a view shows is the last one `lag` old. */
+function current(pr) {
+  const sha = head(pr);
+  const all = {
+    number: pr.number, state: pr.state, isDraft: !!pr.isDraft, headRefName: pr.headRefName, headRefOid: sha, baseRefName: pr.baseRefName,
+    url: `${URL}/pull/${pr.number}`, title: pr.title, body: pr.body ?? "", statusCheckRollup: pr.state === "OPEN" ? checks(pr, sha) : [],
+    mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergeStateStatus: blocked(pr, sha) ? "BLOCKED" : "CLEAN",
+  };
+  const seen = (s.history[pr.number] ??= []);
+  if (JSON.stringify(seen.at(-1)?.all) !== JSON.stringify(all)) seen.push({ at: Date.now(), all });
+  return seen;
+}
+
+function view(pr, fields) {
+  const seen = current(pr);
+  const shown = seen.findLast((x) => !s.lag || Date.now() - x.at >= s.lag)?.all ?? seen[0].all;
+  return Object.fromEntries(fields.split(",").map((f) => [f, shown[f]]));
+}
+
+const [group, cmd, ref] = argv;
+if (group === "pr" && cmd === "view") {
+  if (s.failView) die(s.failView);
+  const pr = find(ref);
+  if (!pr || (s.lag && Date.now() - pr.at < s.lag)) die(`no pull requests found for branch "${ref}"`);
+  process.stdout.write(JSON.stringify(view(pr, opt("--json"))));
+} else if (group === "pr" && cmd === "list") {
+  const state = (opt("--state") ?? "open").toUpperCase();
+  process.stdout.write(JSON.stringify(s.prs.filter((p) => state === "ALL" || p.state === state).map((p) => view(p, opt("--json")))));
+} else if (group === "pr" && cmd === "create") {
+  const branch = opt("--head");
+  if (!gitOk("rev-parse", "--verify", "-q", `refs/heads/${branch}`)) die(`head branch "${branch}" not found`);
+  const pr = { number: s.next++, headRefName: branch, baseRefName: opt("--base") ?? "main", state: "OPEN", title: opt("--title") ?? branch, body: opt("--body") ?? "", isDraft: has("--draft"), at: s.lag ? Date.now() : 0 };
+  s.prs.push(pr);
+  process.stdout.write(`${URL}/pull/${pr.number}\n`);
+} else if (group === "pr" && cmd === "merge") {
+  const pr = find(ref);
+  if (!pr || pr.state !== "OPEN") die("pull request is not open");
+  const sha = head(pr);
+  const want = opt("--match-head-commit");
+  if (want && want !== sha) die("head branch was modified");
+  if (s.lag && view(pr, "headRefOid").headRefOid !== sha) die("GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)");
+  if (blocked(pr)) die(`X Pull request t/repo#${pr.number} is not mergeable: the base branch policy prohibits the merge.`);
+  const baseRef = `refs/heads/${pr.baseRefName}`;
+  const base = git("rev-parse", baseRef);
+  const mt = spawnSync("git", ["-C", ORIGIN, "merge-tree", "--write-tree", base, sha], { encoding: "utf8" });
+  if (mt.status !== 0) die("Pull request is not mergeable: the merge commit cannot be cleanly created.");
+  const tree = mt.stdout.split("\n")[0].trim();
+  const parents = has("--squash") ? ["-p", base] : ["-p", base, "-p", sha];
+  const msg = has("--squash") ? `${pr.title} (#${pr.number})` : `Merge pull request #${pr.number} from t/${pr.headRefName}`;
+  const commit = git("commit-tree", tree, ...parents, "-m", msg);
+  git("update-ref", baseRef, commit, base);
+  Object.assign(pr, { state: "MERGED", mergeCommit: commit, lastHead: sha });
+  for (const other of s.prs) {
+    const h = other.state === "OPEN" && other.baseRefName === pr.baseRefName ? head(other) : null;
+    if (h && gitOk("merge-base", "--is-ancestor", h, commit)) Object.assign(other, { state: "MERGED", mergeCommit: commit, lastHead: h });
+  }
+  if (has("--delete-branch")) git("update-ref", "-d", `refs/heads/${pr.headRefName}`);
+} else if (group === "pr" && cmd === "close") {
+  const pr = find(ref);
+  if (!pr) die("no such pull request");
+  pr.lastHead = head(pr);
+  pr.state = "CLOSED";
+  if (has("--delete-branch") && gitOk("rev-parse", "--verify", "-q", `refs/heads/${pr.headRefName}`)) git("update-ref", "-d", `refs/heads/${pr.headRefName}`);
+} else if (group === "pr" && cmd === "comment") {
+  const pr = find(ref);
+  if (!pr) die("no such pull request");
+  (pr.comments ??= []).push(opt("--body") ?? "");
+} else if (group === "api" && /\/check-runs\/(\d+)\/annotations$/.test(cmd)) {
+  process.stdout.write(JSON.stringify(s.annotations?.[/\/check-runs\/(\d+)\//.exec(cmd)[1]] ?? []));
+} else if (group === "run" && cmd === "rerun") {
+  s.reruns[ref] = (s.reruns[ref] ?? 0) + 1;
+} else {
+  die(`fake gh: unsupported: ${argv.join(" ")}`, 2);
+}
+save();

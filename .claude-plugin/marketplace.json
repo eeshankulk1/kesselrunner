@@ -1,0 +1,24 @@
+{
+  "name": "kesselrunner",
+  "owner": { "name": "kesselrunner" },
+  "metadata": {
+    "description": "The mods that ship with kesselrunner, and third-party mods pinned to a commit that was read before it was listed."
+  },
+  "plugins": [
+    {
+      "name": "rollcall-band",
+      "source": "./mods/rollcall-band",
+      "description": "A line above the prompt: this session's repo, branch and checkout, and the other agent sessions rollcall sees in the repo."
+    },
+    {
+      "name": "pr-band",
+      "source": "./mods/pr-band",
+      "description": "A line above the prompt for the pull request this session is shipping: checks, merge state, and after the merge what it deployed."
+    },
+    {
+      "name": "clickable",
+      "source": "./mods/clickable",
+      "description": "Click to copy a code block, and click to open a path, in the classic terminal view."
+    }
+  ]
+}
