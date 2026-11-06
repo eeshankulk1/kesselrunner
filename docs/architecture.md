@@ -7,11 +7,11 @@ kesselrunner is a Claude Code setup in one repo: global instructions, skills, ag
 | Part | What it does | Where |
 |---|---|---|
 | Instructions | The rules every session follows: worktrees, build phase and ship phase, docs, delegation | `CLAUDE.md`, applied into `~/.claude/CLAUDE.md` |
-| Supervisor (the Falcon) | One session you talk to; a worker per task in its own worktree and tmux tab | `skills/supervisor/`, `scripts/supervisor/`, `falcon` in `packages/rollcall/` |
-| rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
+| Supervisor (the Falcon) | One session you talk to (on Claude Code); a worker per task in its own worktree and tmux tab, on Claude Code or Codex | `skills/supervisor/`, `scripts/supervisor/`, `falcon` in `packages/rollcall/` |
+| rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble, the harness layer that runs a worker on either agent CLI, and the usage meter | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
 | Ship chain | `/pr-create` and the skills and agents it calls: checks, review, docs, PR, CI watch, landing, release steps | `skills/`, `agents/` |
 | Memory | Project state and notes, loaded into each session | [docsic](https://github.com/eeshankulk1/docsic), installed and wired up by sync |
-| Codex bridge | The same setup in OpenAI Codex, and the helper agents on a Codex plan | `scripts/codex-bridge/`, `scripts/delegate/` ([codex-parity.md](codex-parity.md)) |
+| Codex bridge | The same setup in OpenAI Codex, Codex workers for the Falcon, and the helper agents on a Codex plan | `scripts/codex-bridge/`, `packages/rollcall/src/harness/` and `src/codex/`, `scripts/delegate/` ([codex-parity.md](codex-parity.md)) |
 | Overlay | Your personal layer on top of the core | a folder of yours ([overlay.md](overlay.md)) |
 
 Why it is built this way: [principles.md](principles.md). Everything you type: [commands.md](commands.md).
@@ -52,7 +52,13 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 
 ### How a worker starts
 
-`scripts/supervisor/start.mjs` starts a task's worker in a tmux window of its supervisor's session (`sv-<name>` on rollcall's own tmux server), in the task's worktree and the supervisor's permission mode, with a session id fixed at launch and the hooks of a launch settings file. Workers run on the task's model and effort, else the harness's (core `settings.core.json` merged with the overlay's `settings.json`), never what `/model` saved. The first prompt comes from the task record: your words verbatim, stamped in local time, plus the worker contract (report before every finish, screenshots for visible changes in the task's files folder, subagents hand back before 35% context); a discussion task has its own. `--fresh` replaces a worker that outgrew its session and hands the new one the notes and branch state. `--resume "<why>"` brings a stopped worker back in its window with its conversation; on a landed or closed task the worker answers with a `reply:` note, which the supervisor passes on. A worktree that gc removed is added again at its old path.
+`scripts/supervisor/start.mjs` starts a task's worker in a tmux window of its supervisor's session (`sv-<name>` on rollcall's own tmux server), in the task's worktree and the supervisor's permission mode. A Claude Code worker gets a session id fixed at launch and the hooks of a launch settings file; a Codex worker is set out below. Claude Code workers run on the task's model and effort, else the harness's (core `settings.core.json` merged with the overlay's `settings.json`), never what `/model` saved. The first prompt comes from the task record: your words verbatim, stamped in local time, plus the worker contract (report before every finish, screenshots for visible changes in the task's files folder, subagents hand back before 35% context); a discussion task has its own. `--fresh` replaces a worker that outgrew its session and hands the new one the notes and branch state. `--resume "<why>"` brings a stopped worker back in its window with its conversation; on a landed or closed task the worker answers with a `reply:` note, which the supervisor passes on. A worktree that gc removed is added again at its old path.
+
+### Harnesses and the usage meter
+
+Each task records the agent CLI its workers run on: `claude` or `codex` (`rollcall task new --harness`, else `ROLLCALL_WORKER_HARNESS` in settings `env`, else Claude Code), and `rollcall task move <id> --harness <h>` moves it, with a fresh worker on the other side. rollcall keeps one module per CLI behind one shape in `packages/rollcall/src/harness/` (launch, trust, words in, interrupt, transcript, models, the question tool's name); the Claude Code module is the old behavior, unchanged. A Codex worker is one process in the task's window (`rollcall codex-worker`, `src/codex/`): its own `codex app-server`, the task's thread, and Codex's own terminal UI attached to that server for you to watch and type into. Codex's protocol events stand in for Claude Code's hooks, and rollcall's words go in through the protocol rather than as keys. The supervisor itself stays on Claude Code. Details and gaps: [codex-parity.md](codex-parity.md#codex-as-a-falcon-worker).
+
+The usage meter (`src/usage.mjs`, `~/.rollcall/usage-claude.json` and `usage-codex.json`) records how much of each plan's limits is used: Claude's from Claude Code's status line, Codex's from its app server. `rollcall usage`, `task list` and the supervisor's status line show it. When one plan nears its limit and the other has room, the supervisor asks you whether to move the tasks that wait on the full one; rollcall never moves one by itself.
 
 ## Mods
 
@@ -82,7 +88,7 @@ To turn a mod off on one machine, set it to `false` under `enabledPlugins` in `~
 | [principles.md](principles.md) | Why it works the way it does |
 | [commands.md](commands.md) | Every command and setting a person types |
 | [overlay.md](overlay.md) | The personal layer, guards, optional rules, what sync changes in `~/.claude` |
-| [codex-parity.md](codex-parity.md) | The Codex bridge and running the helper agents on Codex |
+| [codex-parity.md](codex-parity.md) | The Codex bridge, Codex workers for the Falcon (and what they lack), and running the helper agents on Codex |
 | [project-docs.md](project-docs.md) | The docs standard the agents keep in each project repo |
 | [test-manifest.md](test-manifest.md) | The `.claude/test-manifest.json` schema test tooling reads |
 | [templates/](templates/) | Starting points for a project's docs |

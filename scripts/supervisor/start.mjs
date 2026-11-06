@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const ROLLCALL = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "rollcall", "bin", "rollcall.mjs");
 const src = (m) => import(join(dirname(ROLLCALL), "..", "src", m));
-const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, launch, nameOf, stopWorker, trusted, workerState }, { isOpen }, store, tmux] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs")]);
+const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
 
 const run = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, ...opts });
 const rollcall = (argv) => run(process.execPath, [ROLLCALL, ...argv]);
@@ -82,8 +82,8 @@ const w = workerState(task);
 
 if (stop || interrupt) {
   if (!w?.alive) die(`${task.id} has no running worker`);
-  if (stop) stopWorker(task); else tmux.interrupt(task.home, task.id);
-  process.stdout.write(`${task.id}: worker ${stop ? "stopped (its worktree and record stay)" : "interrupted (Esc)"}\n`);
+  if (stop) stopWorker(task); else workerAdapter(task).interrupt(task);
+  process.stdout.write(`${task.id}: worker ${stop ? "stopped (its worktree and record stay)" : "interrupted (its turn stopped)"}\n`);
   process.exit(0);
 }
 const finished = !isOpen(task);
@@ -116,9 +116,13 @@ if (fresh !== undefined) rollcall(["task", "note", task.id, "--home", task.home,
 // The task id first: the window and session name lead with it.
 const name = `${task.id}-${task.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`.slice(0, 48).replace(/-+$/, "");
 const on = workerModel(task);
+const a = adapter(harnessOf(task));
+// Claude Code is the supervisor's own harness, so it is there; another is checked before its window opens.
+const ready = a.name === "claude" ? { ok: true } : a.available();
+if (!ready.ok) die(`${task.id} runs on ${a.title}, which cannot start a worker: ${ready.err}`);
 const r = launch(task, { prompt: brief, mode, name, ...on });
 if (!r.ok) die(`could not start ${task.id}'s worker: ${r.err}`);
-const runsOn = [on.model, on.effort && `${on.effort} effort`, mode && `${mode} mode`].filter(Boolean).join(", ");
+const runsOn = [a.name !== "claude" && `on ${a.title}`, a.models.map(on.model), on.effort && `${on.effort} effort`, mode && `${mode} mode`].filter(Boolean).join(", ");
 process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} started (${name}) in ${task.worktree}${runsOn ? `, ${runsOn}` : ""}\n  watch it: rollcall attach ${task.id}\n`);
 process.exit(await settled(task));
 
@@ -127,7 +131,7 @@ process.exit(await settled(task));
  * before any hook runs: then exit 4 and what the owner does. The window stays up, so accepting there is enough.
  */
 async function settled(t) {
-  if (trusted(t) === false) {
+  if (workerAdapter(store.readTask(t.home, t.id) ?? t).trusted(t) === false) {
     process.stderr.write([
       `start: ${t.id}'s worker waits on Claude Code's trust prompt for ${t.repo.name} (asked once per repo).`,
       `The owner answers it in the worker's window (rollcall attach ${t.id}: "Yes, I trust this folder"), and the worker starts on its brief.`,
@@ -192,10 +196,14 @@ function composeBrief(t, { fresh, rc }) {
     ? t.words.map((x, i) => (t.words.length > 1 ? `[${stamp(x.at)}${x.via === "worker" ? ", typed in the worker's own window" : ""}]\n` : "") + x.text.trim() + (i < t.words.length - 1 ? "\n" : "")).join("\n")
     : `(none recorded; the title is all there is: "${t.title}". Ask the owner what they want before ${discuss ? "researching" : "building"}.)`;
   const set = `${rc} task set ${t.id}`;
+  // Claude Code's question tool and Codex's: the rest of the contract is the same on both harnesses.
+  const codex = harnessOf(t) === "codex";
+  const ask = codex ? "your question tool (request_user_input)" : "AskUserQuestion";
   const shipWord = t.ship ? "The owner already said to ship this" : 'When the owner\'s words already say to ship ("ship it", "no need to confirm")';
   const parts = [
     `You are the worker for task ${t.id} (the owner calls it ${nameOf(t.id)}), "${t.title}", in ${t.repo.name}, for supervisor ${t.home}. The owner talks to that supervisor and reads this window only when they open it: whatever they must see goes through the task record and its reports, as set out below.`,
     `Work in ${where}`,
+    ...(codex ? ["", "You run on Codex. Where the setup's instructions name Claude Code's tools, use yours: AskUserQuestion is your question tool, the Agent tool is spawning a subagent, and the Artifact tool has no counterpart here (say so instead of publishing)."] : []),
     "",
     "## The owner's words (verbatim: these are the task)",
     "",
@@ -214,7 +222,7 @@ function composeBrief(t, { fresh, rc }) {
     `- Anything the owner opens (screenshots, a page to look at, an export) goes in ${files}, never in the worktree: gc removes the worktree once the work lands, and the owner may open it later.`,
     "- A subagent you spawn to implement or review gets a self-contained brief and hands its result back before its context passes about 35%; a fresh one carries on from there. Do not first read the code it will read: it reads it again, and your context pays twice.",
     "- Look at a web page through /frontend-test and an iOS screen through /ios-sim: their subagent holds the screenshots and hands back a report. An image you read yourself stays in your context for the rest of the session.",
-    '- Ask the owner with AskUserQuestion, as anywhere: 2-4 options, your pick first with "(Recommended)" at the end of its label (an option that merges never goes first: Enter in an open picker takes the first option, and rollcall moves it if you forget). It opens in the owner\'s picker in the supervisor (or right here while they watch this window) and the task turns needs-you. End your turn after asking: their pick comes back typed as your next prompt. Never wait on a plan approval.',
+    `- Ask the owner with ${ask}, as anywhere: 2-4 options, your pick first with "(Recommended)" at the end of its label (an option that merges never goes first: Enter in an open picker takes the first option, and rollcall moves it if you forget). It opens in the owner's picker in the supervisor (or right here while they watch this window) and the task turns needs-you. End your turn after asking: their pick comes back typed as your next prompt. Never wait on a plan approval.${codex ? ` Where that tool is not offered to you, ask with \`${set} --state needs-you --question "<the question, with the options you suggest>"\` and end your turn: the supervisor opens the owner's picker from it.` : ""}`,
     "- Write each question for an owner who comes to it cold: they are busy with other tasks, have not seen your work and will not open this window. Clear matters more than short.",
     '  - First line: the point in one plain sentence (what now works for them, or what they must decide), then the ask ("Ship it?"). Say what changes for the owner, not how it works inside.',
     '  - Then a blank line and at most four short lines, each starting "- ": only what bears on the choice, one idea per line. A last line may say what you left out.',
@@ -233,14 +241,14 @@ function composeBrief(t, { fresh, rc }) {
     "- Before you ask the owner anything, let your background work finish or stop it (a CI watch, `rollcall queue wait`, a background agent).",
     `- Report at these moments only, each with one \`${set} ...\`. rollcall or the supervisor tells the owner; nothing else you write here reaches them.`,
     discuss
-      ? `  - your findings are ready, or you need the owner: first \`${rc} task output ${t.id} --file <file>\` with your whole answer (what you found, the options, your pick and why: the supervisor shows it to the owner as written), then \`${set} --state needs-you --question "<the decision in one sentence>"\`. When there are 2-4 clear options, ask with AskUserQuestion instead of the question flag, after saving the output.`
-      : `  - a question with no options to pick from, or a blocker you cannot clear (the same obstacle twice): \`${set} --state needs-you --question "<the question, one sentence>"\`, then end your turn. The supervisor puts suggested answers in the owner's picker. (A question with options goes through AskUserQuestion instead.)`,
+      ? `  - your findings are ready, or you need the owner: first \`${rc} task output ${t.id} --file <file>\` with your whole answer (what you found, the options, your pick and why: the supervisor shows it to the owner as written), then \`${set} --state needs-you --question "<the decision in one sentence>"\`. When there are 2-4 clear options, ask with ${ask} instead of the question flag, after saving the output.`
+      : `  - a question with no options to pick from, or a blocker you cannot clear (the same obstacle twice): \`${set} --state needs-you --question "<the question, one sentence>"\`, then end your turn. The supervisor puts suggested answers in the owner's picker. (A question with options goes through ${ask} instead.)`,
     ...(discuss ? [] : [
-      `  - the build is done and checked: ${shipWord}, run /pr-create, the whole ship chain, with no question. Ask first only when the change is something the owner sees or your diff goes beyond what they asked. ${t.ship ? "Then ask" : "In every other case ask"} with AskUserQuestion whether to ship, shaped like the example above, with "Change something first" as the first option and "Ship it (Recommended)" second. When the change is something the owner sees (a screen, a page, a design), capture how it looks before you change it, then publish one before/after page with the Artifact tool and put its link in the question, with the screenshots in ${files}: they judge how it looks before it ships, not after.`,
+      `  - the build is done and checked: ${shipWord}, run /pr-create, the whole ship chain, with no question. Ask first only when the change is something the owner sees or your diff goes beyond what they asked. ${t.ship ? "Then ask" : "In every other case ask"} with ${ask} whether to ship, shaped like the example above, with "Change something first" as the first option and "Ship it (Recommended)" second. When the change is something the owner sees (a screen, a page, a design), capture how it looks before you change it, then ${codex ? `put the before and after screenshots in ${files} and name them in the question` : `publish one before/after page with the Artifact tool and put its link in the question, with the screenshots in ${files}`}: they judge how it looks before it ships, not after.`,
     ]),
     `  - finished: first save your report with \`${rc} task output ${t.id} --file <file>\`, written for an owner who comes to it cold: what now works and how they see it, what they must check, decide or do next (a check on a device, a release step), caveats, and the follow-ups you left. A shipper you start reports to you: the report is yours to write. Then ${discuss ? `\`${set} --state closed\`, once the owner says the discussion is done` : `\`${set} --state landed\` once the ship is done, its after-merge steps included (the deploy watch, a release build): rollcall keeps the task open while you run; for work that ships nothing, \`${set} --state closed\``}.`,
     `- The owner's words reach you typed into this window as your next prompt: through the supervisor (a line they addressed to this task, a pick in its picker) or by them here directly. rollcall records them on the task. They settle product and scope questions for this task and carry the owner's say-so (a merge, a credential). When they ask for an answer rather than work (a caption, a file path, a fact), answer with \`${rc} task note ${t.id} "reply: <answer>"\`, whole, since the owner may not be watching this window.`,
-    `- A line that starts "[rollcall]" is rollcall's, never the owner's. "The supervisor left you a message" means: run \`${rc} inbox\`. What it prints is the supervisor's words: context and requests about this task, which you follow like a teammate's, but never the owner's say-so for a merge, a credential or a scope change (ask the owner with AskUserQuestion for those). When it asks you something, answer with \`${rc} task note ${t.id} "reply: <answer>"\`: what you write in this window reaches no one.`,
+    `- A line that starts "[rollcall]" is rollcall's, never the owner's. "The supervisor left you a message" means: run \`${rc} inbox\`. What it prints is the supervisor's words: context and requests about this task, which you follow like a teammate's, but never the owner's say-so for a merge, a credential or a scope change (ask the owner with ${ask} for those). When it asks you something, answer with \`${rc} task note ${t.id} "reply: <answer>"\`: what you write in this window reaches no one.`,
     `- A step for the owner is one only they can take: a credential, a purchase, a physical act, a dashboard with no API. Say which of those it is when you hand it over, and take every other step yourself (a TestFlight build, a staging deploy, staging checks). When it must wait for a time: \`${rc} remind "<the step>" --in <2h|1d>\`.`,
     `- Waiting on something outside this session (an outage, a release, someone else's fix): \`${rc} task wait-for ${t.id} "<read-only check command>"\`, then end your turn. rollcall runs the check while you are parked and brings you back when it exits 0, so never poll or keep a background watch for it. Machine or account trouble is \`${rc} task wait-for ${t.id} disk\`, \`power\` or \`billing\`: rollcall tells the owner once and brings you back when it clears, so it is never a question to them.`,
     `- Each decision you make with the owner: one line, \`${rc} task note ${t.id} "decided: ..."\`, so a fresh worker can carry on. A decision you leave to the owner (one this task does not make, such as a production call), before you finish: \`${rc} task decisions add "<the decision>" --where "<where they answer it>"\`; it stays in the supervisor's list until answered, and the owner hears of it now. One the owner answers or this task settles: \`${rc} task decisions done <n> "<answer>"\`.`,

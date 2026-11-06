@@ -146,7 +146,7 @@ jobs:
           node-version: "24"
       - run: git config --global user.name ci && git config --global user.email ci@example.com && git config --global init.defaultBranch main
       - name: syntax
-        run: for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs; do node --check "$f"; done
+        run: for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs packages/*/src/*/*.mjs; do node --check "$f"; done
       - name: delegate
         run: bash test/delegate.sh
       - name: hooks, ios-sim, copy-helper, rules, release
