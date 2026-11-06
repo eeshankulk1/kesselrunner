@@ -28,7 +28,7 @@ export const INTERFACE = 1;
 let tmuxThere = null;
 const tmuxAvailable = () => (tmuxThere ??= tmux.available());
 
-const VERSION = (() => { try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version; } catch { return null; } })();
+export const VERSION = (() => { try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version; } catch { return null; } })();
 
 export const USAGE = `  rollcall api version | snapshot [--home <h>] | stream [--home <h>] [--client <name>] [--notifies]
               | do <action> [<json> | -] | attach <home>[:<task>] [--client <name>] [--resume]

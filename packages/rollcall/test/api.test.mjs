@@ -181,6 +181,21 @@ test("first answer wins: a Falcon pick after a front end's answer is dropped, an
   assert.equal(record(sb).words.length, after.words.length);
 });
 
+test("two question.answer calls at once settle to one winner", async (t) => {
+  const { sb, sup } = setup(t);
+  const q = ask(sb, sup);
+  const run = (answer, client) => new Promise((res) => {
+    const c = spawn(process.execPath, [BIN, "api", "do", "question.answer", JSON.stringify({ task: "alpha:t1", question: q.id, answer, client })], { cwd: sb.root, env: sb.env });
+    let out = "";
+    c.stdout.on("data", (d) => { out += d; });
+    c.on("close", () => res(JSON.parse(out)));
+  });
+  const results = await Promise.all([run("Bold", "mac"), run("Subtitle", "ios")]);
+  assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+  assert.deepEqual(results.filter((r) => !r.ok).map((r) => r.error.code), ["already-answered"]);
+  assert.equal(record(sb).words.length, 2, "the task's words and one answer");
+});
+
 // ---------------------------------------------------------------- changes()
 
 const SEC = { sessions: [], queues: [], blockers: [], decisions: [], usage: null, clients: [] };
@@ -330,6 +345,7 @@ test("api do acts as the owner only: refused with a task in the environment or f
   const hook = sup.bashPre(`rollcall api do task.tell '${payload}'`);
   assert.ok(denied(hook), hook.stdout);
   assert.match(reason(hook), /rollcall api do/);
+  assert.ok(denied(sup.bashPre(`rollcall api "do" task.tell '${payload}'`)), "quoting the verb does not get around it");
   assert.ok(!denied(sup.bashPre("rollcall api snapshot")));
   assert.ok(!denied(sup.bashPre("rollcall api stream --client x")));
 });

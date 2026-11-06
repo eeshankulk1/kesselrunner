@@ -228,7 +228,7 @@ const HOME_PATH = /\.rollcall\b|_supervisors\b|\bROLLCALL_HOME\b/;
 const RELAY = /\btask\s+relay\b/;
 // The front-end interface's actions (api.mjs) act as the owner: their words reach a worker as the owner's own. A
 // front end is no agent session, so an agent's shell never runs them (api-cli.mjs refuses them there too).
-const API_DO = /\bapi\s+do\b/;
+const API_DO = /\bapi[\s'\"\\]+do\b/;
 
 function saidDenial(cmd) {
   if (SAID_FILE.test(cmd) && HOME_PATH.test(cmd)) {

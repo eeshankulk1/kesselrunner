@@ -2,7 +2,7 @@
 // prints { ok: false, error: { code, message } } and exits 1 (2 for a usage error), so a front end reads one shape.
 import { readFileSync } from "node:fs";
 import { ACTIONS, COMING, runAction } from "./api-actions.mjs";
-import { INTERFACE, USAGE, attachInfo, snapshot } from "./api.mjs";
+import { INTERFACE, USAGE, VERSION, attachInfo, snapshot } from "./api.mjs";
 import { stream } from "./api-stream.mjs";
 import { taskEnv } from "./supervisor.mjs";
 
@@ -10,14 +10,24 @@ const VERBS = ["version", "snapshot", "stream", "do", "attach"];
 
 /** `ctx`: the CLI's { say, whoAmI }. Returns the exit code. */
 export async function apiCommand(args, ctx) {
-  const [verb, ...rest] = args;
   const json = (o) => ctx.say(JSON.stringify(o, null, 2));
+  try {
+    return await run(args, ctx, json);
+  } catch (e) {
+    // A front end reads one shape, never a stack trace.
+    json({ ok: false, error: { code: "failed", message: String(e?.message ?? e) } });
+    return 1;
+  }
+}
+
+async function run(args, ctx, json) {
+  const [verb, ...rest] = args;
   const error = (code, message, exit = 1) => { json({ ok: false, error: { code, message } }); return exit; };
   const opt = (name) => { const i = rest.indexOf(name); if (i < 0) return undefined; const v = rest[i + 1]; rest.splice(i, 2); return v; };
   const has = (name) => { const i = rest.indexOf(name); if (i >= 0) rest.splice(i, 1); return i >= 0; };
   switch (verb) {
     case "version":
-      json({ ok: true, interface: INTERFACE, rollcall: snapshot({ home: "\0" }).rollcall, verbs: VERBS, actions: Object.fromEntries(Object.entries(ACTIONS).map(([k, a]) => [k, a.cli])), coming: COMING });
+      json({ ok: true, interface: INTERFACE, rollcall: VERSION, verbs: VERBS, actions: Object.fromEntries(Object.entries(ACTIONS).map(([k, a]) => [k, a.cli])), coming: COMING });
       return 0;
     case "snapshot":
       ctx.say(JSON.stringify(snapshot({ home: opt("--home") ?? null })));
