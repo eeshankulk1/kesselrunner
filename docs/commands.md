@@ -65,6 +65,15 @@ The commands a person types. The full list, and what each session sees, is in [r
 |---|---|
 | `rollcall status [--json] [--all]` | The other live sessions in this repo: branch, checkout, claim, edited files |
 | `rollcall task list` / `rollcall task show <id>` | A supervisor's open tasks, or one task whole: your words, notes, worker sessions, last report |
+| `rollcall task new [title] --issue <n\|url>` / `--pr <n\|url>` / `--branch <name>` | A task from a GitHub issue (title, body and link become its first words; its PR says `Closes #N`), from an open same-repo PR (its branch checked out as is; the worker pushes to it and opens no new PR; forks are refused), or from an existing local or origin branch. They take no `--worktree`, `--no-worktree` or `--no-repo`; `--pr` and `--branch` take no `--base` |
+| `rollcall ports [--json]` | This checkout's block of 10 consecutive ports (41000-48999), handed out on first ask and given back when gc removes the worktree or the task is archived. The main checkout uses the manifest's `ports.default` |
+| `rollcall manifest [--json]` | The test manifest with this checkout's ports filled in for `{port}` and `{port+N}` ([test-manifest.md](test-manifest.md)) |
+| `rollcall setup [--rerun] [--wait] [--json]` | How this worktree's setup went: `task new` copies the gitignored files `.worktreeinclude` names, then runs the manifest's `worktree.setup`, in the background with no stdin, a log and a 30-minute limit, before the worker's first turn. `--rerun` runs it again, `--wait` waits for one that runs. `rollcall task setup <id> ...` does the same for a task |
+| `rollcall run [list]` / `run start\|stop\|restart <name\|all>` / `run log <name>` | The checkout's run actions (the manifest's `run`; else `dev` from `devServer.command` and `backend` from `backend.startCommand`). Each runs as its own process group with a log, survives a parked worker, and stops on archive and gc. A running action's `url` is a preview link in `task show`. `rollcall task run <id> ...` does the same for a task |
+| `rollcall serving <port\|url>` | Which checkout serves a port. Exit 0: this one. Exit 1: another (it names the task). Exit 2: nothing listens. A browser or live-API check trusts a result only after exit 0 |
+| `rollcall task spotlight <id> [--off [--force] \| --sync]` | For what can run from one place only (a fixed iOS bundle, an OAuth callback on one URL): the main checkout moves, detached, to a snapshot of the task's files (tracked changes and untracked files, not gitignored) and follows them while the supervisor's watcher runs. One task per repo; refused while the main checkout has changes of its own. `--off` puts it back on its branch with its files byte-identical; gc ends a spotlight before removing the worktree. Yours or the supervisor's, never a worker's |
+| `rollcall task archive <id> [--yes]` | Free a task's worktree folder and ports without losing work. Without `--yes` it prints what goes (folder, size freed, uncommitted files, run actions, ports) and changes nothing. With `--yes` it stops the worker and run actions, saves uncommitted work (untracked too, not gitignored) to `refs/rollcall/archive/<home>/<id>` (never pushed), runs teardown and removes the worktree; the record and conversation stay. Yours or the supervisor's, never a worker's |
+| `rollcall task restore <id>` | The worktree back at its old path on its branch, the saved work applied as uncommitted changes (staged comes back unstaged), a note if origin's branch moved (it never rebases), the ref dropped, setup run again, the worker resumed |
 | `rollcall queue status` | Who is landing now, and who touches your files |
 | `rollcall allow-main [--off]` | Let agents edit this repo's main checkout, shared by every session (for example a notes repo that commits straight to main) |
 | `rollcall allow-shared` | Let a session edit, and run checkout-changing git in, a checkout another session is using, on purpose |
@@ -79,6 +88,8 @@ The hooks keep agents in task worktrees: an edit in a repo's main checkout is de
 |---|---|
 | `ROLLCALL_MAIN_EDITS=allow` | Lift the main-checkout rule everywhere |
 | `ROLLCALL_GC=0` | Stop the background gc |
+| `ROLLCALL_PORT_MIN` / `_MAX` / `_BLOCK` | The range port blocks come from (41000-48999) and a block's size (10) |
+| `ROLLCALL_SETUP_MINUTES` | Time limit of a worktree's setup (30) |
 | `ROLLCALL_AWAKE=0` | Stop the `caffeinate` hold |
 | `ROLLCALL_DISABLE=1` | Turn rollcall's hooks into no-ops (shell or settings `env`) |
 

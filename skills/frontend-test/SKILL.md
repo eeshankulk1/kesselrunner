@@ -10,7 +10,7 @@ Validates that frontend changes work the way a user will experience them. This s
 
 ## Phase 1: Scope the blast radius
 
-Read `.claude/test-manifest.json` if it exists (schema: kesselrunner docs/test-manifest.md) - it supplies dev server command/port, auth bypass env, key routes, and skip routes. No manifest: detect these the hard way (package.json scripts, next/vite config, grep for auth providers) and **write the manifest before finishing** so the next run skips this.
+Read the manifest if it exists (schema: kesselrunner docs/test-manifest.md): `rollcall manifest --json` gives it with this checkout's own ports filled in, and where rollcall is absent read `.claude/test-manifest.json` itself. It supplies dev server command/port, auth bypass env, key routes, and skip routes. No manifest: detect these the hard way (package.json scripts, next/vite config, grep for auth providers) and **write the manifest before finishing** so the next run skips this.
 
 From the argument + `git diff --name-only HEAD` (and `git status --short`), map changed files to routes:
 
@@ -44,7 +44,7 @@ Spawn **frontend-tester** (see "Delegation" in the global instructions) with eve
 
 - the checklist from Phase 1 and tier from Phase 2
 - change summary (so golden paths and edge cases are grounded in what changed)
-- base URL + dev server start command + port, and whether a server may already be running
+- base URL + dev server start command + port (from `rollcall manifest --json`), and whether a server may already be running. Tell it to start the task's own server with `rollcall run start <name>` when none runs, and to trust a result only after `rollcall serving <port>` exits 0; on exit 1 another checkout serves that port and it must not reuse it
 - auth: the storage-state file path (absolute), or the bypass env var name (if any)
 - artifact dir: `.claude/artifacts/frontend-test/<ISO-timestamp>/`
 - anything unusual from the manifest's `notes`

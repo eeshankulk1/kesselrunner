@@ -60,6 +60,8 @@ Also flag tests that assert nothing meaningful and suites hitting real external 
 
 Everything in Mode 1, plus validate the change itself using the manifest's `backend`/`devServer` entries (base URL, start command, seed/reset commands) instead of guessing:
 
+Ports and URLs come from `rollcall manifest --json` (this checkout's own ports filled in; where rollcall is absent, the raw manifest). If the server is not running, start the task's own with `rollcall run start <name>` (`dev`, `backend`, or the manifest's `run` names). Before you trust a live-API result, `rollcall serving <port>` must exit 0 for the port you called. On exit 1 another checkout serves it: never reuse that server, and start your own on your own port or report the check as blocked.
+
 - **API changes:** hit the endpoints (curl/httpx) - happy path, error cases, edge inputs (empty, missing fields, unauthorized). Response shapes match the contract; error format consistent. Run `seedCommand` first if deterministic data matters; `resetCommand` after if it exists.
 - **DB changes:** migrations applied, constraints and indexes present.
 - **Frontend changes:** `buildCommand` (or `npm run build`) passes, no type errors. Browser-level verification is /frontend-test's job, not yours.
