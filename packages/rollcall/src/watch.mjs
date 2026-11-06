@@ -808,6 +808,9 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
         `Its worker reads the result before it starts work; tell it with \`rollcall task tell ${t.id} "<text>"\` if you change something. One line to the owner when it needs them.`;
     } else if (e.kind === "spotlight" && isOpen(t)) {
       line = `${label(t)}: the main checkout no longer follows it in the spotlight: ${e.err}. \`rollcall task spotlight ${t.id} --off\` ends the spotlight (it refuses while the main checkout has changes of its own). One line to the owner.`;
+    } else if (e.kind === "answered-elsewhere") {
+      // answer.mjs closed the Falcon's picker (Esc) once a front end answered every question in it.
+      line = `${label(t)}: the owner answered its question from ${e.by ?? "a front end"} ("${store.clip(store.oneLine(t.answered?.answer ?? ""), 200)}"), and it went to its worker, so rollcall closed your picker for it. Do not ask it again.`;
     } else if (e.kind === "hooks-untrusted" && isOpen(t)) {
       line = `${label(t)} runs on Codex, where ${e.count} of the owner's hooks are not trusted yet, so they do not run on its tool calls (the owner's guards and rollcall's checkout checks among them). Tell the owner in one line: it is their one step, once, in its window (/attach ${t.id}: "Review hooks", then trust all) or in Codex's /hooks.`;
     } else if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) {

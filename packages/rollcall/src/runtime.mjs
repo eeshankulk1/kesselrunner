@@ -10,21 +10,20 @@
 //   _runtime/<key>/actions/<name>.json     a run action that was started: { pid, start, at, command, dir, url, log }
 //   _runtime/<key>/actions/<name>.log      its output
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { uptime } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
-import { defaultBranch, gitSync, locate, mainCheckout } from "./git.mjs";
-import { pidAlive, startOf } from "./proc.mjs";
+import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { gitSync, locate, mainCheckout } from "./git.mjs";
+import { startOf } from "./proc.mjs";
 import * as store from "./store.mjs";
 import {
-  checkoutEnv, factsOf, fillPorts, launchLines, manifestOf, num, portRange, portsPath, q, readBlocks, readJson, real, runtimeDir,
-  runtimeRoot, setupLog, setupPath, setupState, spotDir, spotlightOf, spotlightPath, usesPorts,
+  actionState, actionsDir, factsOf, fillPorts, groupAlive, inside, lastLines, manifestOf, num, portRange, portsPath, readBlocks, readJson,
+  real, runtimeDir, setupLog, setupPath, spotlightPath, usesPorts,
 } from "./checkout.mjs";
 
 // The read-only half lives in checkout.mjs, light enough for every hook; its names are this module's too.
 export {
-  allSpotlights, checkoutEnv, factsOf, fillPorts, heldPorts, keyOf, launchLines, manifestOf, portRange, runtimeDir, runtimeRoot, setupLog,
-  setupState, spotlightOf, spotlightPath,
+  actionsOf, actionState, allSpotlights, checkoutEnv, factsOf, fillPorts, heldPorts, inside, keyOf, lastLines, launchLines, listActions, manifestOf,
+  portRange, runtimeDir, runtimeLines, runtimeOf, runtimeRoot, setupLine, setupLog, setupState, spotlightOf, spotlightPath,
 } from "./checkout.mjs";
 
 const writeJson = (p, v) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(`${p}.${process.pid}.tmp`, JSON.stringify(v)); renameSync(`${p}.${process.pid}.tmp`, p); };
@@ -214,74 +213,9 @@ export function runSetup(top, { copyOnly = false, env = {}, onFail = () => {} } 
   return s;
 }
 
-/** The last `n` lines of a file. */
-export function lastLines(path, n) {
-  try { return readFileSync(path, "utf8").trimEnd().split("\n").slice(-n); } catch { return []; }
-}
-
-/** One line on a setup state, for `task show` and `rollcall setup`. */
-export function setupLine(s, now = Date.now()) {
-  if (!s) return null;
-  const what = [s.copied?.length ? `copied ${s.copied.length} file${s.copied.length === 1 ? "" : "s"} from .worktreeinclude` : null, s.cmd ? `ran \`${s.cmd}\`` : null].filter(Boolean).join(", then ") || "nothing to run";
-  if (s.state === "running") return `setup running for ${Math.max(1, Math.round((now - s.at) / 60_000))}m (${s.cmd ? `\`${s.cmd}\`` : "copying files"}); log: ${s.log}`;
-  if (s.state === "done") return `setup done: ${what}`;
-  return `setup FAILED${s.exit !== null && s.exit !== undefined ? ` (exit ${s.exit})` : ""}: ${store.clip(store.oneLine(s.last ?? ""), 200) || "no output"}; log: ${s.log}`;
-}
 
 // ---------------------------------------------------------------- run actions
 
-const actionsDir = (top) => join(runtimeDir(top), "actions");
-const NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
-
-/**
- * The checkout's run actions, from its manifest with ports filled in: [{ name, command, dir, url, port }]. The
- * manifest's `run` map names them; without one, `devServer.command` is `dev` and `backend.startCommand` is `backend`.
- */
-export function actionsOf(f) {
-  const m = f.manifest ? fillPorts(f.manifest, f.base) : null;
-  if (!m) return [];
-  const out = [];
-  const add = (name, a) => {
-    if (!NAME.test(name) || !a || typeof a.command !== "string" || !a.command.trim()) return;
-    out.push({ name, command: a.command.trim(), dir: typeof a.dir === "string" ? a.dir : ".", url: typeof a.url === "string" ? a.url : null, port: Number(a.port) > 0 ? Number(a.port) : portIn(a.url) });
-  };
-  if (m.run && typeof m.run === "object") for (const [name, a] of Object.entries(m.run)) add(name, a);
-  else {
-    if (m.devServer?.command) add("dev", { command: m.devServer.command, url: m.devServer.baseUrl ?? (m.devServer.port ? `http://localhost:${m.devServer.port}` : null), port: m.devServer.port });
-    if (m.backend?.startCommand) add("backend", { command: m.backend.startCommand, url: m.backend.baseUrl });
-  }
-  return out;
-}
-
-const portIn = (url) => { try { const p = Number(new URL(url).port); return p > 0 ? p : null; } catch { return null; } };
-
-/** Whether process group `pgid` still has a process in it. */
-function groupAlive(pgid) {
-  if (!Number.isInteger(pgid) || pgid <= 1) return false;
-  try { process.kill(-pgid, 0); return true; } catch (e) { return e.code === "EPERM"; }
-}
-
-/** What was started for action `name` in the checkout, with whether it still runs: { ...record, running } or null. */
-export function actionState(top, name) {
-  const rec = readJson(join(actionsDir(top), `${name}.json`));
-  if (!rec) return null;
-  // A group started before this boot is gone, whatever holds its id now.
-  const booted = Date.now() - uptime() * 1000 - 5000;
-  return { ...rec, running: rec.at >= booted && groupAlive(rec.pid) };
-}
-
-/** Every action of the checkout: the manifest's, plus any started that the manifest no longer names. */
-export function listActions(f) {
-  const named = actionsOf(f);
-  let started = [];
-  try { started = readdirSync(actionsDir(f.top)).filter((n) => n.endsWith(".json")).map((n) => n.slice(0, -5)); } catch {}
-  const names = [...new Set([...named.map((a) => a.name), ...started])];
-  return names.map((name) => {
-    const a = named.find((x) => x.name === name) ?? null;
-    const s = actionState(f.top, name);
-    return { name, command: s?.running ? s.command : a?.command ?? s?.command ?? null, url: s?.running ? s.url : a?.url ?? null, port: s?.running ? s.port ?? null : a?.port ?? null, running: !!s?.running, pid: s?.running ? s.pid : null, since: s?.running ? s.at : null, log: s?.log ?? join(actionsDir(f.top), `${name}.log`), inManifest: !!a };
-  });
-}
 
 /** Starts action `a` of the checkout as its own process group, output to its log. Returns { ok, err, state }. */
 export function startAction(f, a, env = {}) {
@@ -362,7 +296,7 @@ export function servedFrom(port) {
 }
 
 /** Whether `path` is `top` or inside it. */
-export const inside = (path, top) => !!path && !!top && (real(path) === real(top) || real(path).startsWith(real(top) + sep));
+
 
 // ---------------------------------------------------------------- snapshots (archive and spotlight)
 
@@ -398,36 +332,3 @@ export const writeSpotlight = (main, v) => (v ? writeJson(spotlightPath(main), v
 // ---------------------------------------------------------------- a task's runtime, for task show and front ends
 
 
-/**
- * Task `t`'s runtime as front ends draw it: { ports: { base, last } | null, setup, actions: [{ name, url, running, log,
- * since }], previews: [url], spotlit, archived }. Null for a task with no worktree of its own.
- */
-export function runtimeOf(t) {
-  if (!t?.branch || !t.repo?.key) return null;
-  const spot = spotlightOf(t.repo.main);
-  const spotlit = spot?.task?.home === t.home && spot?.task?.id === t.id ? { since: spot.at, mirroredAt: spot.mirrored?.at ?? null } : null;
-  if (t.archived || !existsSync(t.worktree)) return { ports: null, setup: null, actions: [], previews: [], spotlit, archived: t.archived ?? null };
-  const f = checkoutFacts(t.worktree, { allocate: false });
-  const actions = f ? listActions(f).map(({ name, url, running, log, since, port }) => ({ name, url, port, running, log, since })) : [];
-  return {
-    ports: f?.ports ? { base: f.ports.base, last: f.ports.last } : null,
-    setup: setupState(t.worktree),
-    actions,
-    previews: actions.filter((a) => a.running && a.url).map((a) => a.url),
-    spotlit,
-    archived: null,
-  };
-}
-
-/** The lines `task show` prints for a task's runtime (none when there is nothing to say). */
-export function runtimeLines(t, rt, now = Date.now()) {
-  if (!rt) return [];
-  const out = [];
-  if (rt.archived) out.push(`archived ${new Date(rt.archived.at).toISOString()}: worktree removed, ${rt.archived.files ? `${rt.archived.files} uncommitted file${rt.archived.files === 1 ? "" : "s"} saved` : "nothing uncommitted"} (${rt.archived.ref}); bring it back: rollcall task restore ${t.id}`);
-  if (rt.ports) out.push(`ports ${rt.ports.base}-${rt.ports.last} (ROLLCALL_PORT=${rt.ports.base})`);
-  const s = setupLine(rt.setup, now);
-  if (s) out.push(s + (rt.setup?.state === "failed" ? `; rerun: rollcall task setup ${t.id} --rerun` : ""));
-  for (const a of rt.actions) out.push(`run ${a.name}: ${a.running ? `running${a.url ? ` at ${a.url}` : ""}` : "stopped"} (log: ${a.log})`);
-  if (rt.spotlit) out.push(`spotlit: the main checkout runs this task's files (rollcall task spotlight ${t.id} --off puts it back)`);
-  return out;
-}

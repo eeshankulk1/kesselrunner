@@ -61,7 +61,7 @@ What the supervisor and its workers do on their own:
 
 ## rollcall
 
-The commands a person types. The full list, and what each session sees, is in [rollcall's README](../packages/rollcall/README.md#cli).
+The commands a person types. The full list, and what each session sees, is in [rollcall's README](../packages/rollcall/README.md#cli). Front ends use `rollcall api`, whose contract is [API.md](../packages/rollcall/API.md).
 
 | Command | Does |
 |---|---|
@@ -86,6 +86,9 @@ The commands a person types. The full list, and what each session sees, is in [r
 | `rollcall clean [--yes]` | A low disk's delete list, with sizes; nothing goes until `--yes` |
 | `rollcall blockers [clear <kind>]` | What stops work on this machine or account now (usage limit, Codex's usage limit, which holds only Codex tasks, GitHub billing, disk, power, memory). You hear each once, work resumes by itself when the cause is gone, and `clear <kind>` says it is fixed |
 | `rollcall remind "<text>" --in <2h>` | A line for you later, for a step only you can take |
+| `rollcall api snapshot` / `rollcall api stream` | Everything a front end draws, as JSON; the stream prints it, then each change as a line, until stopped |
+| `rollcall api do <action> '<json>'` | Any action the Falcon takes, as you, from an app or a script (never from an agent session): start (also from an issue, a PR or a branch), tell, answer, interrupt, stop, resume, close, move, archive, restore, spotlight, run actions. `rollcall api version` lists them |
+| `rollcall api attach <falcon:t3>` | The tmux command that shows that worker's (or, with `falcon` alone, the supervisor's) real terminal |
 
 The hooks keep agents in task worktrees: an edit in a repo's main checkout is denied with the `git worktree add` command to run instead (unless the repo ran `rollcall allow-main`), and a second session's edits and checkout-changing git commands (`checkout`, `reset`, `stash`, `commit`...) in a checkout another live session owns are denied the same way. While a task's PR is open or in the merge queue, rollcall holds `caffeinate -i` on AC power and tells you once if the Mac is on battery with a ship running.
 
@@ -166,7 +169,7 @@ CI (`.github/workflows/check.yml`) runs every suite below except the mods on eac
 | `bash test/delegate.sh` | Offline check of the Codex delegation (fake Codex binary) |
 | `node --test test/rules.test.mjs` | `kesselrunner rules` in a throwaway HOME: on, off, the `CLAUDE.md` block before and after, an overlay rule winning over a core one, and what it refuses |
 | `node --test test/hooks.test.mjs` | The per-event hook entries: fixture guards in a throwaway overlay (order, override, the matcher built from their tools), rollcall answering for edits, deploy-watch for merges |
-| `node --test test/supervisor.test.mjs` | The supervisor on a real tmux server (private socket) with a fake `claude`: the start, `@t3` and picks typed in, resume after a kill or a lost tmux server, `--fresh`, the worker's questions, the watcher, the status line and notifications, a supervisor handing over (needs tmux; offline) |
+| `node --test test/supervisor.test.mjs` | The supervisor on a real tmux server (private socket) with a fake `claude`: the start, `@t3` and picks typed in, resume after a kill or a lost tmux server, `--fresh`, the worker's questions, the watcher, the status line and notifications, a supervisor handing over, and a scripted front-end client beside the Falcon (needs tmux; offline) |
 | `node --test test/ios-sim.test.mjs` | iosim's accessibility listing, element matching, simulator naming and install's checksum refusal (no simulator needed) |
 | `npm test --prefix packages/rollcall` | rollcall's suites on throwaway git repos, then its hook-latency bench |
 | `claude plugin validate . && claude plugin test mods/<name>` | The marketplace file and a mod's hooks module as the engine reads them, then the mod's tests (rollcall and `gh` faked; no session, no login) |

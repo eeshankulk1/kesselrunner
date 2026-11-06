@@ -2362,3 +2362,196 @@ test("a live worker that waits on a blocker hears when it clears, typed into its
   await until(() => !w.task().wait, { timeout: 5000 });
   assert.equal(trouble(w).open.disk, undefined);
 });
+
+// ---------------------------------------------------------------- the front-end interface, end to end
+// A scripted front end (`rollcall api ...`, as the cockpit app runs it) beside the terminal Falcon: both show the
+// same tasks, the same answered question and the same news, and the first answer to a question wins.
+
+/** The owner's environment, as an app on their Mac has it: no agent session, no task. */
+const ownerEnv = (w, env = {}) => ({ ...w.sb.env, KESSELRUNNER_CLAUDE_BIN: w.claude.bin, ...env });
+/** `rollcall api <args>` from a front end: its JSON. */
+function api(w, args, env = {}) {
+  const r = spawnSync(process.execPath, [BIN, "api", ...args], { cwd: w.sb.root, encoding: "utf8", env: ownerEnv(w, env), timeout: 60_000 });
+  let json = null;
+  try { json = JSON.parse(r.stdout); } catch {}
+  return { code: r.status, json, stdout: r.stdout, stderr: r.stderr };
+}
+/** `rollcall api do <name>` from the cockpit app. */
+const act = (w, name, payload, env = {}) => api(w, ["do", name, JSON.stringify({ client: "cockpit", ...payload })], env);
+/** A front end's stream, running: its lines so far, of(type), and end() (the front end stops it, SIGTERM). */
+function apiStream(w, args = ["--client", "cockpit", "--notifies"], env = {}) {
+  const p = spawn(process.execPath, [BIN, "api", "stream", ...args], { cwd: w.sb.root, env: ownerEnv(w, { ROLLCALL_API_BEAT_MS: "200", ...env }), stdio: ["ignore", "pipe", "ignore"] });
+  w.terminals.push(p);
+  const lines = [];
+  let buf = "";
+  p.stdout.on("data", (d) => {
+    buf += d;
+    for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+      try { lines.push(JSON.parse(buf.slice(0, i))); } catch {}
+      buf = buf.slice(i + 1);
+    }
+  });
+  const done = new Promise((res) => p.on("exit", (code) => res(code)));
+  return { proc: p, lines, of: (type, ref) => lines.filter((l) => l.type === type && (!ref || l.ref === ref)), end: () => { p.kill("SIGTERM"); return done; } };
+}
+/** A fake gh that says every PR merged into main, on PATH and as ROLLCALL_GH. */
+function mergedGh(w) {
+  const bin = join(w.sb.root, "bin");
+  write(join(bin, "gh"), `#!/bin/sh\necho '{"state":"MERGED","baseRefName":"main"}'\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  return { PATH: `${bin}:${w.sup.env.PATH ?? process.env.PATH}`, ROLLCALL_GH: join(bin, "gh"), ROLLCALL_PR_CHECK_MS: "1" };
+}
+const showTask = (w, id) => JSON.parse(w.sup.cli(["task", "show", id, "--json"]).stdout);
+
+test("a scripted front end beside the Falcon starts a task, answers its question, tells it, attaches to it and sees it land, and the Falcon shows the same; its notices replace rollcall's own while it runs", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  const gh = mergedGh(w);
+  const s = apiStream(w, undefined, gh);
+  await until(() => s.of("snapshot").length === 1, { timeout: 20_000 });
+  const first = s.of("snapshot")[0].snapshot;
+  assert.deepEqual(first.supervisors.map((x) => x.name), ["alpha"]);
+  assert.deepEqual(first.tasks.map((x) => x.ref), ["alpha:t1"]);
+  assert.deepEqual(first.clients.map((c) => [c.client, c.notifies]), [["cockpit", true]], "the stream registers its front end");
+
+  // It starts a task: rollcall's own `task new` and start.mjs, in the supervisor's permission mode.
+  const made = act(w, "task.start", { home: "alpha", title: "page footer", words: "make the footer match the header", repo: w.sb.main });
+  assert.equal(made.code, 0, made.stdout + made.stderr);
+  assert.equal(made.json.result.task, "alpha:t2");
+  assert.equal(made.json.result.started, true, made.json.result.message);
+  await until(() => w.claude.prompts().length === 1, { timeout: 20_000 });
+  assert.match(w.claude.prompts()[0], /^You are the worker for task t2 \(the owner calls it leia\), "page footer"/);
+  assert.equal(w.claude.runs()[0].task, "alpha:t2");
+  await until(() => s.of("task.added").some((l) => l.task.ref === "alpha:t2"), { timeout: 20_000 });
+  await until(() => showTask(w, "t2").worker?.alive && !showTask(w, "t2").worker.busy, { timeout: 20_000 });
+  assert.match(w.sup.cli(["task", "list"]).stdout, /leia · page footer/, "the Falcon lists the task the app started");
+
+  // The app tells the worker to ask; the question reaches the stream.
+  const told = act(w, "task.tell", { task: "alpha:t2", text: "ask" });
+  assert.equal(told.code, 0, told.stdout);
+  await until(() => s.of("question.asked", "alpha:t2").length === 1, { timeout: 20_000 });
+  const q = s.of("question.asked", "alpha:t2")[0].question;
+  assert.equal(q.picker, true);
+  assert.equal(q.questions[0].question, "Which header style?");
+  assert.equal(showTask(w, "t2").state, "needs-you", "the Falcon has the same question open");
+  look(w);
+  assert.match(news(w), /"header":"leia Style"/, "and the supervisor hears it, for its picker");
+
+  // The app answers it: the worker reads exactly what a pick in the Falcon's picker sends.
+  const answered = act(w, "question.answer", { task: "alpha:t2", question: q.id, answers: { "Which header style?": "Subtitle (Recommended)" } });
+  assert.equal(answered.code, 0, answered.stdout);
+  assert.equal(answered.json.result.delivered, true);
+  await until(() => w.claude.prompts().includes("Style: Subtitle (Recommended)"), { timeout: 20_000 });
+  await until(() => s.of("question.closed", "alpha:t2").length === 1, { timeout: 20_000 });
+  const closed = s.of("question.closed", "alpha:t2")[0];
+  assert.equal(closed.question, q.id);
+  assert.equal(closed.answered.by, "cockpit");
+  const rec = showTask(w, "t2");
+  assert.equal(rec.state, "working");
+  assert.equal(rec.answered.by, "cockpit");
+  assert.deepEqual([rec.words.at(-1).text, rec.words.at(-1).via, rec.words.at(-1).client], ["Style: Subtitle (Recommended)", "app", "cockpit"]);
+  assert.match(w.sup.cli(["task", "show", "t2"]).stdout, /question closed by the owner's words from a front end: Which header style\?/);
+  // The same answer again from the app, and a late pick in the Falcon, go nowhere.
+  const again = act(w, "question.answer", { task: "alpha:t2", question: q.id, answers: { "Which header style?": "Bold title" } });
+  assert.equal(again.code, 1);
+  assert.equal(again.json.error.code, "already-answered");
+  assert.equal(again.json.error.answered.by, "cockpit");
+  const late = ask(w.sup, [{ ...QUESTIONS[0], header: "leia Style" }], { "Which header style?": "Bold title" });
+  assert.match(late.context, /leia · page footer: its question was answered already from cockpit \("Style: Subtitle \(Recommended\)"\), so this pick did not go to leia's worker/);
+  await sleep(300);
+  assert.equal(times(w, "Style: Bold title"), 0, "the worker got one answer");
+
+  // The app's words for the worker: typed in, on the record as the app's.
+  const words = act(w, "task.tell", { task: "alpha:t2", text: "keep the footer to one line" });
+  assert.equal(words.json.result.delivered, true, words.stdout);
+  await until(() => w.claude.prompts().includes("keep the footer to one line"), { timeout: 20_000 });
+  await until(() => s.of("words", "alpha:t2").some((l) => l.words.some((x) => x.text === "keep the footer to one line" && x.via === "app" && x.client === "cockpit")), { timeout: 20_000 });
+  assert.deepEqual([showTask(w, "t2").words.at(-1).via, showTask(w, "t2").words.at(-1).client], ["app", "cockpit"]);
+
+  // It attaches to the worker's terminal: a view session of its own on rollcall's tmux server, on the worker's window.
+  const at = api(w, ["attach", "alpha:t2", "--client", "cockpit"]);
+  assert.equal(at.code, 0, at.stdout);
+  assert.deepEqual([at.json.socket, at.json.session, at.json.window, at.json.alive], [w.socket, "sv-alpha", "t2", true]);
+  assert.deepEqual(at.json.argv.slice(0, 3), ["tmux", "-L", w.socket]);
+  const view = spawn("tmux", ["-L", w.socket, "-C", ...at.json.argv.slice(3)], { stdio: ["pipe", "ignore", "ignore"], env: w.sb.env });
+  w.terminals.push(view);
+  await until(() => w.tmux("list-clients", "-t", `=${at.json.view}`) !== "", { timeout: 20_000 });
+  assert.equal(w.tmux("display", "-p", "-t", `=${at.json.view}:`, "#{window_name}"), "t2", "the view shows the worker's window");
+  view.kill("SIGKILL");
+  await until(() => w.tmux("list-clients", "-t", "=sv-alpha") === "", { timeout: 20_000 });
+  assert.equal(api(w, ["attach", "alpha"]).json.error.code, "no-window", "this supervisor runs outside falcon");
+
+  // Its PR lands: the stream shows the state and the same news the Falcon shows, and the app's notice replaces rollcall's.
+  assert.equal(act(w, "task.stop", { task: "alpha:t2" }).json.result.stopped, true);
+  assert.equal(w.sup.cli(["task", "set", "t2", "--state", "pr-open", "--pr", "https://github.com/o/r/pull/12"], { env: { ROLLCALL_TASK: "alpha:t2" } }).code, 0);
+  await until(() => s.of("pr.changed", "alpha:t2").some((l) => l.pr?.number === 12), { timeout: 20_000 });
+  look(w, gh);
+  assert.equal(showTask(w, "t2").state, "landed");
+  const landed = feed(w).at(-1);
+  assert.match(landed, /^leia · page footer: landed \(https:\/\/github\.com\/o\/r\/pull\/12\)\./);
+  await until(() => s.of("task.state", "alpha:t2").some((l) => l.to === "landed"), { timeout: 20_000 });
+  await until(() => s.of("news").some((l) => l.home === "alpha" && l.task === "alpha:t2" && l.text === landed), { timeout: 20_000 });
+  await until(() => s.of("notice").some((l) => l.text.startsWith(landed)), { timeout: 20_000 });
+  assert.ok(!notified(w).some((n) => n.text.startsWith(landed)), "shown by the app, so rollcall's own notification stays quiet");
+
+  // The app closes its stream: rollcall notifies the owner itself again.
+  assert.equal(await s.end(), 0);
+  assert.deepEqual(api(w, ["snapshot"]).json.clients, []);
+  assert.equal(w.sup.cli(["task", "set", "t1", "--state", "pr-open", "--pr", "https://github.com/o/r/pull/13"], { env: { ROLLCALL_TASK: "alpha:t1" } }).code, 0);
+  look(w, gh);
+  assert.match(feed(w).at(-1), /^yoda · chat header: landed \(https:\/\/github\.com\/o\/r\/pull\/13\)/);
+  assert.ok(notified(w).some((n) => n.text.startsWith(feed(w).at(-1))), "no app shows it now");
+});
+
+/** World's t1, its worker started and asking QUESTIONS; returns the question's id as a front end sees it. */
+async function asking(w) {
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.task().worker?.alive && !w.task().worker.busy, { timeout: 20_000 });
+  w.sup.prompt("@t1 ask");
+  await until(() => w.task().state === "needs-you", { timeout: 20_000 });
+  const qid = api(w, ["snapshot"]).json.tasks.find((x) => x.ref === "alpha:t1").question?.id;
+  assert.ok(qid);
+  return qid;
+}
+const TAGGED = [{ ...QUESTIONS[0], header: "yoda Style" }];
+
+test("the first answer wins: a pick in the Falcon first, and the app's answer is refused; the worker hears one answer", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  const qid = await asking(w);
+  assert.match(ask(w.sup, TAGGED, { "Which header style?": "Bold title" }).context, /→ yoda · chat header: typed into its worker/);
+  await until(() => w.claude.prompts().includes("Style: Bold title"), { timeout: 20_000 });
+  assert.equal(w.task().answered.by, "the terminal Falcon");
+  const r = act(w, "question.answer", { task: "alpha:t1", question: qid, answers: { "Which header style?": "Subtitle (Recommended)" } });
+  assert.equal(r.code, 1);
+  assert.equal(r.json.error.code, "already-answered", r.stdout);
+  assert.equal(r.json.error.answered.by, "the terminal Falcon");
+  await sleep(300);
+  assert.equal(times(w, "Style: Bold title"), 1);
+  assert.ok(!w.claude.prompts().some((p) => p.startsWith("Style: Subtitle")), "the worker got one answer");
+});
+
+test("the first answer wins: the app's answer first closes the Falcon's open picker with Esc, the supervisor hears why, and a late pick is dropped", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  const qid = await asking(w);
+  // The supervisor in a falcon window, its picker open on this question: its transcript holds the call, unanswered.
+  const keys = join(w.sb.root, "supervisor-keys.log");
+  write(join(w.sb.root, "keys.cjs"), `const fs = require("node:fs");\nfs.writeFileSync(${JSON.stringify(keys)}, "");\nprocess.stdin.setRawMode(true);\nprocess.stdin.on("data", (d) => fs.appendFileSync(${JSON.stringify(keys)}, JSON.stringify(d.toString()) + "\\n"));\n`);
+  w.tmux("new-window", "-d", "-t", "=sv-alpha:", "-n", "alpha", "--", process.execPath, join(w.sb.root, "keys.cjs"));
+  await until(() => existsSync(keys), { timeout: 20_000 });
+  const transcript = w.sup.payload("x").transcript_path;
+  write(transcript, `${JSON.stringify({ type: "assistant", timestamp: new Date().toISOString(), message: { content: [{ type: "tool_use", id: "toolu_sup1", name: "AskUserQuestion", input: { questions: TAGGED } }] } })}\n`);
+
+  const r = act(w, "question.answer", { task: "alpha:t1", question: qid, answers: { "Which header style?": "Subtitle (Recommended)" } });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(r.json.result.pickerClosed, true);
+  await until(() => w.claude.prompts().includes("Style: Subtitle (Recommended)"), { timeout: 20_000 });
+  await until(() => readFileSync(keys, "utf8").includes(JSON.stringify("\x1b")), { timeout: 20_000 });
+  assert.ok(kinds(w).includes("answered-elsewhere"));
+  look(w);
+  assert.match(news(w), /yoda · chat header: the owner answered its question from cockpit \("Style: Subtitle \(Recommended\)"\), and it went to its worker, so rollcall closed your picker for it\. Do not ask it again\./);
+
+  // The owner's pick landed as the picker closed: it goes nowhere.
+  assert.match(ask(w.sup, TAGGED, { "Which header style?": "Bold title" }).context, /its question was answered already from cockpit/);
+  await sleep(300);
+  assert.equal(times(w, "Style: Bold title"), 0);
+  assert.equal(times(w, "Style: Subtitle (Recommended)"), 1, "the worker got one answer");
+});
