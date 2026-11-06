@@ -35,7 +35,7 @@ rollcall api attach <home>[:<task>] [--client <name>] [--resume]
 ```json
 { "ok": true, "interface": 1, "rollcall": "0.1.0", "verbs": ["version", "snapshot", "stream", "do", "attach"],
   "actions": { "task.start": "rollcall task new + start.mjs", "...": "..." },
-  "coming": { "review.comment": "plan C (review loop)" } }
+  "coming": {} }
 ```
 
 `actions` maps each action to the Falcon command it matches. `coming` lists actions the plans in flight add; asking for one now returns `not-available`.
@@ -107,6 +107,8 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `report` | `{ at, by, text }` \| null | Its last report |
 | `handoff` | `{ at, context }` \| null | Its last handoff to a fresh worker |
 | `pr` | object \| null | Its PR (below) |
+| `comments` | array | The owner's line comments on its diff, oldest first: `{ n, state, file, line, end, text, by, at, sentAt, reply, resolved }`. `state`: `pending` (not sent yet), `sent`, `answered` (the worker replied and left it open for the owner) or `resolved`. `file`, `line` and `end` are where it was written; `rollcall task comments <task> --json` says where each sits now. `reply` and `resolved` are `{ at, by, text }` (`resolved` also has `how`: `fixed` or `answered`) |
+| `turns` | `{ count, last }` \| null | Its worktree's turn snapshots: how many, and the last turn's number; `turn.diff` takes any `n` from 0 to `last`. Null before the first. A stream sees a new turn at its next beat (`ROLLCALL_API_BEAT_MS`), since snapshots are written outside the files it watches |
 | `stage` | `{ name, at }` \| null | The ship step running now |
 | `wait` | object \| null | A wait it moved out of its worker (`task wait-for`): `{ on, check, why, every, at, label }`, `label` as its tab shows it |
 | `worker` | object \| null | Its current worker (below); null before one starts, or once its session ended |
@@ -150,9 +152,7 @@ Reading these takes no lock and starts no process, so a front end can poll them.
 
 ### Coming
 
-The plans in flight add their state here, as added fields (no version bump):
-
-- Plan C (review loop): review comments (line comments and PR review threads) and each turn's snapshot and diff.
+No plan in flight adds state now. A later one adds its fields here, as added fields (no version bump).
 
 ## `rollcall api stream [--home <h>] [--client <name>] [--notifies]`
 
@@ -225,7 +225,7 @@ Exit 0 on `ok: true`, 1 on a refusal, 2 when the payload is not JSON or the acti
 | Code | Means |
 |---|---|
 | `bad-payload` | A field is missing, of the wrong type or over its limit; the message names it |
-| `not-found` | No such supervisor or task |
+| `not-found` | No such supervisor or task (or, for `turn.diff`, no such turn) |
 | `refused` | The command it runs refused, with that command's words (a `task.tell` to a finished task that never had a worker, say), or an agent session called `do` |
 | `unavailable` | Something it needs is not installed: tmux, or kesselrunner's launcher (`ROLLCALL_START_FILE`) |
 | `failed` | The launcher failed starting, stopping or resuming a worker, or something went wrong inside rollcall; the message says what |
@@ -250,6 +250,9 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `task.move` | `task`, and `to` (a supervisor) or `harness` (`claude` or `codex`) | `moved`, `already`, `task` (the new ref, for `to`), `harness` and `view` (for `harness`) | `rollcall task move <task> --to <supervisor>` or `--harness <h>` |
 | `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already` | `rollcall task decisions done <n> "<answer>"` |
 | `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
+| `review.comment` | `task`, `file` (relative to its worktree, or absolute inside it), `line`, optional `end`, `text`, optional `send` (bool) | `comment` (its number), `sent`, `message`, `view` | `rollcall task comment <task> <file>:<line>[-<end>] "<text>"` |
+| `review.send` | `task` | `message`, `view` | `rollcall task comments <task> send` |
+| `turn.diff` | `task`, `n` | `from`, `to`, `files` (`{ status, path }`), `patch`, `truncated` | `rollcall turns diff <n> <task> --json` |
 | `task.archive` | `task`, optional `confirm: true` | without `confirm`: `archived: false`, `plan` (what goes: `worktree`, `kb`, `uncommitted`, `unpushed`, `actions`, `ports`, `spotlit`, `teardown`, and `lines` to show the owner), `confirmWith`; with it: `archived`, `already`, `message`, `view` | `rollcall task archive <task>`, then `--yes` |
 | `task.restore` | `task` | `restored`, `already`, `message` (says when its branch moved on origin), `view` | `rollcall task restore <task>` |
 | `task.spotlight` | `task`, `on` (true or false), optional `force: true` with `on: false` | `spotlit`, `message`, `view` | `rollcall task spotlight <task> [--off [--force]]` |
@@ -263,10 +266,10 @@ Notes on each:
 - `task.interrupt` stops the worker's turn; it keeps running. `interrupted: false` with a `why` when no worker runs.
 - `task.stop` ends the worker; the task stays open and nothing resumes it unasked.
 - `task.close`, `task.move` and `decision.answer` answer `already: true` when it was done before, so a repeat from a second front end is harmless.
+- `review.comment` leaves a comment pending, as the owner's; `review.send` (or `send: true`) sends every pending one to the worker as one message, which it answers or resolves one by one (`comments` in the view shows how far). `review.send` with nothing pending refuses. With `send: true` the comment is saved even when the send fails: the result is then `sent: false` with the reason in `message`, so a retry does not add it twice.
+- `turn.diff`: what turn `n` changed against the turn before it; turn 0 is the baseline and changed nothing. `files` is always whole; `patch` stops at 1 MB (`truncated: true`), and `rollcall turns diff` prints all of it. It reads only, so a `requestId` keeps no copy of it. PR review threads stay in the ship loop (`rollcall pr threads`), not here.
 
 - `task.archive` removes nothing until the owner has seen the plan: the first call returns it, and the front end shows `plan.lines` and sends `confirmWith` on the owner's yes. Archive, restore and spotlight are refused from an agent session, as `api do` is.
-
-**Coming.** `review.comment` (plan C). Until then it returns `not-available`.
 
 ## `rollcall api attach <home>[:<task>] [--client <name>] [--resume]`
 

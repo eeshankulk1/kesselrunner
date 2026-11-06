@@ -52,14 +52,16 @@ export const outbox = (h, id) => store.readHomeFile(h, OUTBOX(id)) ?? [];
 /** What waits to be typed into the task's worker (a launch's prompt is on its command line, not waiting). */
 export const waiting = (h, id) => outbox(h, id).filter((x) => x.kind !== "launch");
 
-/** Puts `text` on the task's queue: "words", "notice" (a line of rollcall's), or "doorbell", of which one is enough. Returns false when the store stayed busy. */
+/** Puts `text` on the task's queue: "words", "notice" (a line of rollcall's), or "doorbell", of which one is enough. Returns the new item's id, or false when the store stayed busy. */
 export function enqueue(t, kind, text, now = Date.now()) {
+  const id = randomBytes(4).toString("hex");
   const queued = edit(t.home, OUTBOX(t.id), (items) => ({
-    items: kind === "doorbell" && items.some((x) => x.kind === kind) ? items : [...items, { id: randomBytes(4).toString("hex"), kind, text, at: now, typedAt: null, tries: 0 }],
+    items: kind === "doorbell" && items.some((x) => x.kind === kind) ? items : [...items, { id, kind, text, at: now, typedAt: null, tries: 0 }],
     out: true,
   }));
   store.pokeWatcher(t.home);
-  return queued === true;
+  // The new item's id (truthy), or false when the store stayed busy and nothing went on.
+  return queued === true ? id : false;
 }
 
 /**

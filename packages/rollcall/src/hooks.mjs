@@ -135,6 +135,15 @@ function gcDetached(main, args = []) {
 
 const agentWorktrees = (main) => join(main, ".claude", "worktrees");
 
+/**
+ * Background `rollcall turns take` (snapshot.mjs) for a session in a linked worktree; never waits, never in a
+ * main checkout. ROLLCALL_SNAPSHOTS=0 turns it off.
+ */
+function snapshotDetached(info, args) {
+  if (!info || isMainCheckout(info) || store.envFlag("ROLLCALL_SNAPSHOTS") === false) return;
+  spawnDetached(process.execPath, [BIN, "-C", info.top, "turns", "take", "--quiet", ...args]);
+}
+
 // ---------------------------------------------------------------- SessionStart
 
 function sessionStart(p, now) {
@@ -148,6 +157,8 @@ function sessionStart(p, now) {
   const focus = cwdFocus(p);
   if (!focus) return inherited.length ? inherited : null;
   const { info, repo } = focus;
+  // Turn 0: the worktree as this session found it, so its first turn's diff has a start (a no-op once there is one).
+  if (!g.supervisor) snapshotDetached(info, ["--baseline", "--session", g.id]);
   store.prune(repo.key);
   store.pruneTasks(now);
   pruneHomes(now);
@@ -459,7 +470,9 @@ function picks(g, p) {
 
 function stop(p, now) {
   const g = ensureSession(p);
-  refresh(g, now, cwdFocus(p), { idle: true });
+  const focus = cwdFocus(p);
+  refresh(g, now, focus, { idle: true });
+  if (!g.supervisor) snapshotDetached(focus?.info, ["--session", g.id]);
   const h = g.supervisor ? homeOf(g.id) : null;
   if (h) turnEnded(h, g, now);
   return null;

@@ -1,5 +1,6 @@
 ---
-status: active
+status: done
+absorbed-into: docs/commands.md, docs/architecture.md, packages/rollcall/README.md
 date: 2026-11-06
 decided-with-owner: 2026-11-06 (Conductor comparison: match Conductor's review loop; terminal and GUI both first-class, so the mechanics land here and the GUI draws them)
 covers: "Plan C of the Conductor parity set: line comments delivered to a running worker, PR review threads in the ship loop, per-turn snapshots and diffs that include shell changes"

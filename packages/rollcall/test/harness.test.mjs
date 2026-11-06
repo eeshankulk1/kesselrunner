@@ -3,7 +3,7 @@
 // worker runs against a stand-in CLI (fixtures/fake-codex.mjs) that speaks the app server's protocol on a unix socket.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -116,7 +116,7 @@ async function until(fn, what, ms = 15_000) {
   for (;;) {
     const v = fn();
     if (v) return v;
-    if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+    if (Date.now() > end) assert.fail(`timed out waiting for ${typeof what === "function" ? what() : what}`);
     await sleep(100);
   }
 }
@@ -220,4 +220,43 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   worker.kill("SIGTERM");
   await until(() => status().some((e) => e.ev === "exit"), "the exit");
   await until(() => !existsSync(codex.stateFile(h, "t1")), "its record gone");
+});
+
+test("a Codex worker in a linked worktree takes turn snapshots as a Claude worker's hooks do: a baseline at its start, a turn after each turn", { timeout: 60_000 }, async (t) => {
+  const dir = freshHome();
+  const g = (cwd, ...a) => { const r = spawnSync("git", ["-C", cwd, ...a], { encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const repo = join(dir, "repo");
+  mkdirSync(repo);
+  g(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  g(repo, "add", "a.txt");
+  g(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init");
+  const wt = join(dir, "wt");
+  g(repo, "worktree", "add", "-q", "-b", "task", wt);
+  const env = cleanEnv({ ROLLCALL_HOME: process.env.ROLLCALL_HOME, ROLLCALL_WATCHER: "0", ROLLCALL_CODEX_BIN: FAKE, ROLLCALL_SNAPSHOTS: "1", FAKE_CODEX_LOG: join(dir, "codex.log") });
+  const made = spawnSync(process.execPath, [BIN, "task", "new", "codex snap", "--no-repo", "--home", "falcon", "--harness", "codex", "--json"], { encoding: "utf8", env, cwd: dir });
+  assert.equal(made.status, 0, made.stderr);
+  Object.assign(process.env, { ROLLCALL_CODEX_BIN: FAKE });
+  const store = await mod("store.mjs");
+  const codex = await mod("harness/codex.mjs");
+  const h = "falcon";
+  const task = store.readTask(h, "t1");
+  const { session } = codex.writeLaunch(task, { prompt: "write the client WRITE=gen/client.js", mode: "auto" });
+  store.withTasksLock(h, () => { const x = store.readTask(h, "t1"); x.sessions.push({ id: session, at: Date.now(), endedAt: null, tmux: true, harness: "codex" }); store.writeTask(x); });
+  // The task has no worktree of its own here: point its worker at the linked one.
+  const cfg = JSON.parse(readFileSync(codex.launchFile(h, "t1"), "utf8"));
+  writeFileSync(codex.launchFile(h, "t1"), JSON.stringify({ ...cfg, cwd: wt }));
+  const worker = spawn(process.execPath, [BIN, "codex-worker", h, "t1"], { env, cwd: dir, stdio: ["pipe", "pipe", "pipe"] });
+  let err = "";
+  worker.stderr.on("data", (d) => { err += d; });
+  t.after(() => { try { worker.kill("SIGTERM"); } catch {} rmSync(dir, { recursive: true, force: true }); });
+
+  const turns = () => {
+    const r = spawnSync(process.execPath, [BIN, "turns", "--json"], { encoding: "utf8", env, cwd: wt });
+    return r.status === 0 ? JSON.parse(r.stdout).turns : [];
+  };
+  const got = await until(() => { const ts = turns(); return ts.length >= 2 && ts; }, () => `the baseline and the first turn's snapshot (turns: ${JSON.stringify(turns())}; file: ${existsSync(join(wt, "gen/client.js"))}; worker: ${err}; status: ${JSON.stringify(store.readStatus(h, "t1"))})`);
+  assert.equal(got[0].kind, "baseline");
+  assert.equal(got[1].session, session);
+  assert.deepEqual(got[1].files.map((f) => `${f.status} ${f.path}`), ["A gen/client.js"]);
 });
