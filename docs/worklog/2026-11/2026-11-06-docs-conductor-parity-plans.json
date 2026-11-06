@@ -1,0 +1,1 @@
+{"date": "2026-11-06", "project": "kesselrunner", "summary": "Added four one-session plans (worktree runtime, harness layer with Codex workers, review loop, front-end interface) to close the gaps where Conductor did more, with the capability inventory and harness audit behind them.", "pr": 1, "why": "Conductor is winding down but is the best-documented product in this space."}
