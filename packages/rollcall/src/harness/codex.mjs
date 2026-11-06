@@ -125,7 +125,7 @@ function send(t, args, input) {
   const rec = workerRecord(t.home, t.id);
   if (!rec?.sock || !rec.thread) return { ok: false, err: "its Codex worker has not started its thread yet" };
   // The running turn as the worker last recorded it saves the sender reading the thread's history to find it.
-  const r = spawnSync(process.execPath, [BIN, "_codex-send", rec.sock, rec.thread, ...args, rec.turn ?? "-"], { encoding: "utf8", input, timeout: 10_000 });
+  const r = spawnSync(process.execPath, [BIN, "_codex-send", rec.sock, rec.thread, ...args, rec.turn ?? "-"], { encoding: "utf8", input, timeout: 20_000 });
   return r.status === 0 ? { ok: true } : { ok: false, err: (r.stderr || r.stdout || "the app server refused").trim().split("\n").at(-1) };
 }
 

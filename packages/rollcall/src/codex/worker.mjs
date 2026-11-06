@@ -99,7 +99,8 @@ export async function codexWorker([h, id]) {
     try { ui?.kill("SIGTERM"); } catch {}
     try { server.kill("SIGTERM"); } catch {}
     rmSync(sock, { force: true });
-    rmSync(stateFile(h, id), { force: true });
+    // Only its own record: a new worker of the task may have written its own meanwhile.
+    try { if (JSON.parse(readFileSync(stateFile(h, id), "utf8")).pid === process.pid) rmSync(stateFile(h, id), { force: true }); } catch {}
     process.exit(code);
   };
   for (const s of ["SIGHUP", "SIGTERM"]) process.on(s, () => { hook("session-end", { reason: "signal" }); stopAll(0); });
