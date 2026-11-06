@@ -135,7 +135,7 @@ export async function codexWorker([h, id]) {
         const cid = String(p.item.clientId ?? "");
         // A note of the worker's own (a steer from this process) starts nothing: busy is all it says.
         if (cid.startsWith(INJECTED)) { store.appendStatus(h, id, { ev: "busy" }); return; }
-        const out = hook("prompt-submit", { prompt: textOf(p.item), owner: !cid.startsWith(DELIVERY) && !cid.startsWith("rollcall-") });
+        const out = hook("prompt-submit", { prompt: textOf(p.item), owner: !cid.startsWith("rollcall-") });
         void inject(contextIn(out));
         return;
       }

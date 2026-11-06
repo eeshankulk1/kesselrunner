@@ -222,7 +222,8 @@ owner whether to move it, and on yes runs `rollcall task move <id> --harness
 **Verification.** The Codex worker is tested end to end against a stand-in
 Codex that speaks the app-server protocol
 (`packages/rollcall/test/harness.test.mjs` with
-`test/fixtures/fake-codex.mjs`). The protocol shapes, and two clients on one
+`test/fixtures/fake-codex.mjs`; `test/codex-contract.test.mjs` checks the protocol
+shapes against the installed Codex CLI and skips without one). The protocol shapes, and two clients on one
 server (rollcall's `turn/start` showing live in the owner's UI), were checked
 against the real Codex CLI 0.146.0-alpha.3. A full live task on Codex has not
 run yet: the signed-in account was on a free plan with its monthly limit used

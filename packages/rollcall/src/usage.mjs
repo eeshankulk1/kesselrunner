@@ -3,7 +3,7 @@
 // Codex's from its app server (`account/rateLimits/updated` in a worker, else one short read). Both land in one file
 // in rollcall's store, read by `task list`, the supervisor's status line, the front end and the watcher, which offers
 // the owner to move waiting tasks to the other harness when one plan nears its limit. It never moves one by itself.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as store from "./store.mjs";
 
@@ -15,7 +15,7 @@ const STALE_MS = 6 * 3600_000;
 const CODEX_READ_EVERY_MS = 10 * 60_000;
 
 function read() { try { return JSON.parse(readFileSync(FILE(), "utf8")) ?? {}; } catch { return {}; } }
-function write(u) { try { mkdirSync(store.home(), { recursive: true }); writeFileSync(FILE(), JSON.stringify(u)); } catch {} }
+function write(u) { try { mkdirSync(store.home(), { recursive: true }); const tmp = `${FILE()}.${process.pid}`; writeFileSync(tmp, JSON.stringify(u)); renameSync(tmp, FILE()); } catch {} }
 
 const window = (pct, resetsAtSec, mins = null) => (Number.isFinite(pct) ? { pct: Math.round(pct), resetsAt: Number.isFinite(resetsAtSec) ? resetsAtSec * 1000 : null, ...(mins ? { windowMins: mins } : {}) } : null);
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);

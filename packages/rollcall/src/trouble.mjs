@@ -91,13 +91,13 @@ export function loadNote() {
 // ---------------------------------------------------------------- the record
 
 export const openBlockers = () => store.readTrouble().open;
-/** Whether Claude itself is refusing work now: news for a supervisor's model waits for this to end. */
 /**
  * A usage limit is a blocker per plan: "usage" is Claude's (the supervisor's own harness, so its news waits too),
  * "usage-codex" Codex's, which holds only the tasks that run there.
  */
 export const USAGE_KINDS = ["usage", "usage-codex"];
 export const isUsage = (kind) => USAGE_KINDS.includes(kind);
+/** Whether Claude itself is refusing work now: news for a supervisor's model waits for this to end. */
 export const paused = () => !!openBlockers().usage;
 
 /** Opens the `kind` blocker, or adds `fields` to the open one (a later reset wins). */
