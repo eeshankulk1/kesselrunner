@@ -733,6 +733,9 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "answered-elsewhere") {
+      // answer.mjs closed the Falcon's picker (Esc) once a front end answered every question in it.
+      line = `${label(t)}: the owner answered its question from ${e.by ?? "a front end"} ("${store.clip(store.oneLine(t.answered?.answer ?? ""), 200)}"), and it went to its worker, so rollcall closed your picker for it. Do not ask it again.`;
     } else if (e.kind === "exit-loop" && isOpen(t)) {
       line = `${label(t)}: its worker exited ${e.times} times in ${RESUME_WINDOW_MS / 60_000} minutes, so rollcall stopped resuming it. Check \`rollcall task show ${t.id}\`, then ask the owner what to do.`;
     }

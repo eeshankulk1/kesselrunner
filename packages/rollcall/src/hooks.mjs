@@ -16,6 +16,7 @@ import {
 } from "./session.mjs";
 import * as store from "./store.mjs";
 import { sameWords } from "./asked.mjs";
+import { answeredElsewhere, droppedPick, joinLines, markAnswered, pickLine } from "./answer.mjs";
 import { PICTURE, picturesFindable, picturesLater } from "./pictures.mjs";
 import { MENTION, tempDenial } from "./temp.mjs";
 import * as tmux from "./tmux.mjs";
@@ -225,10 +226,16 @@ function preToolUse(p, now) {
 const SAID_FILE = /\bsaid\.json\b/;
 const HOME_PATH = /\.rollcall\b|_supervisors\b|\bROLLCALL_HOME\b/;
 const RELAY = /\btask\s+relay\b/;
+// The front-end interface's actions (api.mjs) act as the owner: their words reach a worker as the owner's own. A
+// front end is no agent session, so an agent's shell never runs them (api-cli.mjs refuses them there too).
+const API_DO = /\bapi\s+do\b/;
 
 function saidDenial(cmd) {
   if (SAID_FILE.test(cmd) && HOME_PATH.test(cmd)) {
     return `${P} Blocked: said.json is rollcall's record of the owner's own words to their supervisor, written only by its prompt hook, and \`${cli()} task relay\` types it into a worker as theirs. Leave it alone: for the owner's say-so, ask them to type their words (to the supervisor, or \`@<name> <words>\`).`;
+  }
+  if (API_DO.test(cmd) && /\brollcall\b/.test(cmd)) {
+    return `${P} Blocked: \`rollcall api do\` is the front-end interface, which acts as the owner, for the apps the owner uses. An agent session uses the \`${cli()} task\` commands, which run the same code.`;
   }
   if (RELAY.test(cmd) && taskEnv()) {
     return `${P} Blocked: \`task relay\` is the supervisor's, and types the owner's words into a worker. Put what you need from the owner in a question or your report (\`${cli()} task output\`).`;
@@ -240,7 +247,7 @@ function saidDenial(cmd) {
  * Bash is never blocked, except git commands that would change the files,
  * branch or index of a checkout another live session owns (checkout, reset,
  * stash, commit...), deletions that reach a live session's Claude temp
- * folder (temp.mjs), and the two ways around `task relay` (saidDenial).
+ * folder (temp.mjs), the two ways around `task relay`, and `rollcall api do` (saidDenial).
  * Read-only git and `git worktree add` always pass.
  */
 function bashGuard(p, now) {
@@ -361,10 +368,10 @@ function sent(t, r) {
 const reachable = (t) => isOpen(t) || !!t?.sessions?.length;
 
 /** Delivers the owner's words to task `id` of home `h`, typed (`typed`, when the worker hears more than the record keeps): { stop } for the hook. */
-function sendTo(h, g, id, text, typed = text) {
+function sendTo(h, g, id, text, typed = text, mark = null) {
   const t = store.readTask(h, id);
   if (!reachable(t)) return { stop: `No task ${nameOf(id)} (${id}) with a worker in supervisor ${h}: \`${cli()} task list\` shows them.` };
-  return { stop: sent(t, deliverWords(t, typed, { record: () => recordWords(t, text, "supervisor"), mode: g.mode })), task: t };
+  return { stop: sent(t, deliverWords(t, typed, { record: () => recordWords(t, text, "supervisor", mark), mode: g.mode })), task: t };
 }
 
 /**
@@ -395,30 +402,6 @@ function route(h, g, text, now) {
   return keyed(h, text, now) ? sendTo(h, g, to, text) : null;
 }
 
-/**
- * A pick as its worker reads it: its question's header, then the answer. Words of the owner's own under
- * "Other" say so: a bare "2" once read as option 2 ($1.50) when the owner meant 2 dollars.
- */
-function pickLine(x, answer, name) {
-  const tagged = String(x.header ?? "").trim();
-  const header = (tagged.startsWith(name) ? tagged.slice(name.length).trim() : tagged) || store.clip(store.oneLine(x.question), 60);
-  const said = ownWords(x, answer);
-  return { own: !!said, said, line: said ? `${header} (the owner's own words, not one of your options): ${answer}` : `${header}: ${answer}` };
-}
-
-/**
- * What the owner wrote in an answer, "" when it is only the options the worker offered. Those are the worker's
- * words, and only the owner's may go on the record `task relay` reads. A multi-select joins its picks with ", ",
- * which a label can hold too, so the longest labels come out first.
- */
-function ownWords(x, answer) {
-  const labels = (x.options ?? []).map((o) => o.label);
-  if (!x.multiSelect) return labels.includes(answer) ? "" : answer;
-  let rest = `, ${answer}, `;
-  for (const label of [...labels].sort((a, b) => b.length - a.length)) rest = rest.replace(`, ${label}, `, ", ");
-  return rest.replace(/^, |, $/g, "");
-}
-
 // The owner's own words in a worker's picker that are meant for the supervisor ("so this should be its own task").
 const ROUTING = /\b(?:own|separate|new|another|different) tasks?\b|\bsplit (?:this|that|it)\b|\bsupervisor\b/i;
 
@@ -444,14 +427,20 @@ function picks(g, p) {
   for (const x of questions) {
     const id = taskOfQuestion(x);
     const a = typeof answers[x.question] === "string" ? answers[x.question].trim() : "";
-    if (id && a) byTask.set(id, [...(byTask.get(id) ?? []), pickLine(x, a, nameOf(id))]);
+    if (id && a) byTask.set(id, [...(byTask.get(id) ?? []), { ...pickLine(x, a, nameOf(id)), x }]);
   }
   const lines = [];
   const now = Date.now();
-  for (const [id, picked] of byTask) {
+  for (const [id, all] of byTask) {
+    // The first answer wins: a question a front end answered meanwhile is not answered twice (answer.mjs).
+    const t0 = store.readTask(h, id);
+    const gone = all.map((a) => answeredElsewhere(t0, a.x.question)).find(Boolean);
+    const picked = all.filter((a) => !answeredElsewhere(t0, a.x.question));
+    if (gone) lines.push(droppedPick(t0, gone));
+    if (!picked.length) continue;
     // Only the picker's own result is the owner's: the same field on the tool's input is the model's to fill.
     if (p.tool_response?.answers) for (const a of picked) if (a.own) keepSaid(h, g, a.said, now);
-    const text = picked.length === 1 ? picked[0].line : picked.map((a, i) => `${i + 1}. ${a.line}`).join("\n");
+    const text = joinLines(picked);
     const routing = picked.find((a) => a.own && ROUTING.test(a.said));
     if (routing) {
       const rest = picked.filter((a) => a !== routing).map((a) => a.line);
@@ -462,7 +451,7 @@ function picks(g, p) {
     const pictured = picked.some((a) => a.own && a.said.includes(PICTURE));
     const findable = pictured && picturesFindable(p);
     const picture = !pictured ? "" : findable ? `\n${P} Their picture comes next, as a saved path: wait for it, and do not search for it.` : `\n${P} rollcall could not save their picture: ask them for it, and do not search for it.`;
-    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`).stop}`);
+    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`, (t) => markAnswered(t, picked.map((a) => a.x), "the terminal Falcon", text)).stop}`);
     if (findable) picturesLater(h, id, p);
   }
   return lines;

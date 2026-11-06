@@ -12,7 +12,7 @@ const RECENT_MS = 10 * 60_000;
 const WAITERS = new Set(["Agent", "Task"]);
 
 /** The entries in the last TAIL bytes of a JSONL file (a line the cut split is dropped); [] when unreadable. */
-function tail(file) {
+export function tail(file) {
   let fd;
   try {
     fd = openSync(file, "r");

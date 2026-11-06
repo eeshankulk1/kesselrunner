@@ -12,6 +12,7 @@ import { cpus, loadavg } from "node:os";
 import { spawnDetached } from "./proc.mjs";
 import { BIN } from "./session.mjs";
 import { isOpen } from "./state.mjs";
+import { noteNotice } from "./clients.mjs";
 import * as store from "./store.mjs";
 import { watcherEnv } from "./supervisor.mjs";
 
@@ -42,6 +43,8 @@ export const NAMES = { usage: "the usage limit", billing: "GitHub billing", disk
 
 const appleString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 export function notify(title, text, { sound = true } = {}) {
+  // A front end that shows the owner's notifications (clients.mjs) gets this one through its stream instead.
+  if (noteNotice({ title, text, sound })) return;
   const log = process.env.ROLLCALL_NOTIFY_LOG;
   if (log) { appendFileSync(log, `${JSON.stringify({ title, text })}\n`); return; }
   spawnSync("osascript", ["-e", `display notification ${appleString(text)} with title ${appleString(title)}${sound ? ' sound name "Glass"' : ""}`], { stdio: "ignore", timeout: 5000 });
