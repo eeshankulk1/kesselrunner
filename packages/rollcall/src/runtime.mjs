@@ -460,7 +460,8 @@ export function launchLines(t, bin) {
   const env = checkoutEnv(f, t);
   return [
     ...Object.entries(env).map(([k, v]) => `export ${k}=${q(v)}`),
-    `${q(process.execPath)} ${q(bin)} -C ${q(t.worktree)} setup --wait --quiet || true`,
+    // Only where a setup ran here: every other launch skips a node start.
+    `[ -e ${q(setupPath(t.worktree))} ] && { ${q(process.execPath)} ${q(bin)} -C ${q(t.worktree)} setup --wait --quiet || true; }`,
   ];
 }
 
