@@ -34,7 +34,7 @@ import { headOf, unlanded } from "./gc.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
 import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
-import { fullest, near, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
+import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
 import { comeBack, contextOf, markBack, startWindow, supervisorMark } from "./window.mjs";
 
@@ -449,10 +449,11 @@ export function tick(h, now = Date.now()) {
  * runs on Codex or Codex was read before. Returns whether it queued news.
  */
 function usageOffers(h, views, seen, now) {
-  if (views.some((v) => isOpen(v.t) && harnessOf(v.t) === "codex") || fullest(now).some((w) => w.harness === "codex")) void refreshCodex(now);
-  const full = near(now);
-  if (!full.length) return false;
   const all = fullest(now);
+  const full = all.filter((w) => w.pct >= nearPct());
+  // Codex is asked only while it matters: a task runs there, or Claude is near its limit and Codex may take tasks.
+  if (views.some((v) => isOpen(v.t) && harnessOf(v.t) === "codex") || full.some((w) => w.harness === "claude")) void refreshCodex(now);
+  if (!full.length) return false;
   let queued = false;
   for (const w of full) {
     const other = w.harness === "claude" ? "codex" : "claude";

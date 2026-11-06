@@ -86,6 +86,13 @@ test("the usage meter: Claude's windows from the status line, Codex's from its p
   const later = now + 2 * 3600_000;
   assert.equal(u.usageOf(later).claude.fiveHour.pct, 0);
   assert.deepEqual(u.near(later), []);
+  // An idle session's status line still carries an older, lower reading of the same window: the higher one stands.
+  u.recordClaude({ five_hour: { used_percentage: 50, resets_at: inHour }, seven_day: { used_percentage: 41, resets_at: inHour + 86400 } }, now + 1000);
+  assert.equal(u.usageOf(now).claude.fiveHour.pct, 92);
+  assert.equal(u.usageOf(now).claude.weekly.pct, 41);
+  // A new window starts from its own reading.
+  u.recordClaude({ five_hour: { used_percentage: 3, resets_at: inHour + 5 * 3600 } }, now + 2000);
+  assert.equal(u.usageOf(now).claude.fiveHour.pct, 3);
   // A snapshot of another of Codex's limits (no windows) leaves the plan's reading alone.
   u.recordCodex({ limitId: "premium", primary: null, secondary: null }, now);
   assert.equal(u.usageOf(now).codex.primary.pct, 20);

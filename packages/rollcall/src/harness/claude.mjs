@@ -35,8 +35,6 @@ export function available() {
  * whose safeguards stopped it. A model is an alias or an id ("opus", "opus[1m]", "claude-opus-5-5").
  */
 export const modelOk = (m) => typeof m === "string" && /^[a-z][\w.-]*(\[1m\])?$/i.test(m);
-/** Whether `m` names a Claude model: Codex has no use for one. */
-export const isOwnModel = (m) => modelOk(m) && /^(claude|opus|sonnet|haiku|fable|best|default|opusplan)\b/i.test(m);
 export const models = { ok: modelOk, map: (m) => (modelOk(m) && !/^(gpt|o\d|codex)/i.test(m) ? m : null) };
 
 /**

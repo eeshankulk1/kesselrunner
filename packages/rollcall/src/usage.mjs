@@ -1,21 +1,30 @@
 // The usage meter: how much room each plan has before a turn fails on it. Claude's comes from Claude Code's status
 // line (`rate_limits`: the five-hour and weekly windows, for Pro and Max plans, after a session's first answer);
 // Codex's from its app server (`account/rateLimits/updated` in a worker, else one short read). Both land in one file
-// in rollcall's store, read by `task list`, the supervisor's status line, the front end and the watcher, which offers
+// in rollcall's store (one file per plan), read by `task list`, the supervisor's status line, the front end and the watcher, which offers
 // the owner to move waiting tasks to the other harness when one plan nears its limit. It never moves one by itself.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as store from "./store.mjs";
 
-const FILE = () => join(store.home(), "usage.json");
+// One file per plan's reading and one for when Codex was last asked, so two writers of different things never drop
+// each other's; each write swaps a whole file in, so no reader sees half of one.
+const FILE = (plan) => join(store.home(), `usage-${plan}.json`);
+function readPlan(plan) { try { return JSON.parse(readFileSync(FILE(plan), "utf8")) ?? null; } catch { return null; } }
+function writePlan(plan, v) {
+  try {
+    mkdirSync(store.home(), { recursive: true });
+    const tmp = `${FILE(plan)}.${process.pid}.tmp`;
+    try { writeFileSync(tmp, JSON.stringify(v)); renameSync(tmp, FILE(plan)); } catch { rmSync(tmp, { force: true }); }
+  } catch {}
+}
 /** At or past this percent of a window, a plan is near its limit. */
 export const nearPct = () => { const v = Number(process.env.ROLLCALL_USAGE_NEAR_PCT); return Number.isFinite(v) && v > 0 && v <= 100 ? v : 85; };
 /** A reading older than this says nothing about now. */
 const STALE_MS = 6 * 3600_000;
 const CODEX_READ_EVERY_MS = 10 * 60_000;
 
-function read() { try { return JSON.parse(readFileSync(FILE(), "utf8")) ?? {}; } catch { return {}; } }
-function write(u) { try { mkdirSync(store.home(), { recursive: true }); const tmp = `${FILE()}.${process.pid}`; writeFileSync(tmp, JSON.stringify(u)); renameSync(tmp, FILE()); } catch {} }
+const read = () => ({ claude: readPlan("claude"), codex: readPlan("codex") });
 
 const window = (pct, resetsAtSec, mins = null) => (Number.isFinite(pct) ? { pct: Math.round(pct), resetsAt: Number.isFinite(resetsAtSec) ? resetsAtSec * 1000 : null, ...(mins ? { windowMins: mins } : {}) } : null);
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -25,10 +34,13 @@ export function recordClaude(limits, now = Date.now()) {
   if (!limits || typeof limits !== "object") return;
   const next = { fiveHour: window(limits.five_hour?.used_percentage, limits.five_hour?.resets_at), weekly: window(limits.seven_day?.used_percentage, limits.seven_day?.resets_at) };
   if (!next.fiveHour && !next.weekly) return;
-  const u = read();
-  if (u.claude && same({ fiveHour: u.claude.fiveHour, weekly: u.claude.weekly }, next) && now - u.claude.at < 5 * 60_000) return;
-  u.claude = { ...next, at: now };
-  write(u);
+  const was = readPlan("claude");
+  // Every session reports the account's limits, an idle one's from its last answer: within one window use only rises,
+  // so a lower reading for the same window is an old one, and the higher stands.
+  const merge = (n, o) => (n && o && n.resetsAt && o.resetsAt && Math.abs(n.resetsAt - o.resetsAt) < 120_000 && o.pct > n.pct ? { ...n, pct: o.pct } : n ?? o ?? null);
+  if (was) { next.fiveHour = merge(next.fiveHour, was.fiveHour); next.weekly = merge(next.weekly, was.weekly); }
+  if (was && same({ fiveHour: was.fiveHour, weekly: was.weekly }, next) && now - was.at < 5 * 60_000) return;
+  writePlan("claude", { ...next, at: now });
 }
 
 /** Codex's rate limits (the protocol's RateLimitSnapshot), recorded as they come. */
@@ -42,19 +54,17 @@ export function recordCodex(r, now = Date.now()) {
     credits: r.credits?.hasCredits ? (r.credits.unlimited ? "unlimited" : r.credits.balance ?? "some") : null,
   };
   if (!next.primary && !next.secondary) return; // a snapshot of another limit (Codex sends several) says nothing of the plan's
-  const u = read();
-  u.codex = { ...next, at: now };
-  write(u);
+  writePlan("codex", { ...next, at: now });
 }
 
 /** One read of Codex's limits through a short-lived app server, at most every ten minutes. Fails soft. */
 let reading = null;
 export function refreshCodex(now = Date.now(), { force = false } = {}) {
-  const u = read();
   if (reading) return reading;
-  if (!force && ((u.codex && now - u.codex.at < CODEX_READ_EVERY_MS) || (u.codexTried && now - u.codexTried < CODEX_READ_EVERY_MS))) return null;
-  u.codexTried = now;
-  write(u);
+  const last = readPlan("codex")?.at ?? 0;
+  const tried = readPlan("codex-tried")?.at ?? 0;
+  if (!force && (now - last < CODEX_READ_EVERY_MS || now - tried < CODEX_READ_EVERY_MS)) return null;
+  writePlan("codex-tried", { at: now });
   reading = (async () => {
     try {
       const [{ bin }, { once }] = await Promise.all([import("./harness/codex.mjs"), import("./codex/rpc.mjs")]);

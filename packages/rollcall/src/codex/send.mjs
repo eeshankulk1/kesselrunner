@@ -1,4 +1,5 @@
-// `rollcall _codex-send <sock> <thread> say|interrupt` (stdin: the words): one message into a Codex worker's thread,
+// `rollcall _codex-send <sock> <thread> say|interrupt [<turn>|-]` (stdin: the words; <turn>: the running turn as the worker
+// last recorded it): one message into a Codex worker's thread,
 // from any rollcall process (the watcher, a CLI call), through the worker's app server. `say` starts a turn when the
 // worker is idle and steers the running one otherwise; `interrupt` stops the running turn. Exit 0 once the server
 // took it: its answer is the receipt (delivery.mjs), since nothing was typed that could be lost on the way.
@@ -12,12 +13,14 @@ async function runningTurn(conn, threadId) {
   return (r?.thread?.turns ?? []).findLast((t) => t.status === "inProgress")?.id ?? null;
 }
 
-export async function codexSend([sock, threadId, what]) {
-  if (!sock || !threadId || !["say", "interrupt"].includes(what)) { process.stderr.write("usage: rollcall _codex-send <sock> <thread> say|interrupt\n"); return 2; }
+export async function codexSend([sock, threadId, what, known = "-"]) {
+  if (!sock || !threadId || !["say", "interrupt"].includes(what)) { process.stderr.write("usage: rollcall _codex-send <sock> <thread> say|interrupt [<turn>|-]\n"); return 2; }
   let conn;
   try { conn = await connect(sock, () => {}, { timeoutMs: 8000 }); } catch (e) { process.stderr.write(`${e.message}\n`); return 1; }
   try {
     if (what === "interrupt") {
+      // A turn recorded as running may have ended a moment ago: then the server says which runs, if any.
+      try { if (known !== "-") { await conn.request("turn/interrupt", { threadId, turnId: known }); return 0; } } catch {}
       const turnId = await runningTurn(conn, threadId);
       if (turnId) await conn.request("turn/interrupt", { threadId, turnId });
       return 0;
@@ -26,9 +29,10 @@ export async function codexSend([sock, threadId, what]) {
     if (!text.trim()) return 0;
     const input = [{ type: "text", text }];
     const cid = clientId(DELIVERY);
-    // A turn can start or end between the look and the send: one more try the other way.
+    // The worker's record first; a turn can start or end between its write and this send, so on a refusal the server
+    // itself says which turn runs (reading the thread's turns, which costs more on a long thread) for one more try.
     for (let i = 0; i < 2; i++) {
-      const turnId = await runningTurn(conn, threadId);
+      const turnId = i === 0 ? (known === "-" ? null : known) : await runningTurn(conn, threadId);
       try {
         if (turnId) await conn.request("turn/steer", { threadId, expectedTurnId: turnId, input, clientUserMessageId: cid });
         else await conn.request("turn/start", { threadId, input, clientUserMessageId: cid });

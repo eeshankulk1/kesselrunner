@@ -14,8 +14,9 @@
 //   account/rateLimits/updated -> the usage meter
 // What a hook would add to the model's context goes in as a steer into the running turn; a Stop hook's block is a
 // new turn. rollcall's own messages carry a clientUserMessageId starting "rollcall-", so the UI's are the owner's.
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { pidAlive } from "../proc.mjs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -84,6 +85,8 @@ export async function codexWorker([h, id]) {
   const hook = (event, p = {}) => { try { return workerHook(h, id, event, { session_id: cfg.session, ...p }, { recordAsk }); } catch { return null; } };
   const log = (line) => { try { store.appendStatus(h, id, { ev: "codex", line: store.clip(String(line), 300) }); } catch {} };
 
+  // A worker of this task killed outright (SIGKILL: no handler runs) left its server and socket: they go first.
+  leftovers(h, id);
   // A unix socket path has room for ~100 bytes: the system temp folder, not the store.
   const sock = join(tmpdir(), `rollcall-codex-${process.pid}.sock`);
   rmSync(sock, { force: true });
@@ -100,13 +103,17 @@ export async function codexWorker([h, id]) {
     process.exit(code);
   };
   for (const s of ["SIGHUP", "SIGTERM"]) process.on(s, () => { hook("session-end", { reason: "signal" }); stopAll(0); });
+  // Whatever ends this process ends its server too: a crash here must not leave it running on its socket.
+  process.on("uncaughtException", (e) => { log(`the worker process failed: ${e?.message ?? e}`); hook("session-end", { reason: "crash" }); stopAll(1); });
+  process.on("exit", () => { try { server.kill("SIGTERM"); } catch {} try { ui?.kill("SIGTERM"); } catch {} rmSync(sock, { force: true }); });
   // Ctrl-C belongs to the UI in the foreground; this process shares its terminal and must not die of it.
   process.on("SIGINT", () => {});
   server.on("exit", (code) => { if (!ui) { process.stderr.write(`rollcall: Codex's app server exited (${code}) before the worker started.\n${serverErr}\n`); stopAll(1); } });
 
   for (let i = 0; i < 100 && !existsSync(sock); i++) await sleep(100);
-  const state = { pid: process.pid, sock, session: cfg.session, thread: null, turn: null, at: Date.now() };
-  const save = () => { try { writeFileSync(stateFile(h, id), JSON.stringify(state)); } catch {} };
+  const state = { pid: process.pid, server: server.pid, sock, session: cfg.session, thread: null, turn: null, at: Date.now() };
+  // Swapped in whole: the watcher and every sender read it while turns start and end.
+  const save = () => { const f = stateFile(h, id); const tmp = `${f}.${process.pid}.tmp`; try { writeFileSync(tmp, JSON.stringify(state)); renameSync(tmp, f); } catch { rmSync(tmp, { force: true }); } };
   const pending = new Map(); // server request id -> what it is
   let lastWords = null;
   let resetsAt = null; // when the Codex limit resets, from the last rate limits heard (ms)
@@ -134,7 +141,7 @@ export async function codexWorker([h, id]) {
         if (p.item?.type !== "userMessage") return;
         const cid = String(p.item.clientId ?? "");
         // A note of the worker's own (a steer from this process) starts nothing: busy is all it says.
-        if (cid.startsWith(INJECTED)) { store.appendStatus(h, id, { ev: "busy" }); return; }
+        if (cid.startsWith(INJECTED)) { try { store.appendStatus(h, id, { ev: "busy" }); } catch {} return; }
         const out = hook("prompt-submit", { prompt: textOf(p.item), owner: !cid.startsWith("rollcall-") });
         void inject(contextIn(out));
         return;
@@ -251,11 +258,28 @@ export async function codexWorker([h, id]) {
     const started = Date.now();
     ui = spawn(cfg.bin, ["--remote", `unix://${sock}`, "resume", state.thread], { stdio: "inherit", env: process.env });
     code = await new Promise((resolve) => ui.on("exit", (c) => resolve(c ?? 0)));
-    if (code === 0 || Date.now() - started > 10_000) break;
+    // A UI that ran a while, or one whose server is gone, is not retried: there is nothing left to attach to.
+    if (code === 0 || Date.now() - started > 10_000 || server.exitCode !== null || server.signalCode !== null) break;
     await sleep(1000);
   }
   hook("session-end", { reason: "exit" });
   stopAll(code);
+}
+
+/**
+ * What an earlier worker of the task left when it was killed outright: its app server (by the pid it recorded, and
+ * only while that id still runs a codex app server, so a reused id is left alone) and its socket.
+ */
+function leftovers(h, id) {
+  let rec = null;
+  try { rec = JSON.parse(readFileSync(stateFile(h, id), "utf8")); } catch { return; }
+  if (rec?.pid && rec.pid !== process.pid && pidAlive(rec.pid)) return; // that worker still runs: not ours to touch
+  if (Number.isInteger(rec?.server) && pidAlive(rec.server)) {
+    const cmd = spawnSync("ps", ["-o", "command=", "-p", String(rec.server)], { encoding: "utf8", timeout: 2000 }).stdout ?? "";
+    if (/\bapp-server\b/.test(cmd) && cmd.includes(String(rec.sock ?? "\0"))) { try { process.kill(rec.server, "SIGTERM"); } catch {} }
+  }
+  if (rec?.sock) rmSync(rec.sock, { force: true });
+  rmSync(stateFile(h, id), { force: true });
 }
 
 /** The task's session `session` ran Codex thread `thread`: on the record, so a resume finds it. */

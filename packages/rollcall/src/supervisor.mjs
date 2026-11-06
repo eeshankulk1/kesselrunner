@@ -17,9 +17,8 @@ import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import * as tmux from "./tmux.mjs";
 import { openBlocker, resetAt } from "./trouble.mjs";
-import { adapter, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
+import { adapter, effortOk, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
 import { MODES, modelOk } from "./harness/claude.mjs";
-import { effortOk } from "./harness/index.mjs";
 
 /** A worker's environment names its task, so its own `rollcall task ...` commands need no home. */
 export const TASK_ENV = "ROLLCALL_TASK";

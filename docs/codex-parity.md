@@ -203,7 +203,7 @@ AskUserQuestion, a note that it runs on Codex, and, since Codex has no
 Artifact tool, to name before and after screenshots in its ship question
 instead of publishing a page.
 
-**The usage meter.** `~/.rollcall/usage.json` (`src/usage.mjs`) holds how much
+**The usage meter.** `~/.rollcall/usage-claude.json` and `usage-codex.json` (`src/usage.mjs`) hold how much
 room each plan has. Claude's five-hour and weekly windows come from Claude
 Code's status line JSON (`rate_limits`, on Pro and Max plans), recorded by any
 session's `rollcall statusline`. Codex's come from `account/rateLimits/updated`

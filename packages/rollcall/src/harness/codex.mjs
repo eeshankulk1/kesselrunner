@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { received } from "../delivery.mjs";
+import { pidAlive } from "../proc.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { wantsBrowser } from "../supervisor.mjs";
@@ -123,7 +124,8 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
 function send(t, args, input) {
   const rec = workerRecord(t.home, t.id);
   if (!rec?.sock || !rec.thread) return { ok: false, err: "its Codex worker has not started its thread yet" };
-  const r = spawnSync(process.execPath, [BIN, "_codex-send", rec.sock, rec.thread, ...args], { encoding: "utf8", input, timeout: 20_000 });
+  // The running turn as the worker last recorded it saves the sender reading the thread's history to find it.
+  const r = spawnSync(process.execPath, [BIN, "_codex-send", rec.sock, rec.thread, ...args, rec.turn ?? "-"], { encoding: "utf8", input, timeout: 10_000 });
   return r.status === 0 ? { ok: true } : { ok: false, err: (r.stderr || r.stdout || "the app server refused").trim().split("\n").at(-1) };
 }
 
@@ -143,7 +145,11 @@ export function type(t, text) {
 export const interrupt = (t) => send(t, ["interrupt"]).ok;
 
 /** Words go through the protocol, never into the UI's input box: the worker takes them once its thread runs. */
-export const takesTyping = (t) => !!workerRecord(t.home, t.id)?.thread;
+export function takesTyping(t) {
+  const rec = workerRecord(t.home, t.id);
+  // A record whose process is gone (killed outright, no handler ran) has no server behind its socket.
+  return !!rec?.thread && pidAlive(rec.pid);
+}
 
 /** Codex keeps its own transcript format: rollcall reads the protocol instead. */
 export const transcriptOf = () => null;
