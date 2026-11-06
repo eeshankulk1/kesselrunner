@@ -18,7 +18,7 @@
 // running, the task is finished and was not resumed, no worker to resume); 4 the worker waits on Claude Code's trust prompt
 // for the repo (the message says what the owner does, once per repo).
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { dirname, join } from "node:path";
@@ -171,12 +171,30 @@ function worktreeSetup(t) {
   } catch { return null; }
 }
 
-/** What a worker does to set up its worktree. A fresh worker inherits a set-up worktree: running setup again only costs it time. */
-function setupLine(t, { discuss, fresh }) {
-  if (discuss) return "Set up only what your research needs there, not the test manifest's worktree.setup.";
+/**
+ * What a worker does to set up its worktree. rollcall set up a new task's worktree before the worker's first turn
+ * (task.runtime.setup), so the worker only reads how it went; a fresh worker inherits a set-up worktree.
+ */
+function setupLine(t, { discuss, fresh, rc }) {
+  const rt = t.runtime;
+  const ports = rt?.ports ? ` Its ports are ${rt.ports.base}-${rt.ports.last} (\`$ROLLCALL_PORT\` is the first): \`${rc} manifest\` prints the test manifest with them filled in, \`${rc} run list\` lists its run actions (\`${rc} run start <name>\` starts one in the background with a log), and before you trust a browser check, \`${rc} serving <port>\` must say this checkout serves it.` : "";
   const s = worktreeSetup(t);
-  if (fresh !== undefined) return `The last worker set it up${s ? `; run \`${s.run}\` again only if something is missing` : ""}.`;
-  return s ? `Run \`${s.run}\` there first${s.flags ? ` (${s.flags})` : ""}.` : "Run the test manifest's worktree.setup there first if it defines one.";
+  if (fresh !== undefined) return `The last worker set it up${s ? `; run \`${s.run}\` again only if something is missing` : ""}.${ports}`;
+  const ran = rt?.setup;
+  if (ran) {
+    const what = [existsSync(join(t.repo.main, ".worktreeinclude")) ? "copied the files .worktreeinclude names" : null, ran.cmd ? `ran \`${ran.cmd}\`` : null].filter(Boolean).join(" and ") || "had nothing to run";
+    return `rollcall set it up before your first turn (it ${what}): do not run that again. \`${rc} setup\` says how it went, with its log; if it failed, fix the cause and run \`${rc} setup --rerun\`.${ports}`;
+  }
+  if (discuss) return `Set up only what your research needs there, not the test manifest's worktree.setup.${ports}`;
+  return (s ? `Run \`${s.run}\` there first${s.flags ? ` (${s.flags})` : ""}.` : "Run the test manifest's worktree.setup there first if it defines one.") + ports;
+}
+
+/** Where the task came from, when not from the owner's words alone: the issue its PR closes, the PR it carries on. */
+function fromLine(t) {
+  if (t.from?.kind === "issue") return ` The task comes from issue #${t.from.number} (${t.from.url}): your PR closes it, so its body says \`Closes #${t.from.number}\`.`;
+  if (t.from?.kind === "pr") return ` The task carries on PR #${t.from.number} (${t.from.url}), whose branch is checked out here as it was: push to it and open no new PR.`;
+  if (t.from?.kind === "branch") return ` The branch ${t.from.name} is checked out here as it was: build on it as it stands.`;
+  return "";
 }
 
 function composeBrief(t, { fresh, rc }) {
@@ -185,11 +203,11 @@ function composeBrief(t, { fresh, rc }) {
   mkdirSync(files, { recursive: true });
   // The picker shows a header of 12 characters at most, the task's name and a space first.
   const header = 12 - nameOf(t.id).length - 1;
-  const where = t.branch ? `${t.worktree} (branch ${t.branch}, from ${t.base}); it is yours alone. ${setupLine(t, { discuss, fresh })} Stay in it.${baseMoved(t, fresh)}`
+  const where = t.branch ? `${t.worktree} (branch ${t.branch}, from ${t.base}); it is yours alone. ${setupLine(t, { discuss, fresh, rc })} Stay in it.${fromLine(t)}${baseMoved(t, fresh)}`
     : t.repo.key ? `${t.worktree}, the main checkout, read-only: this task changes no files.`
       : `${t.worktree}, a plain folder: this task belongs to no repo. It is a job on the machine, so it opens no PR and finishes with \`--state closed\`.`;
   const words = t.words.length
-    ? t.words.map((x, i) => (t.words.length > 1 ? `[${stamp(x.at)}${x.via === "worker" ? ", typed in the worker's own window" : ""}]\n` : "") + x.text.trim() + (i < t.words.length - 1 ? "\n" : "")).join("\n")
+    ? t.words.map((x, i) => (t.words.length > 1 || x.via === "issue" ? `[${stamp(x.at)}${x.via === "worker" ? ", typed in the worker's own window" : x.via === "issue" ? ", the GitHub issue the task comes from, as written there" : ""}]\n` : "") + x.text.trim() + (i < t.words.length - 1 ? "\n" : "")).join("\n")
     : `(none recorded; the title is all there is: "${t.title}". Ask the owner what they want before ${discuss ? "researching" : "building"}.)`;
   const set = `${rc} task set ${t.id}`;
   const shipWord = t.ship ? "The owner already said to ship this" : 'When the owner\'s words already say to ship ("ship it", "no need to confirm")';

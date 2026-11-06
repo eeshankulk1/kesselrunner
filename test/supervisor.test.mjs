@@ -60,7 +60,7 @@ settings.hooks ??= {};
 const valued = new Set(["--session-id", "--resume", "--add-dir", "--settings", "--permission-mode", "--model", "--effort", "-n"]);
 let prompt = null;
 for (let i = 0; i < args.length; i++) { if (valued.has(args[i])) { i++; continue; } prompt = args[i]; }
-log({ argv: args, cwd: process.cwd(), task: process.env.ROLLCALL_TASK, pid: process.pid });
+log({ argv: args, cwd: process.cwd(), task: process.env.ROLLCALL_TASK, port: process.env.ROLLCALL_PORT, pid: process.pid });
 const TRANSCRIPT = ROOT + "/transcripts/" + sid + ".jsonl";
 fs.mkdirSync(ROOT + "/transcripts", { recursive: true });
 const record = (o) => fs.appendFileSync(TRANSCRIPT, JSON.stringify({ timestamp: new Date().toISOString(), sessionId: sid, ...o }) + "\\n");
@@ -938,6 +938,31 @@ test("past 35% context a worker hears it once from its own hooks, not the superv
   assert.equal(w.claude.runs().length, 2, "rollcall started it, with no model turn");
   assert.match(w.claude.runs().at(-1).argv.at(-1), /You replace an earlier worker on this task \(context at 73%, the cap\)[\s\S]*Its handoff, written for you[^\n]*:\n\nThe header is half done: title in, subtitle next\./);
   assert.equal(w.task().worker.context, null, "the new session's context is not the old one's");
+});
+
+test("a new task's worker starts once rollcall's setup is done, with its ports in its environment, and its brief says what already ran", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const { sb, claude } = server(t);
+  const min = 43000 + (process.pid % 200) * 10;
+  sb.env = { ...sb.env, ROLLCALL_PORT_MIN: String(min), ROLLCALL_PORT_MAX: String(min + 49) };
+  write(join(sb.main, ".claude/test-manifest.json"), JSON.stringify({ worktree: { setup: "sleep 2 && echo ready > ready.txt" }, devServer: { baseUrl: "http://localhost:{port}" } }));
+  write(join(sb.main, ".gitignore"), "ready.txt\n");
+  for (const c of [["add", "."], ["commit", "-qm", "manifest"], ["push", "-q", "origin", "main"]]) spawnSync("git", ["-C", sb.main, ...c], { env: sb.env });
+  const sup = sb.session(sb.root);
+  sup.env = { ...sup.env, KESSELRUNNER_CLAUDE_BIN: claude.bin };
+  sup.start();
+  assert.equal(sup.cli(["supervise", "alpha"]).code, 0);
+  assert.equal(sup.cli(["task", "new", "chat header", "--repo", sb.main, "--words", "go"]).code, 0);
+  const wt = join(sb.main, ".claude/worktrees/chat-header");
+  const start = (args) => spawnSync(process.execPath, [START, ...args], { cwd: sup.cwd, encoding: "utf8", env: { ...sup.env, ROLLCALL_SESSION: sup.id } });
+  const brief = start(["t1", "--dry-run"]).stdout;
+  assert.match(brief, /rollcall set it up before your first turn \(it ran `sleep 2 && echo ready > ready\.txt`\): do not run that again\./);
+  assert.match(brief, new RegExp(`Its ports are ${min}-${min + 9} \\(\`\\$ROLLCALL_PORT\` is the first\\)`));
+  assert.match(brief, /before you trust a browser check, `[^`]*serving <port>` must say this checkout serves it/);
+  assert.equal(start(["t1"]).status, 0);
+  await until(() => claude.runs().length === 1, { timeout: 15_000 });
+  assert.ok(existsSync(join(wt, "ready.txt")), "the worker started after its setup finished");
+  assert.equal(claude.runs()[0].port, String(min), "its environment has its ports");
+  assert.ok(readFileSync(join(sb.home, "_supervisors/alpha/workers/t1/launch.sh"), "utf8").includes("setup --wait --quiet"));
 });
 
 test("a fresh worker's brief: the notes that last and the last worker's own, the setup line, the files to start from; the first brief gets the manifest's exact command", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {

@@ -14,6 +14,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, sep } from "node:path";
 import { defaultBranch, fetchSync, gitSync, locate, mainSha } from "./git.mjs";
 import { keyOf, manifestAt } from "./results.mjs";
+import { forgetCheckout, stopAllActions } from "./runtime.mjs";
+import { spotlightNaming, spotlightOff } from "./archive.mjs";
 
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, ...opts });
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -181,6 +183,12 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     }
     if (!why) { keep(w, "not merged"); continue; }
     if (onMain && w.branch && untouchedNew(main, w.branch)) { keep(w, "new, nothing committed yet"); continue; }
+    // Its own run actions (a dev server rollcall started) stop with it, so they do not keep it "in use"; a spotlight on it ends.
+    if (!dryRun) {
+      stopAllActions(path);
+      const spot = spotlightNaming(main, path);
+      if (spot) { const off = spotlightOff(spot); if (!off.ok) { keep(w, `its spotlight could not end: ${off.err}`); continue; } }
+    }
     if (cwds === undefined) cwds = processCwds();
     if (occupied(path) || cwds?.some((c) => c === path || c.startsWith(path + sep))) { keep(w, "in use"); continue; }
     const status = gitSync(path, ["status", "--porcelain"]);
@@ -210,6 +218,7 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     const rm = gitSync(main, ["worktree", "remove", d.path]);
     if (rm.status !== 0) { keep(d.w, `remove failed: ${lastLine(rm.stderr)}`); continue; }
     if (d.w.branch) gitSync(main, ["branch", "-D", d.w.branch]);
+    forgetCheckout(d.path);
     out.removed.push({ name: basename(d.path), branch: d.w.branch, kb: sizes.get(d.path) ?? 0, why: d.why });
   }
   if (missing) gitSync(main, ["worktree", "prune"]);

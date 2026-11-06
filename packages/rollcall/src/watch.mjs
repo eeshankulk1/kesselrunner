@@ -31,6 +31,8 @@ import {
   unpark, watcherEnv, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
+import { syncSpotlights } from "./archive.mjs";
+import { setupState } from "./runtime.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
 import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
@@ -426,8 +428,24 @@ export function tick(h, now = Date.now()) {
   try { keepAwake(h, views, now); } catch {}
   try { trouble.look(now); } catch {}
   try { settleWaits(h, views, now); } catch {}
+  try { followSpotlights(h, seen); } catch {}
   try { remindOwner(h, now); } catch {}
   drawTabs(h, now);
+}
+
+/**
+ * A spotlit task's changes reach the main checkout each poll. One that can no longer follow (someone changed the main
+ * checkout) is news for the supervisor, once per reason.
+ */
+function followSpotlights(h, seen) {
+  for (const { spot, result } of syncSpotlights(h)) {
+    if (result.ok) continue;
+    const key = `spotlight:${spot.task.id}`;
+    if (seen[key] === result.err) continue;
+    seen[key] = result.err;
+    store.writeHomeFile(h, "seen", seen);
+    store.enqueueWake(h, { task: spot.task.id, kind: "spotlight", err: result.err });
+  }
 }
 
 /** A ship's stage past twice its usual time is one line for the owner, once per stage. Returns whether it said so. */
@@ -733,6 +751,12 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "setup-failed" && isOpen(t) && setupState(t.worktree)?.state === "failed") {
+      const st = setupState(t.worktree);
+      line = `${label(t)}: its worktree setup failed: "${store.clip(store.oneLine(st.last ?? ""), 200)}" (log: ${st.log}). Fix what you can: \`rollcall task setup ${t.id} --rerun\` runs it again. ` +
+        `Its worker reads the result before it starts work; tell it with \`rollcall task tell ${t.id} "<text>"\` if you change something. One line to the owner when it needs them.`;
+    } else if (e.kind === "spotlight" && isOpen(t)) {
+      line = `${label(t)}: the main checkout no longer follows it in the spotlight: ${e.err}. \`rollcall task spotlight ${t.id} --off\` ends the spotlight (it refuses while the main checkout has changes of its own). One line to the owner.`;
     } else if (e.kind === "exit-loop" && isOpen(t)) {
       line = `${label(t)}: its worker exited ${e.times} times in ${RESUME_WINDOW_MS / 60_000} minutes, so rollcall stopped resuming it. Check \`rollcall task show ${t.id}\`, then ask the owner what to do.`;
     }

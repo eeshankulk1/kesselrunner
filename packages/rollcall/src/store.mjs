@@ -217,6 +217,8 @@ export function writeHomeFile(h, name, v) {
 }
 /** Runs `fn` under a home's lock for its small state (who holds the home, which watcher runs). */
 export const withHomeLock = (h, fn) => withDirLock(join(homeDir(h), ".home.lock"), fn);
+/** Runs `fn` under the lock of checkouts' runtime state (runtime.mjs: the port blocks, the spotlight). */
+export const withRuntimeLock = (fn) => withDirLock(join(home(), "_runtime", ".lock"), fn);
 
 /** A worker's launch files live here (settings, launch script, prompt). */
 export function workerDir(h, id) {

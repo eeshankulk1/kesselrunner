@@ -19,6 +19,7 @@ import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import * as tmux from "./tmux.mjs";
 import { openBlocker, resetAt } from "./trouble.mjs";
+import { launchLines } from "./runtime.mjs";
 
 /** A worker's environment names its task, so its own `rollcall task ...` commands need no home. */
 export const TASK_ENV = "ROLLCALL_TASK";
@@ -469,6 +470,8 @@ function launchSettings(t) {
  */
 export function launch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
   if (!tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };
+  // An archived task's worktree comes back only with its saved work: restore does both, then resumes the worker.
+  if (t.archived) return { ok: false, err: `${t.id} is archived: rollcall task restore ${t.id} brings back its worktree and its worker` };
   if (resume) { const r = restoreWorktree(t); if (!r.ok) return r; }
   const last = t.sessions?.at(-1);
   // A v2 worker is a background session the daemon may still run: stopped first, so one conversation has one process.
@@ -539,6 +542,8 @@ function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = n
     `export ${TASK_ENV}=${q(`${t.home}:${t.id}`)}`,
     ...["ROLLCALL_HOME", "ROLLCALL_TMUX_SOCKET", "ROLLCALL_WATCHER"].filter((k) => process.env[k]).map((k) => `export ${k}=${q(process.env[k])}`),
     ...(browser ? [`export PLAYWRIGHT_MCP_OUTPUT_DIR=${q(files)}`] : []),
+    // Its worktree's environment (ports and all), and a wait for a setup still running: the first turn finds it ready.
+    ...launchLines(t, BIN),
     `cd ${q(t.worktree)} || exit 1`,
     resume
       ? `${q(CLAUDE())} --resume ${q(session)}${addDir} --settings ${q(settings)}${permission}${first}`

@@ -11,11 +11,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asksText, promptAuthor } from "./asked.mjs";
 import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoKey } from "./git.mjs";
-import { P, ago, cli, short } from "./session.mjs";
+import { BIN, P, ago, cli, short } from "./session.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import { WAITABLE, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
-import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, workerState } from "./supervisor.mjs";
+import { archivePlan, archiveTask, planLines, restoreTask, spotlightOff, spotlightOn, spotlightSync } from "./archive.mjs";
+import { checkoutFacts, runtimeLines, runtimeOf, spotlightOf, startSetup } from "./runtime.mjs";
+import { runtimeCommand } from "./runtime-cli.mjs";
+import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
 
 const TYPES = ["feat", "fix", "refactor", "test", "docs"];
 /** build: a change that ships; discuss: research and a recommendation the owner talks through (start.mjs briefs each its own way). */
@@ -42,8 +45,13 @@ const overLimit = (what, text, limit) => (text.length > limit ? `${what} is ${te
 export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<text>" | --words-file <f>] [--note "<text>"]...
                     [--slug <s>] [--type feat|fix|refactor|test|docs] [--kind build|discuss] [--base <ref|task>]
                     [--after <id>]... [--until landed] [--hold] [--ship] [--no-worktree | --no-repo | --worktree <dir>]
-                    [--browser] [--model <m>] [--effort <e>]
-                                         record a task in this supervisor's home and create its worktree
+                    [--browser] [--model <m>] [--effort <e>] [--issue <n|url> | --pr <n|url> | --branch <name>]
+                                         record a task in this supervisor's home and create its worktree, with
+                                         its ports, the files .worktreeinclude names and the manifest's
+                                         worktree.setup running in the background
+                                         (--issue: the issue's title and body become its words, and its PR closes
+                                         it; --pr: it carries on that open PR, on its branch; --branch: an
+                                         existing branch, checked out as is)
                                          (--after: rollcall starts it once those tasks have a PR, or with
                                          --until landed once they have landed; --hold: it stays unstarted
                                          until start.mjs runs, on the owner's word)
@@ -79,6 +87,16 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
   rollcall task decisions [add "<decision>" [--where "<how the owner answers>"] [--from <task>] | done <n> ["<answer>"]]
                                          what waits on the owner beyond any one task, one list for every
                                          supervisor: listed until answered
+  rollcall task setup <id|here> [--rerun] [--wait]   its worktree's setup: how it went, or run it again
+  rollcall task run <id|here> [list | start|stop|restart <name|all> | log <name>]   its run actions
+  rollcall task ports <id|here>          its block of ports
+  rollcall task archive <id> [--yes]     stop its worker and run actions, save its uncommitted work to a local ref,
+                                         remove its worktree and free its ports; the record and conversation stay.
+                                         Without --yes it only shows what would go and how much disk it frees
+  rollcall task restore <id>             its worktree back at its old path with that work, set up, worker resumed
+  rollcall task spotlight <id> [--off [--force] | --sync]
+                                         run its files from the main checkout (one task per repo; the owner's or
+                                         supervisor's action, never a worker's); --off puts the main checkout back
   Every task command takes --home <name>; a worker's own task and a supervisor's home need none.`;
 
 const helpWanted = (args) => args.includes("--help") || args.includes("-h");
@@ -198,6 +216,9 @@ function create(args, ctx) {
   const [model] = ctx.flag(args, "--model");
   const [effort] = ctx.flag(args, "--effort");
   const [adopt] = ctx.flag(args, "--worktree");
+  const [issueArg] = ctx.flag(args, "--issue");
+  const [prArg] = ctx.flag(args, "--pr");
+  const [branchArg] = ctx.flag(args, "--branch");
   const h = homeFor(ctx);
   if (!h) ctx.fail("this session supervises nothing: run `rollcall supervise <name>` first, or pass --home <name>");
   const mine = ctx.whoAmI() && homeOf(ctx.whoAmI().id);
@@ -205,8 +226,12 @@ function create(args, ctx) {
   const after = ctx.flag(args, "--after").map((a) => resolve(a, { ...ctx, home: h }).id);
   // A flag rollcall does not know would otherwise become the title (a `task new --help` once made a task "--help").
   if (args[0]?.startsWith("-")) ctx.fail(`task new: unknown flag "${args[0]}" (rollcall task new --help)`);
-  const title = store.clip(store.oneLine(args.join(" ")), 80);
-  if (!title) ctx.fail('usage: rollcall task new "<title>" [--repo <dir>] [--words "<text>"]');
+  const sources = [issueArg, prArg, branchArg].filter((x) => x !== undefined);
+  if (sources.length > 1) ctx.fail("--issue, --pr and --branch: pick one");
+  if (sources.length && (adopt !== undefined || noWorktree || noRepo)) ctx.fail("--issue, --pr and --branch make a worktree: they take no --worktree, --no-worktree or --no-repo");
+  if ((prArg !== undefined || branchArg !== undefined) && baseArg !== undefined) ctx.fail("--pr and --branch check out a branch as it is: they take no --base");
+  let title = store.clip(store.oneLine(args.join(" ")), 80);
+  if (!title && !issueArg && !prArg) ctx.fail('usage: rollcall task new "<title>" [--repo <dir>] [--words "<text>"]');
   if (!TYPES.includes(type)) ctx.fail(`--type is one of ${TYPES.join(", ")}`);
   if (!KINDS.includes(kind)) ctx.fail(`--kind is one of ${KINDS.join(", ")}`);
   if (model !== undefined && !modelOk(model)) ctx.fail(`--model is a model alias or id, like opus, sonnet, opus[1m] or claude-opus-5-5`);
@@ -229,6 +254,10 @@ function create(args, ctx) {
   }
   let words = wordsArg ?? null;
   if (wordsFile) { try { words = readFileSync(wordsFile, "utf8"); } catch { ctx.fail(`cannot read ${wordsFile}`); } }
+  // Where the work comes from: a GitHub issue (its words), an open PR or an existing branch (its branch).
+  const from = issueArg !== undefined ? fromIssue(issueArg, main, ctx) : prArg !== undefined ? fromPr(prArg, main, ctx) : branchArg !== undefined ? fromBranch(branchArg, main, ctx) : null;
+  if (!title) title = store.clip(store.oneLine(from?.title ?? ""), 80);
+  if (!title) ctx.fail("the task needs a title");
 
   let worktree = main;
   let branchName = null;
@@ -240,6 +269,12 @@ function create(args, ctx) {
     if (b && branchName === b) ctx.fail(`${own.top} is on ${b}, the default branch: a task works on a branch of its own`);
     worktree = own.top;
     base = baseArg ? baseRef(baseArg, main, h, ctx) : b ? `origin/${b}` : null;
+  } else if (from?.branch) {
+    const b = defaultBranch(info);
+    if (b) fetchSync(main, b);
+    base = b ? `origin/${b}` : null;
+    branchName = from.branch;
+    worktree = freePath(main, slugify(slugArg ?? from.branch.split("/").pop()));
   } else if (!noWorktree && !noRepo) {
     const b = defaultBranch(info);
     if (!b) ctx.fail(`${repo.name} has no origin default branch to start a worktree from (--no-worktree to work in the main checkout)`);
@@ -261,16 +296,26 @@ function create(args, ctx) {
     const t = {
       id: `t${n}`, n, home: h, title, kind, state: "working", stateAt: now, question: null, ask: null, pr: null,
       repo: { key: repo.key, name: repo.name, main }, worktree, branch: branchName, base, baseSha: null,
-      words: words?.trim() ? [{ at: now, text: words.slice(0, MAX_WORDS) }] : [],
+      words: [...(from?.words ? [{ at: now, text: from.words.slice(0, MAX_WORDS), via: "issue" }] : []), ...(words?.trim() ? [{ at: now, text: words.slice(0, MAX_WORDS) }] : [])],
       notes: notes.filter((x) => x.trim()).map((x) => ({ at: now, by: g ? "supervisor" : "a shell", text: x.trim() })), sessions: [],
-      after, output: null, createdAt: now, ...(until ? { until } : {}), ...(ship ? { ship: true } : {}), ...(browser ? { browser: true } : {}), ...(hold ? { hold: true } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      after, output: null, createdAt: now, ...(from ? { from: from.record, ...(from.pr ? { pr: from.pr } : {}) } : {}), ...(until ? { until } : {}), ...(ship ? { ship: true } : {}), ...(browser ? { browser: true } : {}), ...(hold ? { hold: true } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}),
     };
     store.writeTask(t);
     return t;
   });
   if (!made) ctx.fail("the task store is busy; try again");
   const t = made.out;
-  if (own) {
+  if (from?.branch) {
+    const local = gitSync(main, ["rev-parse", "--verify", "--quiet", `refs/heads/${branchName}`]).status === 0;
+    const r = gitSync(main, ["worktree", "add", ...(local ? [worktree, branchName] : ["--track", "-b", branchName, worktree, `origin/${branchName}`])], { timeout: 300_000 });
+    if (r.status !== 0) {
+      update(t, ctx, (x) => { transition(x, "no-worktree"); x.notes.push({ at: Date.now(), by: "rollcall", text: `worktree add failed: ${r.stderr.trim()}` }); });
+      ctx.fail(`git worktree add failed: ${r.stderr.trim()}${/already (checked out|used by worktree)/.test(r.stderr) ? ` (a worktree has it already: --worktree <that folder> takes it over)` : ""}`);
+    }
+    const top = locate(worktree)?.top ?? worktree;
+    const baseSha = (base && gitSync(top, ["merge-base", "HEAD", base]).stdout?.trim()) || null;
+    Object.assign(t, update(t, ctx, (x) => { x.worktree = top; x.baseSha = baseSha; x.notes.push({ at: Date.now(), by: "rollcall", text: from.note }); }));
+  } else if (own) {
     // The base commit: where its branch left the default branch, so gc counts only what landed after it.
     const baseSha = (base && gitSync(own.top, ["merge-base", "HEAD", base]).stdout?.trim()) || null;
     Object.assign(t, update(t, ctx, (x) => { x.baseSha = baseSha; x.notes.push({ at: Date.now(), by: "rollcall", text: `took over the existing worktree ${own.top} (${branchName})` }); }));
@@ -285,11 +330,72 @@ function create(args, ctx) {
     const baseSha = gitSync(top, ["rev-parse", "HEAD"]).stdout?.trim() || null;
     Object.assign(t, update(t, ctx, (x) => { x.worktree = top; x.baseSha = baseSha; }));
   }
-  if (json) { ctx.say(JSON.stringify(t, null, 2)); return 0; }
+  // A new worktree runs on its own before its worker's first turn: its ports, then its files and setup in the background.
+  const fresh = !own && t.branch && existsSync(t.worktree);
+  const facts = fresh ? checkoutFacts(t.worktree) : null;
+  const setup = fresh ? startSetup(t.worktree, { bin: BIN, skipCommand: kind === "discuss" }) : null;
+  if (json) { ctx.say(JSON.stringify({ ...t, runtime: runtimeOf(t) }, null, 2)); return 0; }
   ctx.say(`${t.id}: "${t.title}" in ${repo.name}${kind === "discuss" ? " (a discussion)" : ""}, supervisor ${h}; its tag: ${label(t)}`);
   ctx.say(noRepo ? `  works in ${worktree}, on no repo` : noWorktree ? `  works in the main checkout: ${worktree} (read-only for agents)` : `  worktree: ${t.worktree} (${branchName}${own ? ", taken over as it was" : `, from ${base}`})`);
+  if (from) ctx.say(`  ${from.note}`);
+  if (facts?.ports) ctx.say(`  ports ${facts.ports.base}-${facts.ports.last}`);
+  if (setup) ctx.say(`  setup running in the background${setup.cmd ? `: ${setup.cmd}` : " (copying the files .worktreeinclude names)"}; \`${cli()} task setup ${t.id}\` shows how it went`);
   if (after.length) ctx.say(`  after: ${after.join(", ")}${until ? ", once landed" : ""}`);
   return 0;
+}
+
+/** The first free worktree folder for `slug` in the main checkout `main`. */
+function freePath(main, stem) {
+  let slug = stem;
+  for (let i = 2; existsSync(join(main, ".claude", "worktrees", slug)); i++) slug = `${stem}-${i}`;
+  return join(main, ".claude", "worktrees", slug);
+}
+
+/** gh's JSON for `args`, run in `main`, or a failure that says what went wrong. */
+function ghJson(main, args, ctx, what) {
+  const r = spawnSync(process.env.ROLLCALL_GH || "gh", args, { cwd: main, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+  if (r.error) ctx.fail(`${what}: gh is not available (${r.error.code ?? r.error.message})`);
+  if (r.status !== 0) ctx.fail(`${what}: ${(r.stderr || r.stdout).trim().split("\n").pop()}`);
+  try { return JSON.parse(r.stdout); } catch { return ctx.fail(`${what}: gh printed no JSON`); }
+}
+
+/** "12", "#12" or a GitHub issue/PR URL as its number, or null. */
+const numberIn = (arg) => { const m = /^#?(\d+)$/.exec(String(arg).trim()) ?? /\/(?:issues|pull)\/(\d+)/.exec(String(arg)); return m ? Number(m[1]) : null; };
+
+/** `--issue`: the issue's title and body become the task's words, quoted as the issue's; its PR closes it. */
+function fromIssue(arg, main, ctx) {
+  const n = numberIn(arg);
+  if (!n) ctx.fail(`--issue takes an issue number or URL: ${arg}`);
+  const i = ghJson(main, ["issue", "view", String(n), "--json", "number,title,body,url,state"], ctx, `issue #${n}`);
+  if (i.state && i.state !== "OPEN") ctx.fail(`issue #${n} is ${i.state.toLowerCase()}: nothing was created`);
+  const words = `GitHub issue #${i.number}: ${i.title}\n${i.url}\n\n${(i.body ?? "").trim() || "(no body)"}`;
+  return { title: i.title, words, record: { kind: "issue", number: i.number, url: i.url }, note: `from issue #${i.number} (${i.url}): its PR closes it` };
+}
+
+/** `--pr`: carry on an open PR of this repo, on its own branch. */
+function fromPr(arg, main, ctx) {
+  const n = numberIn(arg);
+  if (!n) ctx.fail(`--pr takes a PR number or URL: ${arg}`);
+  const p = ghJson(main, ["pr", "view", String(n), "--json", "number,title,url,headRefName,isCrossRepository,state"], ctx, `PR #${n}`);
+  if (p.state !== "OPEN") ctx.fail(`PR #${n} is ${String(p.state).toLowerCase()}: only an open PR is carried on`);
+  if (p.isCrossRepository) ctx.fail(`PR #${n} comes from a fork: check it out by hand (gh pr checkout ${n}) in a worktree, then --worktree <that folder>`);
+  fetchBranch(main, p.headRefName);
+  return { title: p.title, branch: p.headRefName, pr: p.url, record: { kind: "pr", number: p.number, url: p.url }, note: `carries on PR #${p.number} (${p.url}) on its branch ${p.headRefName}: push to it, no new PR` };
+}
+
+/** `--branch`: an existing branch, local or on origin, checked out as it is. */
+function fromBranch(arg, main, ctx) {
+  const name = String(arg).replace(/^origin\//, "").replace(/^refs\/heads\//, "");
+  if (!name || gitSync(main, ["check-ref-format", "--branch", name]).status !== 0) ctx.fail(`--branch takes a branch name: ${arg}`);
+  const local = gitSync(main, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]).status === 0;
+  if (!local && !fetchBranch(main, name)) ctx.fail(`no branch ${name} here or on origin: nothing was created`);
+  return { title: name, branch: name, record: { kind: "branch", name }, note: `works on the existing branch ${name}, checked out as it is` };
+}
+
+/** Fetches origin's `name` into origin/<name>; whether it exists there. */
+function fetchBranch(main, name) {
+  const r = gitSync(main, ["fetch", "--quiet", "origin", `+refs/heads/${name}:refs/remotes/origin/${name}`], { timeout: 120_000 });
+  return r.status === 0;
 }
 
 // ---------------------------------------------------------------- list / show
@@ -323,11 +429,11 @@ function list(args, ctx) {
   const h = homeFor(ctx);
   const homes = h ? [h] : store.listHomes();
   const all = take(args, "--all");
-  const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now) }));
+  const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now), ...(json ? { runtime: runtimeOf(t, now) } : {}) }));
   if (json) { ctx.say(JSON.stringify({ home: h, tasks, decisions: allDecisions() }, null, 2)); return 0; }
   if (!tasks.length) ctx.say(h ? `rollcall: no tasks in supervisor ${h}` : "rollcall: no tasks");
   for (const t of tasks) {
-    ctx.say(`${(h ? t.id : `${t.home}:${t.id}`).padEnd(h ? 4 : 12)} ${t.state.padEnd(9)} ${t.repo.name}  ${label(t)}  ${workerLine(t, t.worker, now)}${t.pr ? `  ${t.pr}` : ""}  (${ago(t.updatedAt, now)})`);
+    ctx.say(`${(h ? t.id : `${t.home}:${t.id}`).padEnd(h ? 4 : 12)} ${t.state.padEnd(9)} ${t.repo.name}  ${label(t)}${t.archived ? "  (archived)" : ""}  ${workerLine(t, t.worker, now)}${t.pr ? `  ${t.pr}` : ""}  (${ago(t.updatedAt, now)})`);
     if (t.state === "needs-you" && t.question) ctx.say(`     ${store.clip(store.oneLine(t.question), 200)}`);
     else if (isOpen(t) && t.wait) ctx.say(`     ${waitLabel(t.wait, now)}`);
     else if (isOpen(t) && t.worker?.last && !t.worker.busy) ctx.say(`     its last words: "${t.worker.last}"`);
@@ -341,15 +447,18 @@ function show(args, ctx) {
   const json = take(args, "--json");
   const t = resolve(args[0], ctx);
   const now = Date.now();
-  if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now) }, null, 2)); return 0; }
+  const rt = runtimeOf(t, now);
+  if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now), runtime: rt }, null, 2)); return 0; }
   ctx.say(`${t.id}: "${t.title}" - ${t.state}${t.pr ? ` - ${t.pr}` : ""}`);
   ctx.say(`  supervisor ${t.home}, repo ${t.repo.name}, ${t.branch ? `worktree ${t.worktree} (${t.branch}, from ${t.base})` : `main checkout ${t.worktree}`}`);
   ctx.say(`  ${workerLine(t, workerState(t, now), now)}`);
   if (t.after?.length) ctx.say(`  after: ${t.after.join(", ")}`);
   if (t.question) ctx.say(`  open question: ${t.question}`);
   if (t.wait) ctx.say(`  ${waitLabel(t.wait, now)}, since ${ago(t.wait.at, now)}`);
+  if (t.from) ctx.say(`  from ${t.from.kind === "branch" ? `the branch ${t.from.name}` : `${t.from.kind === "pr" ? "PR" : "issue"} #${t.from.number} (${t.from.url})`}`);
+  for (const line of runtimeLines(t, rt, now)) ctx.say(`  ${line}`);
   ctx.say("\nThe owner's words, verbatim (oldest first):");
-  for (const w of t.words) ctx.say(`--- ${new Date(w.at).toISOString()}${w.via === "worker" ? " (typed in the worker's own window)" : ""}\n${w.text}`);
+  for (const w of t.words) ctx.say(`--- ${new Date(w.at).toISOString()}${w.via === "worker" ? " (typed in the worker's own window)" : w.via === "issue" ? " (the GitHub issue the task came from, as written there)" : ""}\n${w.text}`);
   if (!t.words.length) ctx.say("(none recorded)");
   if (t.notes.length) {
     ctx.say("\nNotes:");
@@ -847,8 +956,97 @@ function stage(args, ctx) {
   return 0;
 }
 
+// ---------------------------------------------------------------- its worktree's runtime
+
+/** The task's worktree, for a command that acts in it; fails for one with none (or archived). */
+function worktreeOf(t, ctx) {
+  if (!t.branch) ctx.fail(`${t.id} works in ${t.repo?.key ? "the main checkout" : "a plain folder"}: it has no worktree of its own`);
+  if (t.archived) ctx.fail(`${t.id} is archived: rollcall task restore ${t.id} brings its worktree back`);
+  if (!existsSync(t.worktree)) ctx.fail(`${t.id}'s worktree is gone (${t.worktree})`);
+  return t.worktree;
+}
+
+/** `task setup|run|ports <id> ...`: the checkout command, run in the task's worktree. */
+function inTask(cmd) {
+  return (args, ctx) => {
+    const t = resolve(args.shift(), ctx);
+    process.chdir(worktreeOf(t, ctx));
+    return runtimeCommand(cmd, args, ctx);
+  };
+}
+
+/** Archive, restore and spotlight are the owner's or the supervisor's: a worker that wants one asks. */
+function notWorker(what, ctx) {
+  if (taskEnv()) ctx.fail(`${what} is the owner's or the supervisor's action, not a worker's: ask for it (task note "<why>", or AskUserQuestion)`);
+}
+
+function archive(args, ctx) {
+  const yes = take(args, "--yes");
+  const t0 = resolve(args.shift(), ctx);
+  notWorker("archive", ctx);
+  mayWrite(t0, ctx.whoAmI(), ctx);
+  const p = archivePlan(t0);
+  if (p.err) ctx.fail(p.err);
+  // The owner sees what goes and how much it frees before anything is removed.
+  if (!yes) { ctx.say([...planLines(t0, p), `To archive it: ${cli()} task archive ${t0.id} --yes`].join("\n")); return 0; }
+  if (t0.sessions.length) stopWorker(t0);
+  const r = archiveTask(t0);
+  if (!r.ok) ctx.fail(r.err);
+  update(t0, ctx, (x) => { x.archived = r.archived; x.notes.push({ at: Date.now(), by: author(x, ctx.whoAmI()), text: `archived: worktree removed, ${r.archived.files} uncommitted file${r.archived.files === 1 ? "" : "s"} saved to ${r.archived.ref}` }); });
+  ctx.say(`${t0.id}: archived. ${r.archived.files ? `${r.archived.files} uncommitted file${r.archived.files === 1 ? "" : "s"} saved to ${r.archived.ref}; ` : ""}${t0.worktree} removed; its record and conversation stay. Back: ${cli()} task restore ${t0.id}`);
+  for (const w of r.warnings) ctx.say(`  ${w}`);
+  return 0;
+}
+
+function restore(args, ctx) {
+  const t0 = resolve(args.shift(), ctx);
+  notWorker("restore", ctx);
+  mayWrite(t0, ctx.whoAmI(), ctx);
+  if (!t0.archived) ctx.fail(`${t0.id} is not archived`);
+  const r = restoreTask(t0, { bin: BIN });
+  if (!r.ok) ctx.fail(r.err);
+  const t = update(t0, ctx, (x) => { delete x.archived; x.notes.push({ at: Date.now(), by: author(x, ctx.whoAmI()), text: `restored from the archive${r.notes.length ? `: ${r.notes.join("; ")}` : ""}` }); });
+  ctx.say(`${t.id}: restored at ${t.worktree}, with its uncommitted work; setup runs again in the background`);
+  for (const n of r.notes) ctx.say(`  ${n}`);
+  if (!t.sessions.length || !isOpen(t)) return 0;
+  const nudge = `[rollcall] Task ${t.id} was archived and is restored: the worktree is back at ${t.worktree} with your uncommitted work (anything that was staged is now unstaged), its setup runs again (\`${cli()} task setup ${t.id}\`), and its run actions are stopped.${r.notes.length ? ` ${r.notes.join(". ")}.` : ""} Carry on where you left off.`;
+  const l = unpark(t, nudge);
+  ctx.say(l.ok ? `  its worker resumed in its window` : `  its worker did not resume: ${l.err} (${START} ${t.id} --resume "restored")`);
+  return 0;
+}
+
+function spotlight(args, ctx) {
+  const off = take(args, "--off");
+  const force = take(args, "--force");
+  const sync = take(args, "--sync");
+  const t0 = resolve(args.shift(), ctx);
+  notWorker("spotlight", ctx);
+  mayWrite(t0, ctx.whoAmI(), ctx);
+  if (!t0.repo?.key) ctx.fail(`${t0.id} belongs to no repo`);
+  const spot = spotlightOf(t0.repo.main);
+  const mine = spot?.task?.home === t0.home && spot?.task?.id === t0.id;
+  const note = (text) => update(t0, ctx, (x) => { x.notes.push({ at: Date.now(), by: author(x, ctx.whoAmI()), text }); });
+  if (off || sync) {
+    if (!mine) ctx.fail(`${t0.id} is not in the spotlight${spot ? ` (${spot.task.home}:${spot.task.id} is)` : ""}`);
+    if (sync) { const r = spotlightSync(spot); if (!r.ok) ctx.fail(r.err); ctx.say(`${t0.id}: ${r.changed ? "the main checkout now has its latest files" : "the main checkout already had its latest files"}`); return 0; }
+    const r = spotlightOff(spot, { force });
+    if (!r.ok) ctx.fail(r.err);
+    note("spotlight off: the main checkout is back where it was");
+    ctx.say(`${t0.id}: spotlight off. ${t0.repo.main} is back on ${spot.before.branch ?? spot.before.head.slice(0, 8)}${r.identical ? ", its files as they were" : `, but it differs from before: check git status there (HEAD ${r.head?.slice(0, 8)})`}`);
+    return 0;
+  }
+  worktreeOf(t0, ctx);
+  const r = spotlightOn(t0);
+  if (!r.ok) ctx.fail(r.err);
+  if (r.already) { ctx.say(`${t0.id} is in the spotlight already`); return 0; }
+  note("spotlight on: the main checkout runs this task's files");
+  ctx.say(`${t0.id}: in the spotlight. ${t0.repo.main} now holds its files (detached, so no branch moved) and follows its changes while a supervisor's watcher runs (or: ${cli()} task spotlight ${t0.id} --sync). Off: ${cli()} task spotlight ${t0.id} --off`);
+  return 0;
+}
+
 const COMMANDS = {
   new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, decisions, stage, "wait-for": waitFor,
+  setup: inTask("setup"), run: inTask("run"), ports: inTask("ports"), archive, restore, spotlight,
   words: (a, c) => addText(a, c, "words"),
   note: (a, c) => addText(a, c, "notes"),
 };
