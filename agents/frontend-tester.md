@@ -29,10 +29,13 @@ Both tiers, always: console check, network check, and the golden-path interactio
 
 ### 1. Server
 
+Ports and URLs: read them with `rollcall manifest --json` (it fills in this checkout's own ports, so parallel tasks do not share one); where rollcall is absent, read the raw manifest or use the base URL you were given. Run it from the checkout under test.
+
 Probe the base URL first: `curl -s -o /dev/null -w "%{http_code}" <baseUrl> --max-time 2`.
 
-- Responding (any status): reuse it, set `reusedServer = true`, never kill it. If an auth-gated route redirects to login despite a bypass env being expected, stop and report BLOCKED: "dev server running without <ENV>=1".
-- Port free: start the provided command in the background with the bypass env set (e.g. `E2E_TEST_AUTH=1 npm run dev`), record the shell ID, poll up to 60s. On failure, read the log, report BLOCKED with the error.
+- Responding (any status): ask whose it is with `rollcall serving <port>` (where rollcall exists). Exit 0: this checkout's own server; reuse it, set `reusedServer = true`, never kill it. Exit 1: another checkout (or task) serves that port. Never reuse it and never kill it: a pass against another task's server is not a pass. Start this checkout's own (below) on its own port, or report BLOCKED if you cannot. Exit 2 or no rollcall: treat as free or, if the page answers, as reused. If an auth-gated route redirects to login despite a bypass env being expected, stop and report BLOCKED: "dev server running without <ENV>=1".
+- Port free: start the task's own server with `rollcall run start <name>` (the manifest's `run` names it; `dev` for the dev server), else the provided command in the background, with the bypass env set (e.g. `E2E_TEST_AUTH=1 npm run dev`); record the shell ID or the action name, poll up to 60s. On failure, read the log (`rollcall run log <name>`), report BLOCKED with the error.
+- Before you trust any result, `rollcall serving <port>` must exit 0 for the port you tested. Say what it printed in the report's Server line.
 
 ### 2. Browser hygiene (before first navigate)
 
@@ -57,7 +60,7 @@ Visual pass when reading screenshots: overflow/horizontal scroll on mobile, trun
 
 ### 4. Teardown
 
-Close the browser. Kill the dev server only if you started it (`reusedServer == false`); if the kill fails, include the shell ID in the report. Leave artifacts on disk.
+Close the browser. Stop the dev server only if you started it (`reusedServer == false`; `rollcall run stop <name>` for one started that way); if the stop fails, include the shell ID in the report. Leave artifacts on disk.
 
 ## Report format (your entire final message)
 

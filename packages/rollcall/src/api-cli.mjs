@@ -55,7 +55,7 @@ async function run(args, ctx, json) {
       if (!name) return error("bad-payload", `usage: rollcall api do <action> [<json> | -]; actions: ${Object.keys(ACTIONS).join(", ")}`, 2);
       let payload;
       try { payload = JSON.parse(body === undefined || body === "-" ? readFileSync(0, "utf8") || "{}" : body); } catch { return error("bad-payload", "the payload is not JSON", 2); }
-      const r = runAction(name, payload, { client: payload?.client ?? "frontend" });
+      const r = await runAction(name, payload, { client: payload?.client ?? "frontend" });
       json(r);
       return r.ok ? 0 : 1;
     }

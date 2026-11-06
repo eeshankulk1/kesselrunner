@@ -417,6 +417,8 @@ export const statusLine = (seconds) => ({ type: "command", command: `node ${q(BI
  */
 export function launch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
   if (!tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };
+  // An archived task's worktree comes back only with its saved work: restore does both, then resumes the worker.
+  if (t.archived) return { ok: false, err: `${t.id} is archived: rollcall task restore ${t.id} brings back its worktree and its worker` };
   if (resume) { const r = restoreWorktree(t); if (!r.ok) return r; }
   const last = t.sessions?.at(-1);
   const again = resume && last ? t.sessions.find((s) => s.id === (pick ?? last.id)) ?? last : null;

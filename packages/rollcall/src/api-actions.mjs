@@ -45,6 +45,17 @@ function task(argv) {
   const out = [];
   const ctx = { say: (s) => out.push(String(s)), fail: (m) => refuse("refused", String(m).replace(/^rollcall:\s*/, "")), flag, whoAmI: () => null };
   const code = taskCommand([...argv], ctx);
+  // A command that finishes later (task new and plan A's) goes through taskLater: a promise here is truthy.
+  if (typeof code?.then === "function") throw new Error(`rollcall task ${argv[0]} finishes later: call it through taskLater`);
+  if (code) refuse("refused", out.join("\n") || `rollcall task ${argv[0]} exited ${code}`);
+  return out.join("\n");
+}
+
+/** `task(argv)` for a command that finishes later (the worktree runtime's, which load their code when run). */
+async function taskLater(argv) {
+  const out = [];
+  const ctx = { say: (s) => out.push(String(s)), fail: (m) => refuse("refused", String(m).replace(/^rollcall:\s*/, "")), flag, whoAmI: () => null };
+  const code = await taskCommand([...argv], ctx);
   if (code) refuse("refused", out.join("\n") || `rollcall task ${argv[0]} exited ${code}`);
   return out.join("\n");
 }
@@ -93,19 +104,22 @@ const fresh = (t) => taskView(store.readTask(t.home, t.id) ?? t);
 export const ACTIONS = {
   "task.start": {
     cli: "rollcall task new + start.mjs",
-    run(p) {
+    async run(p) {
       const h = homeOf(p);
       // Checked before the task exists: a front end retrying a refusal must not make a second task.
       if (!existsSync(START_FILE)) refuse("unavailable", `kesselrunner's launcher is not at ${START_FILE}`);
-      const title = str(p, "title", { max: 200 });
-      const words = str(p, "words");
+      // A task from an issue or a PR takes its title (and an issue its words) from GitHub; one from a branch, its name.
+      const from = p.issue ?? p.pr ?? null;
+      const title = str(p, "title", { max: 200, required: !from });
+      const words = str(p, "words", { required: !from && !p.branch });
       const repo = str(p, "repo", { required: !p.noRepo });
       if (p.harness !== undefined && !harnessName(p.harness)) refuse("bad-payload", `harness is one of ${HARNESS_NAMES.join(", ")}`);
       const tmp = join(store.homeDir(h), "api");
       mkdirSync(tmp, { recursive: true });
       const file = join(tmp, `words-${process.pid}-${Date.now()}.txt`);
-      writeFileSync(file, words);
-      const argv = ["new", title, "--home", h, "--words-file", file, "--json"];
+      if (words) writeFileSync(file, words);
+      const argv = ["new", ...(title ? [title] : []), "--home", h, ...(words ? ["--words-file", file] : []), "--json"];
+      for (const k of ["issue", "pr", "branch"]) if (p[k] !== undefined && p[k] !== null) argv.push(`--${k}`, String(p[k]));
       if (p.noRepo) argv.push("--no-repo"); else argv.push("--repo", repo);
       for (const [k, f] of [["type", "--type"], ["kind", "--kind"], ["model", "--model"], ["effort", "--effort"], ["base", "--base"], ["slug", "--slug"], ["harness", "--harness"]]) if (p[k]) argv.push(f, String(p[k]));
       for (const a of p.after ?? []) argv.push("--after", String(a));
@@ -113,7 +127,7 @@ export const ACTIONS = {
       if (p.until) argv.push("--until", String(p.until));
       for (const [k, f] of [["ship", "--ship"], ["browser", "--browser"], ["hold", "--hold"]]) if (p[k]) argv.push(f);
       let made;
-      try { made = JSON.parse(task(argv)); } finally { rmSync(file, { force: true }); }
+      try { made = JSON.parse(await taskLater(argv)); } finally { rmSync(file, { force: true }); }
       // A task that waits on others (or is held) starts later, by rollcall or on the owner's word.
       if (made.after?.length || made.hold) return { task: refOf(made), started: false, view: fresh(made) };
       const s = start(made, []);
@@ -223,6 +237,54 @@ export const ACTIONS = {
     },
   },
 
+  // The worktree runtime (plan A). Archive shows what goes first, as the Falcon does: the owner says yes with confirm.
+  "task.archive": {
+    cli: "rollcall task archive <task> [--yes]",
+    async run(p) {
+      const t = taskOf(p);
+      if (t.archived) return { archived: true, already: true, view: fresh(t) };
+      if (p.confirm !== true) {
+        const { archivePlan, planLines } = await import("./archive.mjs");
+        const plan = archivePlan(t);
+        if (plan.err) refuse("refused", plan.err);
+        return { archived: false, plan: { ...plan, lines: planLines(t, plan) }, confirmWith: { task: refOf(t), confirm: true } };
+      }
+      const said = await taskLater(["archive", t.id, "--home", t.home, "--yes"]);
+      return { archived: true, message: said, view: fresh(t) };
+    },
+  },
+
+  "task.restore": {
+    cli: "rollcall task restore <task>",
+    async run(p) {
+      const t = taskOf(p);
+      if (!t.archived) return { restored: true, already: true, view: fresh(t) };
+      const said = await taskLater(["restore", t.id, "--home", t.home]);
+      return { restored: true, message: said, view: fresh(t) };
+    },
+  },
+
+  "task.spotlight": {
+    cli: "rollcall task spotlight <task> [--off [--force]]",
+    async run(p) {
+      const t = taskOf(p);
+      if (typeof p.on !== "boolean") refuse("bad-payload", "on is true (spotlight it) or false (put the main checkout back)");
+      const said = await taskLater(["spotlight", t.id, "--home", t.home, ...(p.on ? [] : ["--off", ...(p.force === true ? ["--force"] : [])])]);
+      return { spotlit: p.on, message: said, view: fresh(t) };
+    },
+  },
+
+  "task.run": {
+    cli: "rollcall task run <task> [list | start|stop|restart <name|all>]",
+    async run(p) {
+      const t = taskOf(p);
+      const verb = str(p, "verb", { required: false }) ?? "list";
+      if (!["list", "start", "stop", "restart"].includes(verb)) refuse("bad-payload", "verb is list, start, stop or restart");
+      if (verb !== "list") await taskLater(["run", t.id, "--home", t.home, verb, str(p, "name", { max: 32 })]);
+      return { view: fresh(t) };
+    },
+  },
+
   "blocker.clear": {
     cli: "rollcall blockers clear <kind>",
     run(p) {
@@ -235,8 +297,7 @@ export const ACTIONS = {
 
 /** Actions the plans in flight add; a front end that asks for one now hears `not-available`, not `unknown-action`. */
 export const COMING = {
-  "task.archive": "plan A (worktree runtime)", "task.restore": "plan A (worktree runtime)", "task.spotlight": "plan A (worktree runtime)",
-  "task.run": "plan A (worktree runtime)", "review.comment": "plan C (review loop)",
+  "review.comment": "plan C (review loop)",
 };
 
 // ---------------------------------------------------------------- repeats
@@ -261,7 +322,7 @@ function remember(requestId, action, result, now = Date.now()) {
 
 /**
  * Runs action `name` with `payload` for front end `client`: { ok: true, result } or { ok: false, error: { code,
- * message, ... } }. A `requestId` the last day saw returns that first answer again, with `repeated: true`.
+ * message, ... } }, or a promise of it for an action that finishes later (plan A's). A `requestId` the last day saw returns that first answer again, with `repeated: true`.
  */
 export function runAction(name, payload, { client = "frontend" } = {}) {
   const p = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
@@ -276,15 +337,14 @@ export function runAction(name, payload, { client = "frontend" } = {}) {
   const was = rid ? seen(rid, name) : null;
   if (was) return { ...was.result, repeated: true };
   const by = typeof p.client === "string" && p.client.trim() ? p.client.trim().slice(0, 40) : client;
-  let out;
-  try {
-    out = { ok: true, result: a.run(p, by) };
-  } catch (e) {
-    out = e instanceof ApiError
-      ? { ok: false, error: { code: e.code, message: e.message, ...e.extra } }
-      : { ok: false, error: { code: "failed", message: String(e?.message ?? e) } };
-  }
+  const failed = (e) => (e instanceof ApiError
+    ? { ok: false, error: { code: e.code, message: e.message, ...e.extra } }
+    : { ok: false, error: { code: "failed", message: String(e?.message ?? e) } });
   // A refusal is not kept: the same request may go through once what refused it is gone (a busy store).
-  if (rid && out.ok) remember(rid, name, out);
-  return out;
+  const done = (out) => { if (rid && out.ok) remember(rid, name, out); return out; };
+  let result;
+  try { result = a.run(p, by); } catch (e) { return failed(e); }
+  // An action that finishes later (the worktree runtime's) answers with a promise of the same shape.
+  if (typeof result?.then === "function") return result.then((r) => done({ ok: true, result: r }), (e) => failed(e));
+  return done({ ok: true, result });
 }

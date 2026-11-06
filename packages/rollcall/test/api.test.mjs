@@ -71,9 +71,9 @@ test("api version names the interface, its verbs, every action and the ones comi
   assert.equal(v.interface, 1);
   assert.match(String(v.rollcall), /^\d+\.\d+\.\d+/);
   assert.deepEqual(v.verbs, ["version", "snapshot", "stream", "do", "attach"]);
-  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "decision.answer", "question.answer", "task.close", "task.interrupt", "task.move", "task.resume", "task.start", "task.stop", "task.tell"]);
+  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "decision.answer", "question.answer", "task.archive", "task.close", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell"]);
   for (const cli of Object.values(v.actions)) assert.equal(typeof cli, "string");
-  assert.ok(v.coming["task.archive"] && v.coming["review.comment"]);
+  assert.ok(!v.coming["task.archive"] && v.coming["review.comment"], "plan A's actions arrived; plan C's is still coming");
   const bad = owner(sb, ["api", "frobnicate"]);
   assert.equal(bad.code, 2);
   assert.equal(parsed(bad).error.code, "bad-payload");
@@ -358,9 +358,9 @@ test("api do: bad JSON exits 2, unknown and coming actions say so, and a request
   assert.equal(owner(sb, ["api", "do"]).code, 2);
   assert.equal(act(sb, "task.tell", []).error.code, "bad-payload", "a payload is an object");
   assert.equal(act(sb, "task.frob", {}).error.code, "unknown-action");
-  const coming = act(sb, "task.archive", { task: "alpha:t1" });
+  const coming = act(sb, "review.comment", { task: "alpha:t1" });
   assert.equal(coming.error.code, "not-available");
-  assert.match(coming.error.message, /plan A/);
+  assert.match(coming.error.message, /plan C/);
   assert.equal(act(sb, "task.tell", { task: "t1", text: "x" }).error.code, "bad-payload", "a task is <home>:<task>");
 
   // The payload on stdin works too.
@@ -490,4 +490,44 @@ test("api attach: unknown supervisors and tasks are not found, and a task with n
     assert.equal(r.code, 1);
     assert.equal(parsed(r).error.code, tmux ? "no-window" : "unavailable", ref);
   }
+});
+
+test("plan A in the interface: a task's runtime in the snapshot; archive shows what goes before it removes anything, then restore and spotlight", (t) => {
+  const { sb } = setup(t, { worktree: true });
+  const view = () => snap(sb).tasks.find((x) => x.ref === "alpha:t1");
+  const v = view();
+  assert.equal(v.from, null);
+  assert.deepEqual(v.runtime.actions, []);
+  assert.equal(v.runtime.archived, null);
+  write(join(v.worktree, "notes.md"), "uncommitted\n");
+
+  const plan = act(sb, "task.archive", { task: "alpha:t1" });
+  assert.equal(plan.ok, true, JSON.stringify(plan));
+  assert.equal(plan.result.archived, false, "nothing goes without the owner's yes");
+  assert.deepEqual(plan.result.plan.uncommitted, ["?? notes.md"]);
+  assert.match(plan.result.plan.lines[0], /removes its worktree/);
+  assert.deepEqual(plan.result.confirmWith, { task: "alpha:t1", confirm: true });
+  assert.ok(existsSync(v.worktree));
+
+  const gone = act(sb, "task.archive", { task: "alpha:t1", confirm: true });
+  assert.equal(gone.ok, true, JSON.stringify(gone));
+  assert.equal(gone.result.view.runtime.archived.files, 1);
+  assert.ok(!existsSync(v.worktree));
+  assert.equal(act(sb, "task.archive", { task: "alpha:t1", confirm: true }).result.already, true, "safe to repeat");
+  assert.equal(act(sb, "task.run", { task: "alpha:t1", verb: "start", name: "web" }).error.code, "refused");
+
+  const back = act(sb, "task.restore", { task: "alpha:t1" });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(readFileSync(join(v.worktree, "notes.md"), "utf8"), "uncommitted\n");
+  assert.equal(back.result.view.runtime.archived, null);
+
+  assert.equal(act(sb, "task.spotlight", { task: "alpha:t1" }).error.code, "bad-payload");
+  const on = act(sb, "task.spotlight", { task: "alpha:t1", on: true });
+  assert.equal(on.ok, true, JSON.stringify(on));
+  assert.ok(on.result.view.runtime.spotlit);
+  assert.equal(readFileSync(join(sb.main, "notes.md"), "utf8"), "uncommitted\n", "the main checkout runs the task's files");
+  const off = act(sb, "task.spotlight", { task: "alpha:t1", on: false });
+  assert.equal(off.ok, true, JSON.stringify(off));
+  assert.equal(off.result.view.runtime.spotlit, null);
+  assert.ok(!existsSync(join(sb.main, "notes.md")));
 });

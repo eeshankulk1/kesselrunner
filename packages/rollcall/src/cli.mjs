@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { gcRepo, pruneRefs, summary } from "./gc.mjs";
+import { gcRepo, gcRuntime, pruneRefs, summary } from "./gc.mjs";
 import { gitSync, locate, mainCheckout, repoKey } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
 import { ancestry, pidAlive } from "./proc.mjs";
@@ -17,6 +17,7 @@ import { reminders, watchHome } from "./watch.mjs";
 import { backText, comeBack, unparkHome, writeWindow } from "./window.mjs";
 import { USAGE as QUEUE_USAGE, queueCommand } from "./queue.mjs";
 import { USAGE as RESULTS_USAGE, results } from "./results.mjs";
+import { USAGE as RUNTIME_USAGE, runtimeCommand } from "./runtime-cli.mjs";
 import {
   P, ago, autoSummary, claimLabel, cli, doneLine, fileList, intentOf, isAlive, isDone, isLive, joinRepo, markDone,
   msgLine, peersOf, settle, short, who, whereOf,
@@ -61,6 +62,7 @@ ${RESULTS_USAGE}
                                          status line; it edits no project files. One live session per name.
                                          \`falcon\` (its own command) opens one with its tasks as tabs.
 ${TASK_USAGE}
+${RUNTIME_USAGE}
   rollcall inbox                         in a task's worker: print the supervisor's unread messages
   rollcall attach <task> [--print]       show the task's worker (by name or id: luke, t3): its tab, inside
                                          falcon; else a new terminal tab on it (--print: the command only)
@@ -107,7 +109,8 @@ export async function main(argv) {
       case "park": return parkCommand(rest);
       case "back": return back(rest);
       case "watch": return store.listHomes().includes(rest[0]) ? await watchHome(rest[0], { once: rest[1] === "--once" }) : usageError("usage: rollcall watch <supervisor> [--once]");
-      case "task": return taskCommand(rest, { say, fail, flag, whoAmI });
+      case "task": return await taskCommand(rest, { say, fail, flag, whoAmI });
+      case "ports": case "manifest": case "setup": case "run": case "serving": case "_setup": return await runtimeCommand(cmd, rest, { say, fail, flag });
       case "supervise": return supervise(rest);
       case "inbox": return inbox(rest);
       case "attach": return attach(rest);
@@ -580,7 +583,7 @@ async function gc(args) {
     let res;
     let refs = 0;
     try {
-      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task });
+      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task, runtime: await gcRuntime() });
       if (!dryRun && store.claimRefsSlot(key)) refs = pruneRefs(main, { queued: Object.keys(store.readQueue(key).entries) });
     } finally { release(); }
     const line = summary(name, res, { dryRun });

@@ -35,7 +35,7 @@ rollcall api attach <home>[:<task>] [--client <name>] [--resume]
 ```json
 { "ok": true, "interface": 1, "rollcall": "0.1.0", "verbs": ["version", "snapshot", "stream", "do", "attach"],
   "actions": { "task.start": "rollcall task new + start.mjs", "...": "..." },
-  "coming": { "task.archive": "plan A (worktree runtime)", "...": "..." } }
+  "coming": { "review.comment": "plan C (review loop)" } }
 ```
 
 `actions` maps each action to the Falcon command it matches. `coming` lists actions the plans in flight add; asking for one now returns `not-available`.
@@ -139,11 +139,19 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 
 **A queue.** `{ repo: { key, name }, entries, train, lander, outcomes }`. Each entry is `{ pr, branch, task, session, state, why, readyAt, files, stuck }`, oldest first. `train` is `{ n, prs, stage, pr, suite, startedAt }` or null. `lander` is `{ pid, since }` or null. `outcomes` holds the last 10 results as the lander wrote them.
 
+### The worktree runtime (plan A)
+
+Each task view also has:
+
+- `from`: where the task came from, or null: `{ kind: "issue", number, url }`, `{ kind: "pr", number, url }` or `{ kind: "branch", name }`.
+- `runtime`: null for a task with no worktree of its own, else `{ ports, setup, actions, previews, spotlit, archived }`. `ports` is `{ base, last }` or null. `setup` is the worktree's last setup, `{ state: "running" | "done" | "failed", cmd, copied, exit, at, endedAt, log, last }`, or null when none ran. `actions` lists its run actions, `{ name, url, port, running, log, since }`. `previews` holds the URLs of those running. `spotlit` is `{ since, mirroredAt }` while the main checkout runs this task's files, else null. `archived` is `{ at, ref, head, branch, files, kb }` while the task is archived (its worktree gone), else null.
+
+Reading these takes no lock and starts no process, so a front end can poll them.
+
 ### Coming
 
 The plans in flight add their state here, as added fields (no version bump):
 
-- Plan A (worktree runtime), per task: its ports, its setup's progress, its run actions and their preview links, whether it is spotlit, and archived tasks.
 - Plan C (review loop): review comments (line comments and PR review threads) and each turn's snapshot and diff.
 
 ## `rollcall api stream [--home <h>] [--client <name>] [--notifies]`
@@ -232,7 +240,7 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 
 | Action | Payload | Result | The Falcon's way |
 |---|---|---|---|
-| `task.start` | `home`, `title` (up to 200), `words`, `repo` (a path) or `noRepo: true`; optional `type`, `kind`, `model`, `effort`, `base`, `slug`, `after` (ids), `notes` (strings), `until`, `ship`, `browser`, `hold`, `harness` (`claude` or `codex`) | `task` (its ref), `started`, `trustPrompt`, `message`, `view` | `rollcall task new` + `start.mjs` |
+| `task.start` | `home`, `title` (up to 200), `words`, `repo` (a path) or `noRepo: true`; optional `type`, `kind`, `model`, `effort`, `base`, `slug`, `after` (ids), `notes` (strings), `until`, `ship`, `browser`, `hold`, `harness` (`claude` or `codex`), and one of `issue`, `pr` (a number or URL: then `title` and `words` are optional) or `branch` (then `words` is optional) | `task` (its ref), `started`, `trustPrompt`, `message`, `view` | `rollcall task new` + `start.mjs` |
 | `task.tell` | `task`, `text` | `delivered`, `how` (`typed`, `held`, `resumed`), `why`, `view` | `@luke <text>` |
 | `question.answer` | `task`, `question` (its id), `answers` (question text to answer) or `answer` (a single question) | `delivered`, `how`, `why`, `pickerClosed`, `view` | a pick in the Falcon's picker |
 | `task.interrupt` | `task` | `interrupted`, `why` | `start.mjs <task> --interrupt` (Esc in its window) |
@@ -242,6 +250,10 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `task.move` | `task`, and `to` (a supervisor) or `harness` (`claude` or `codex`) | `moved`, `already`, `task` (the new ref, for `to`), `harness` and `view` (for `harness`) | `rollcall task move <task> --to <supervisor>` or `--harness <h>` |
 | `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already` | `rollcall task decisions done <n> "<answer>"` |
 | `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
+| `task.archive` | `task`, optional `confirm: true` | without `confirm`: `archived: false`, `plan` (what goes: `worktree`, `kb`, `uncommitted`, `unpushed`, `actions`, `ports`, `spotlit`, `teardown`, and `lines` to show the owner), `confirmWith`; with it: `archived`, `already`, `message`, `view` | `rollcall task archive <task>`, then `--yes` |
+| `task.restore` | `task` | `restored`, `already`, `message` (says when its branch moved on origin), `view` | `rollcall task restore <task>` |
+| `task.spotlight` | `task`, `on` (true or false), optional `force: true` with `on: false` | `spotlit`, `message`, `view` | `rollcall task spotlight <task> [--off [--force]]` |
+| `task.run` | `task`, `verb` (`list`, `start`, `stop`, `restart`), `name` (a run action, or `all`) for all but `list` | `view` (its `runtime.actions` and `previews`) | `rollcall task run <task> <verb> <name>` |
 
 Notes on each:
 
@@ -252,7 +264,9 @@ Notes on each:
 - `task.stop` ends the worker; the task stays open and nothing resumes it unasked.
 - `task.close`, `task.move` and `decision.answer` answer `already: true` when it was done before, so a repeat from a second front end is harmless.
 
-**Coming.** `task.archive`, `task.restore`, `task.spotlight` and `task.run` (plan A), and `review.comment` (plan C). Until then they return `not-available`.
+- `task.archive` removes nothing until the owner has seen the plan: the first call returns it, and the front end shows `plan.lines` and sends `confirmWith` on the owner's yes. Archive, restore and spotlight are refused from an agent session, as `api do` is.
+
+**Coming.** `review.comment` (plan C). Until then it returns `not-available`.
 
 ## `rollcall api attach <home>[:<task>] [--client <name>] [--resume]`
 

@@ -31,6 +31,7 @@ import {
   unpark, watcherEnv, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
+import { allSpotlights, setupState } from "./checkout.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
 import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
@@ -438,8 +439,34 @@ export function tick(h, now = Date.now()) {
   try { keepAwake(h, views, now); } catch {}
   try { trouble.look(now); } catch {}
   try { settleWaits(h, views, now); } catch {}
+  try { followSpotlights(h); } catch {}
   try { remindOwner(h, now); } catch {}
   drawTabs(h, now);
+}
+
+/**
+ * A spotlit task's changes reach the main checkout each poll. One that can no longer follow (someone changed the main
+ * checkout) is news for the supervisor, once per reason.
+ */
+function followSpotlights(h) {
+  // Most polls find no spotlight: one folder read, and the code that moves a checkout never loads.
+  if (!allSpotlights().some((s) => s.task?.home === h)) return;
+  import("./archive.mjs").then(({ syncSpotlights }) => {
+    const results = syncSpotlights(h);
+    // Read again now: the poll that started this wrote its own changes meanwhile.
+    const seen = store.readHomeFile(h, "seen") ?? {};
+    let changed = false;
+    for (const { spot, result } of results) {
+      const key = `spotlight:${spot.task.id}`;
+      // A sync that works again forgets the failure, so the same one later is news again.
+      if (result.ok) { if (key in seen) { delete seen[key]; changed = true; } continue; }
+      if (seen[key] === result.err) continue;
+      seen[key] = result.err;
+      changed = true;
+      store.enqueueWake(h, { task: spot.task.id, kind: "spotlight", err: result.err });
+    }
+    if (changed) store.writeHomeFile(h, "seen", seen);
+  }).catch(() => {});
 }
 
 /**
@@ -775,6 +802,12 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "setup-failed" && isOpen(t) && setupState(t.worktree)?.state === "failed") {
+      const st = setupState(t.worktree);
+      line = `${label(t)}: its worktree setup failed: "${store.clip(store.oneLine(st.last ?? ""), 200)}" (log: ${st.log}). Fix what you can: \`rollcall task setup ${t.id} --rerun\` runs it again. ` +
+        `Its worker reads the result before it starts work; tell it with \`rollcall task tell ${t.id} "<text>"\` if you change something. One line to the owner when it needs them.`;
+    } else if (e.kind === "spotlight" && isOpen(t)) {
+      line = `${label(t)}: the main checkout no longer follows it in the spotlight: ${e.err}. \`rollcall task spotlight ${t.id} --off\` ends the spotlight (it refuses while the main checkout has changes of its own). One line to the owner.`;
     } else if (e.kind === "answered-elsewhere") {
       // answer.mjs closed the Falcon's picker (Esc) once a front end answered every question in it.
       line = `${label(t)}: the owner answered its question from ${e.by ?? "a front end"} ("${store.clip(store.oneLine(t.answered?.answer ?? ""), 200)}"), and it went to its worker, so rollcall closed your picker for it. Do not ask it again.`;

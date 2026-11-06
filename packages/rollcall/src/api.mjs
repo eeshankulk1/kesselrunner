@@ -10,6 +10,7 @@
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
 import { readFileSync } from "node:fs";
 import { asksText } from "./asked.mjs";
+import { runtimeOf } from "./checkout.mjs";
 import { openQuestions, questionId } from "./answer.mjs";
 import { liveClients } from "./clients.mjs";
 import { harnessOf, sessionHarness } from "./harness/index.mjs";
@@ -110,6 +111,10 @@ export function taskView(t, now = Date.now()) {
     terminal: { window: !!win, alive: !!win?.alive },
     files: store.filesDir(t.home, t.id),
     createdAt: t.createdAt ?? null, updatedAt: t.updatedAt ?? null,
+    // Plan A: where the task came from (an issue, a PR, a branch), and its worktree's runtime (ports, setup, run
+    // actions with their preview links, spotlight, archive), read only: no lock, no process started.
+    from: t.from ?? null,
+    runtime: runtimeOf(t),
   };
 }
 

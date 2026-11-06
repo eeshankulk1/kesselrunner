@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dialogFlag, keyQuietMs } from "../delivery.mjs";
+import { launchLines } from "../checkout.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { TASK_ENV, capFlag, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
@@ -94,6 +95,8 @@ export function preamble(t, { browser = false, files = null } = {}) {
     `export ${TASK_ENV}=${q(`${t.home}:${t.id}`)}`,
     ...["ROLLCALL_HOME", "ROLLCALL_TMUX_SOCKET", "ROLLCALL_WATCHER"].filter((k) => process.env[k]).map((k) => `export ${k}=${q(process.env[k])}`),
     ...(browser ? [`export PLAYWRIGHT_MCP_OUTPUT_DIR=${q(files)}`] : []),
+    // Its worktree's environment (ports and all), and a wait for a setup still running: the first turn finds it ready.
+    ...launchLines(t, BIN),
     `cd ${q(t.worktree)} || exit 1`,
   ];
 }
