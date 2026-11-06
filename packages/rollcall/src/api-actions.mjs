@@ -45,7 +45,7 @@ function task(argv) {
   const out = [];
   const ctx = { say: (s) => out.push(String(s)), fail: (m) => refuse("refused", String(m).replace(/^rollcall:\s*/, "")), flag, whoAmI: () => null };
   const code = taskCommand([...argv], ctx);
-  // A command that finishes later (task new, show, list and plan A's) goes through taskLater: a promise here is truthy.
+  // A command that finishes later (task new and plan A's) goes through taskLater: a promise here is truthy.
   if (typeof code?.then === "function") throw new Error(`rollcall task ${argv[0]} finishes later: call it through taskLater`);
   if (code) refuse("refused", out.join("\n") || `rollcall task ${argv[0]} exited ${code}`);
   return out.join("\n");
