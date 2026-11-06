@@ -64,6 +64,7 @@ ${TASK_USAGE}
   rollcall inbox                         in a task's worker: print the supervisor's unread messages
   rollcall attach <task> [--print]       show the task's worker (by name or id: luke, t3): its tab, inside
                                          falcon; else a new terminal tab on it (--print: the command only)
+  rollcall usage [--json] [--refresh]    each plan's room: Claude's five-hour and weekly limits, Codex's limits
   rollcall hook <event>                  hook entry point (stdin: the hook payload)
 
   -C <dir> runs any command as if started in <dir>.
@@ -98,6 +99,9 @@ export async function main(argv) {
       case "blockers": return blockers(rest);
       case "remind": return remind(rest);
       case "_pick-pictures": return await pickPictures(rest);
+      case "codex-worker": return await (await import("./codex/worker.mjs")).codexWorker(rest);
+      case "_codex-send": return await (await import("./codex/send.mjs")).codexSend(rest);
+      case "usage": return await usage(rest);
       case "park": return parkCommand(rest);
       case "back": return back(rest);
       case "watch": return store.listHomes().includes(rest[0]) ? await watchHome(rest[0], { once: rest[1] === "--once" }) : usageError("usage: rollcall watch <supervisor> [--once]");
@@ -113,6 +117,18 @@ export async function main(argv) {
     if (e.message) process.stderr.write(`${e.message}\n`);
     return e.code;
   }
+}
+
+/**
+ * `rollcall usage [--json] [--refresh]`: each plan's room before a turn fails on it (usage.mjs): Claude's five-hour and
+ * weekly windows, from the last status line that had them, and Codex's limits (--refresh reads them now).
+ */
+async function usage(args) {
+  const u = await import("./usage.mjs");
+  if (args.includes("--refresh")) { const r = u.refreshCodex(Date.now(), { force: true }); if (r) await r; }
+  if (args.includes("--json")) { say(JSON.stringify(u.usageOf(), null, 2)); return 0; }
+  say(u.usageLine() || "no usage known yet: Claude's shows once a Claude Code session on a Pro or Max plan has answered; Codex's with --refresh");
+  return 0;
 }
 
 /**

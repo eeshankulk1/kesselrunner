@@ -15,6 +15,8 @@ import { P, ago, cli, short } from "./session.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import { WAITABLE, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
+import { HARNESSES, NAMES, defaultHarness, harnessName, harnessOf } from "./harness/index.mjs";
+import { usageLine, usageOf } from "./usage.mjs";
 import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, workerState } from "./supervisor.mjs";
 
 const TYPES = ["feat", "fix", "refactor", "test", "docs"];
@@ -42,7 +44,7 @@ const overLimit = (what, text, limit) => (text.length > limit ? `${what} is ${te
 export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<text>" | --words-file <f>] [--note "<text>"]...
                     [--slug <s>] [--type feat|fix|refactor|test|docs] [--kind build|discuss] [--base <ref|task>]
                     [--after <id>]... [--until landed] [--hold] [--ship] [--no-worktree | --no-repo | --worktree <dir>]
-                    [--browser] [--model <m>] [--effort <e>]
+                    [--browser] [--harness claude|codex] [--model <m>] [--effort <e>]
                                          record a task in this supervisor's home and create its worktree
                                          (--after: rollcall starts it once those tasks have a PR, or with
                                          --until landed once they have landed; --hold: it stays unstarted
@@ -52,8 +54,9 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
                                          (--worktree: take over one that exists, on its branch; --no-repo: a
                                          job on the machine, in a plain folder, with no repo and no PR)
                                          (--browser: its worker gets the browser MCP servers even where the
-                                         repo's test manifest shows nothing a browser could test; --model and
-                                         --effort: its workers run on these instead of the harness's own)
+                                         repo's test manifest shows nothing a browser could test; --harness: the
+                                         agent CLI its workers run on, else ROLLCALL_WORKER_HARNESS, else claude;
+                                         --model and --effort: its workers run on these instead of the harness's own)
   rollcall task list [--all] [--json]    this supervisor's open tasks (--all: finished ones too)
   rollcall task show <id|here> [--json]  one task: the owner's words, notes, sessions, output
   rollcall task set <id|here> [--state working|needs-you|pr-open|queued|landed|closed] [--question "<q>"]
@@ -76,6 +79,8 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
                                          that line on stdin
   rollcall task close <id|here> ["<why>"]   finish a task that lands nothing
   rollcall task move <id> --to <home>       hand a task to another supervisor (its worker stops; resume it there)
+  rollcall task move <id> --harness <h>     run the task on the other harness (claude, codex): a fresh worker there
+                                         carries on from the task's record, as at a handoff
   rollcall task decisions [add "<decision>" [--where "<how the owner answers>"] [--from <task>] | done <n> ["<answer>"]]
                                          what waits on the owner beyond any one task, one list for every
                                          supervisor: listed until answered
@@ -197,6 +202,7 @@ function create(args, ctx) {
   const notes = ctx.flag(args, "--note");
   const [model] = ctx.flag(args, "--model");
   const [effort] = ctx.flag(args, "--effort");
+  const [harnessArg] = ctx.flag(args, "--harness");
   const [adopt] = ctx.flag(args, "--worktree");
   const h = homeFor(ctx);
   if (!h) ctx.fail("this session supervises nothing: run `rollcall supervise <name>` first, or pass --home <name>");
@@ -209,7 +215,9 @@ function create(args, ctx) {
   if (!title) ctx.fail('usage: rollcall task new "<title>" [--repo <dir>] [--words "<text>"]');
   if (!TYPES.includes(type)) ctx.fail(`--type is one of ${TYPES.join(", ")}`);
   if (!KINDS.includes(kind)) ctx.fail(`--kind is one of ${KINDS.join(", ")}`);
-  if (model !== undefined && !modelOk(model)) ctx.fail(`--model is a model alias or id, like opus, sonnet, opus[1m] or claude-opus-5-5`);
+  const harness = harnessArg === undefined ? defaultHarness() : harnessName(harnessArg);
+  if (!harness) ctx.fail(`--harness is one of ${NAMES.join(", ")}`);
+  if (model !== undefined && !HARNESSES[harness].models.ok(model)) ctx.fail(harness === "codex" ? `--model on Codex is a Codex model id, like gpt-5.6-terra` : `--model is a model alias or id, like opus, sonnet, opus[1m] or claude-opus-5-5`);
   if (effort !== undefined && !effortOk(effort)) ctx.fail(`--effort is one of ${EFFORTS.join(", ")}`);
   if (adopt !== undefined && noWorktree) ctx.fail("--worktree and --no-worktree: pick one");
   if (until !== undefined && until !== "landed") ctx.fail("--until takes one word: landed");
@@ -263,7 +271,7 @@ function create(args, ctx) {
       repo: { key: repo.key, name: repo.name, main }, worktree, branch: branchName, base, baseSha: null,
       words: words?.trim() ? [{ at: now, text: words.slice(0, MAX_WORDS) }] : [],
       notes: notes.filter((x) => x.trim()).map((x) => ({ at: now, by: g ? "supervisor" : "a shell", text: x.trim() })), sessions: [],
-      after, output: null, createdAt: now, ...(until ? { until } : {}), ...(ship ? { ship: true } : {}), ...(browser ? { browser: true } : {}), ...(hold ? { hold: true } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      after, output: null, createdAt: now, ...(until ? { until } : {}), ...(ship ? { ship: true } : {}), ...(browser ? { browser: true } : {}), ...(hold ? { hold: true } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), harness,
     };
     store.writeTask(t);
     return t;
@@ -314,7 +322,8 @@ function workerLine(t, w, now) {
   // A finished task's window stays a while after its worker's last turn, so the owner can still ask it something.
   const gone = isOpen(t) || w.busy ? null : closing(t, w, now);
   const unread = store.unreadInbox(t.home, t.id);
-  return `worker ${short(w.session)} ${doing}${ctx}${bg}${gone ? `, its window ${gone}` : ""}${unread.length ? `, ${unread.length} message${unread.length === 1 ? "" : "s"} unread, the oldest from ${ago(unread[0].at, now)}` : ""}`;
+  const on = w.harness && w.harness !== "claude" ? ` on ${HARNESSES[w.harness]?.title ?? w.harness}` : "";
+  return `worker ${short(w.session)}${on} ${doing}${ctx}${bg}${gone ? `, its window ${gone}` : ""}${unread.length ? `, ${unread.length} message${unread.length === 1 ? "" : "s"} unread, the oldest from ${ago(unread[0].at, now)}` : ""}`;
 }
 
 function list(args, ctx) {
@@ -324,8 +333,10 @@ function list(args, ctx) {
   const homes = h ? [h] : store.listHomes();
   const all = take(args, "--all");
   const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now) }));
-  if (json) { ctx.say(JSON.stringify({ home: h, tasks, decisions: allDecisions() }, null, 2)); return 0; }
+  if (json) { ctx.say(JSON.stringify({ home: h, tasks: tasks.map((t) => ({ ...t, harness: harnessOf(t) })), decisions: allDecisions(), usage: usageOf(now) }, null, 2)); return 0; }
   if (!tasks.length) ctx.say(h ? `rollcall: no tasks in supervisor ${h}` : "rollcall: no tasks");
+  const meter = usageLine(now);
+  if (meter) ctx.say(`usage: ${meter}`);
   for (const t of tasks) {
     ctx.say(`${(h ? t.id : `${t.home}:${t.id}`).padEnd(h ? 4 : 12)} ${t.state.padEnd(9)} ${t.repo.name}  ${label(t)}  ${workerLine(t, t.worker, now)}${t.pr ? `  ${t.pr}` : ""}  (${ago(t.updatedAt, now)})`);
     if (t.state === "needs-you" && t.question) ctx.say(`     ${store.clip(store.oneLine(t.question), 200)}`);
@@ -661,6 +672,8 @@ function close(args, ctx) {
  */
 function move(args, ctx) {
   const t0 = resolve(args.shift(), ctx);
+  const [on] = ctx.flag(args, "--harness");
+  if (on !== undefined) return moveHarness(t0, on, ctx);
   const [to] = ctx.flag(args, "--to");
   if (!to || !store.HOME_NAME.test(to)) ctx.fail("usage: rollcall task move <id> --to <home>");
   if (to === t0.home) ctx.fail(`${t0.id} is already supervisor ${to}'s`);
@@ -683,6 +696,34 @@ function move(args, ctx) {
     try { mkdirSync(join(store.homeDir(to), a), { recursive: true }); renameSync(join(store.homeDir(t0.home), a, `${t0.id}${b}`), join(store.homeDir(to), a, `${t.id}${b}`)); } catch {}
   }
   ctx.say(`${t0.home}:${t0.id} is now ${to}:${t.id} ("${t.title}").${t.sessions.length ? ` Its worker stopped; from supervisor ${to}: ${START} ${t.id} --resume "moved here"` : ""}`);
+  return 0;
+}
+
+const START_FILE = fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
+
+/**
+ * `task move <id> --harness <h>`: the task runs on the other harness from now on. Its worker, if it has one, is
+ * replaced by a fresh one there that gets what a fresh worker gets at a handoff (the owner's words, notes, last
+ * report, the branch's state); a task held by its plan's usage limit waits no more. Its earlier sessions keep their
+ * harness, so `--resume --session` still brings one back where it ran.
+ */
+function moveHarness(t0, name, ctx) {
+  const to = harnessName(name);
+  if (!to) ctx.fail(`--harness is one of ${NAMES.join(", ")}`);
+  const title = HARNESSES[to].title;
+  if (harnessOf(t0) === to) ctx.fail(`${t0.id} already runs on ${title}`);
+  const ready = HARNESSES[to].available();
+  if (!ready.ok) ctx.fail(`${t0.id} cannot move to ${title}: ${ready.err}`);
+  if (holderOf(t0.home)) mayWrite(t0, ctx.whoAmI(), ctx);
+  const t = update(t0, ctx, (x) => {
+    x.harness = to;
+    if (x.wait?.on === "usage") x.wait = null;
+    x.notes.push({ at: Date.now(), by: "rollcall", text: `moved to ${title}: its workers run there from now on` });
+  });
+  if (!t.sessions.length || !isOpen(t)) { ctx.say(`${t.id} runs on ${title} from now on${t.sessions.length ? "" : ": its first worker starts there"}.`); return 0; }
+  const r = spawnSync(process.execPath, [START_FILE, t.id, "--home", t.home, "--fresh", `moved to ${title}`], { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
+  if (r.status !== 0 && r.status !== 4) ctx.fail(`${t.id} runs on ${title} now, but its fresh worker did not start: ${(r.stderr || r.stdout).trim()}`);
+  ctx.say(`${t.id} moved to ${title}: ${(r.stdout || "").trim().split("\n")[0]}`);
   return 0;
 }
 

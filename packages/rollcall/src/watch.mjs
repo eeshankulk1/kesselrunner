@@ -34,6 +34,8 @@ import { headOf, unlanded } from "./gc.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
 import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
+import { fullest, near, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
+import { HARNESSES, harnessOf } from "./harness/index.mjs";
 import { comeBack, contextOf, markBack, startWindow, supervisorMark } from "./window.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
@@ -167,6 +169,8 @@ export function duration(d) {
  * watcher, and the cap flag set once that use reaches the handoff cap. Elsewhere, nothing.
  */
 export function statusline(p, now = Date.now()) {
+  // Every Claude Code session on a Pro or Max plan reports the account's limits: the usage meter keeps the latest.
+  if (p?.rate_limits) { try { recordClaude(p.rate_limits, now); } catch {} }
   const env = taskEnv();
   if (env) {
     const t = store.readTask(env.home, env.id);
@@ -204,10 +208,17 @@ export function statusline(p, now = Date.now()) {
   if (tmux.inside() && windows?.has(h)) {
     // Inside falcon: no second task list under the prompt.
     const tabless = chips.filter((c) => isOpen(c.t) && !windows.has(c.t.id)).map((c) => c.text);
-    return [[hears && `\x1b[2m${hears}\x1b[0m`, behind, owed, ...tabless].filter(Boolean).join(" "), ...blocked(now), ...feed].filter(Boolean).join("\n");
+    return [[hears && `\x1b[2m${hears}\x1b[0m`, behind, owed, ...tabless].filter(Boolean).join(" "), ...meter(now), ...blocked(now), ...feed].filter(Boolean).join("\n");
   }
   const head = `\x1b[2msupervisor ${h}${hears ? ` · ${hears}` : ""}${tasks.length ? "" : " · no open tasks"}\x1b[0m`;
-  return [[head, behind, owed, ...chips.map((c) => c.text)].filter(Boolean).join(" "), ...blocked(now), ...feed].join("\n");
+  return [[head, behind, owed, ...chips.map((c) => c.text)].filter(Boolean).join(" "), ...meter(now), ...blocked(now), ...feed].join("\n");
+}
+
+/** Each plan's room (usage.mjs), dim, and yellow once one nears its limit; nothing when no reading is fresh. */
+function meter(now) {
+  const line = usageLine(now);
+  if (!line) return [];
+  return [near(now).length ? `\x1b[33m${line}\x1b[0m` : `\x1b[2m${line}\x1b[0m`];
 }
 
 /** What stops work now, in the status line of every supervisor, so a notification missed is still in plain sight. */
@@ -421,6 +432,7 @@ export function tick(h, now = Date.now()) {
       if (at !== null && now >= at && (!st?.alive || !tmux.viewed(h, t.id))) tmux.killWindow(h, t.id);
     }
   }
+  try { if (usageOffers(h, views, seen, now)) changed = true; } catch {}
   if (changed) store.writeHomeFile(h, "seen", seen);
   alertOwner(h, views.filter((v) => isOpen(v.t)), now);
   try { keepAwake(h, views, now); } catch {}
@@ -428,6 +440,35 @@ export function tick(h, now = Date.now()) {
   try { settleWaits(h, views, now); } catch {}
   try { remindOwner(h, now); } catch {}
   drawTabs(h, now);
+}
+
+/**
+ * When one plan nears its limit and the other has room, the supervisor offers the owner to move each task that waits
+ * on the full one (held by its limit, not started yet, or parked while it is worked) to the other harness: news once
+ * per task and window. rollcall never moves a task by itself. Codex's limits are read now and then while a task
+ * runs on Codex or Codex was read before. Returns whether it queued news.
+ */
+function usageOffers(h, views, seen, now) {
+  if (views.some((v) => isOpen(v.t) && harnessOf(v.t) === "codex") || fullest(now).some((w) => w.harness === "codex")) void refreshCodex(now);
+  const full = near(now);
+  if (!full.length) return false;
+  const all = fullest(now);
+  let queued = false;
+  for (const w of full) {
+    const other = w.harness === "claude" ? "codex" : "claude";
+    const room = all.find((x) => x.harness === other);
+    if (!room || room.pct >= nearPct()) continue; // no room known on the other plan: nothing to offer
+    for (const { t, w: worker } of views) {
+      if (!isOpen(t) || harnessOf(t) !== w.harness) continue;
+      const waits = !t.sessions?.length || t.wait?.on === "usage" || (t.state === "working" && (worker?.parked || worker?.stopped));
+      const key = `usage:${t.id}:${w.harness}:${w.resetsAt ?? w.name}`;
+      if (!waits || seen[key]) continue;
+      seen[key] = now;
+      store.enqueueWake(h, { task: t.id, kind: "usage-near", harness: w.harness, other, window: w.name, pct: w.pct, resetsAt: w.resetsAt, room: room.pct });
+      queued = true;
+    }
+  }
+  return queued;
 }
 
 /** A ship's stage past twice its usual time is one line for the owner, once per stage. Returns whether it said so. */
@@ -733,6 +774,10 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) {
+      const [full, other] = [HARNESSES[e.harness].title, HARNESSES[e.other].title];
+      line = `${label(t)} runs on ${full}, whose ${e.window} limit is at ${e.pct}%${e.resetsAt ? ` (it resets ${when(e.resetsAt)})` : ""}; ${other} has room (${e.room}% used). ` +
+        `Ask the owner with AskUserQuestion whether to move it to ${other} (a fresh worker there carries on from the task's record); on yes: \`rollcall task move ${t.id} --harness ${e.other}\`. Never move it unasked.`;
     } else if (e.kind === "exit-loop" && isOpen(t)) {
       line = `${label(t)}: its worker exited ${e.times} times in ${RESUME_WINDOW_MS / 60_000} minutes, so rollcall stopped resuming it. Check \`rollcall task show ${t.id}\`, then ask the owner what to do.`;
     }
