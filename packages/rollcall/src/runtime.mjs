@@ -13,7 +13,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { defaultBranch, gitSync, locate, mainCheckout } from "./git.mjs";
 import { pidAlive, startOf } from "./proc.mjs";
 import * as store from "./store.mjs";
@@ -211,7 +211,9 @@ export function setupCommand(top) {
 export function setupState(top) {
   const s = readJson(setupPath(top));
   if (!s) return null;
-  if (s.state === "running" && !pidAlive(s.pid, s.start)) return { ...s, state: "failed", exit: null, last: "it stopped before it finished (the machine slept or restarted, or it was killed)" };
+  // pid is null for the moment between startSetup writing the record and the background run writing its own.
+  const gone = s.pid ? !pidAlive(s.pid, s.start) : Date.now() - s.at > 60_000;
+  if (s.state === "running" && gone) return { ...s, state: "failed", exit: null, last: "it stopped before it finished (the machine slept or restarted, or it was killed)" };
   return s;
 }
 
@@ -233,9 +235,8 @@ export function startSetup(top, { bin, skipCommand = false, env = {} } = {}) {
   });
   child.on("error", () => {});
   child.unref();
-  const s = { state: "running", pid: child.pid, start: startOf(child.pid), at: now, cmd, copied: [], log: setupLog(top) };
-  writeJson(setupPath(top), s);
-  return s;
+  // Not written again: the background run records its own pid and may already have finished.
+  return { state: "running", pid: child.pid, start: null, at: now, cmd, copied: [], log: setupLog(top) };
 }
 
 /**
@@ -345,7 +346,7 @@ export function startAction(f, a, env = {}) {
   const now = actionState(f.top, a.name);
   if (now?.running) return { ok: true, already: true, state: now };
   const dir = resolve(f.top, a.dir ?? ".");
-  if (!dir.startsWith(f.top)) return { ok: false, err: `its dir ${a.dir} is outside the checkout` };
+  if (!inside(dir, f.top)) return { ok: false, err: `its dir ${a.dir} is outside the checkout` };
   mkdirSync(actionsDir(f.top), { recursive: true });
   const log = join(actionsDir(f.top), `${a.name}.log`);
   writeFileSync(log, `rollcall: ${new Date().toISOString()} starting \`${a.command}\` in ${dir}\n`);
@@ -357,6 +358,7 @@ export function startAction(f, a, env = {}) {
   closeSync(fd);
   child.on("error", () => {});
   child.unref();
+  if (!child.pid) return { ok: false, err: "the shell did not start" };
   const state = { name: a.name, pid: child.pid, start: startOf(child.pid), at: Date.now(), command: a.command, dir, url: a.url, port: a.port ?? null, log };
   writeJson(join(actionsDir(f.top), `${a.name}.json`), state);
   return { ok: true, state: { ...state, running: true } };
@@ -425,9 +427,10 @@ export const inside = (path, top) => !!path && !!top && (real(path) === real(top
 /**
  * A commit holding checkout `top`'s files as they are now: tracked changes and untracked files, gitignored ones
  * not, on top of HEAD. The checkout's own index is left alone (a copy of it seeds a private one, so unchanged
- * files are not hashed again). Returns { commit, tree, head } or null.
+ * files are not hashed again). With `unless` (a tree), no commit is written when the files make that tree: { commit: null,
+ * tree, head }. Returns { commit, tree, head } or null.
  */
-export function snapshot(top, message = "rollcall snapshot") {
+export function snapshot(top, message = "rollcall snapshot", { unless = null } = {}) {
   const info = locate(top);
   if (!info) return null;
   const head = gitSync(top, ["rev-parse", "--verify", "--quiet", "HEAD"]).stdout?.trim();
@@ -440,13 +443,11 @@ export function snapshot(top, message = "rollcall snapshot") {
     if (gitSync(top, ["add", "-A", "--", "."], { env, timeout: 300_000 }).status !== 0) return null;
     const tree = gitSync(top, ["write-tree"], { env }).stdout?.trim();
     if (!tree) return null;
+    if (tree === unless) return { commit: null, tree, head };
     const commit = gitSync(top, ["commit-tree", tree, "-p", head, "-m", message], { env: { ...env, GIT_AUTHOR_NAME: "rollcall", GIT_AUTHOR_EMAIL: "rollcall@localhost", GIT_COMMITTER_NAME: "rollcall", GIT_COMMITTER_EMAIL: "rollcall@localhost" } }).stdout?.trim();
     return commit ? { commit, tree, head } : null;
   } finally { rmSync(idx, { force: true }); }
 }
-
-/** Paths relative to `top`, for messages. */
-export const rel = (top, p) => relative(top, p) || ".";
 
 // ---------------------------------------------------------------- spotlight state (archive.mjs runs it)
 
@@ -485,7 +486,7 @@ export function launchLines(t, bin) {
  * Task `t`'s runtime as front ends draw it: { ports: { base, last } | null, setup, actions: [{ name, url, running, log,
  * since }], previews: [url], spotlit, archived }. Null for a task with no worktree of its own.
  */
-export function runtimeOf(t, now = Date.now()) {
+export function runtimeOf(t) {
   if (!t?.branch || !t.repo?.key) return null;
   const spot = spotlightOf(t.repo.main);
   const spotlit = spot?.task?.home === t.home && spot?.task?.id === t.id ? { since: spot.at, mirroredAt: spot.mirrored?.at ?? null } : null;

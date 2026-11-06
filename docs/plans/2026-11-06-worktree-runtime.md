@@ -1,5 +1,6 @@
 ---
-status: active
+status: done
+absorbed-into: commands.md, test-manifest.md, architecture.md, packages/rollcall/README.md
 date: 2026-11-06
 decided-with-owner: 2026-11-06 (Conductor comparison: close the gaps where Conductor's workspaces did more than kesselrunner's task worktrees; terminal and GUI both first-class)
 covers: "Plan A of the Conductor parity set: worktrees ready before the worker starts, a port block per task, run actions and preview links, spotlight, archive and restore, tasks from an issue, PR or branch"

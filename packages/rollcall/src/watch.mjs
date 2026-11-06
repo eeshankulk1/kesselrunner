@@ -439,8 +439,9 @@ export function tick(h, now = Date.now()) {
  */
 function followSpotlights(h, seen) {
   for (const { spot, result } of syncSpotlights(h)) {
-    if (result.ok) continue;
     const key = `spotlight:${spot.task.id}`;
+    // A sync that works again forgets the failure, so the same one later is news again.
+    if (result.ok) { if (key in seen) { delete seen[key]; store.writeHomeFile(h, "seen", seen); } continue; }
     if (seen[key] === result.err) continue;
     seen[key] = result.err;
     store.writeHomeFile(h, "seen", seen);

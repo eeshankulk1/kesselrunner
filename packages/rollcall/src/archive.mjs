@@ -179,7 +179,7 @@ export function spotlightOn(t) {
     const at = Date.now();
     writeSpotlight(main, { main, repo: t.repo.name, worktree: t.worktree, task: { home: t.home, id: t.id }, before: { branch, head }, mirrored: { tree: snap.tree, commit: snap.commit, at }, at });
     return { ok: true };
-  });
+  }, "spotlight");
   return r?.out ?? { ok: false, err: "the runtime store is busy; try again" };
 }
 
@@ -189,7 +189,7 @@ export function spotlightOn(t) {
  */
 export function spotlightSync(spot) {
   if (!spot || !existsSync(spot.worktree)) return { ok: false, err: "its task's worktree is gone" };
-  const snap = snapshot(spot.worktree, `rollcall spotlight of ${spot.task.home}:${spot.task.id}`);
+  const snap = snapshot(spot.worktree, `rollcall spotlight of ${spot.task.home}:${spot.task.id}`, { unless: spot.mirrored.tree });
   if (!snap) return { ok: false, err: `could not take a snapshot of ${spot.worktree}` };
   if (snap.tree === spot.mirrored.tree) return { ok: true, changed: false };
   const r = store.withRuntimeLock(() => {
@@ -202,7 +202,7 @@ export function spotlightSync(spot) {
     if (co.status !== 0) return { ok: false, err: `the main checkout could not move: ${lastLine(co.stderr)}` };
     writeSpotlight(now.main, { ...now, mirrored: { tree: snap.tree, commit: snap.commit, at: Date.now() } });
     return { ok: true, changed: true };
-  });
+  }, "spotlight");
   return r?.out ?? { ok: false, err: "the runtime store is busy" };
 }
 
@@ -225,13 +225,13 @@ export function spotlightOff(spot, { force = false } = {}) {
     const head = gitSync(main, ["rev-parse", "HEAD"]).stdout?.trim();
     const after = trackedChanges(main);
     return { ok: true, identical: head === spot.before.head && after?.length === 0, head };
-  });
+  }, "spotlight");
   return r?.out ?? { ok: false, err: "the runtime store is busy; try again" };
 }
 
-/** Every spotlight whose task belongs to home `h` brought in step (the watcher's tick). Returns [{ spot, result }] for those that changed or failed. */
+/** Every spotlight whose task belongs to home `h` brought in step (the watcher's tick). Returns [{ spot, result }] for each. */
 export function syncSpotlights(h) {
-  return allSpotlights().filter((s) => s.task?.home === h).map((spot) => ({ spot, result: spotlightSync(spot) })).filter((x) => !x.result.ok || x.result.changed);
+  return allSpotlights().filter((s) => s.task?.home === h).map((spot) => ({ spot, result: spotlightSync(spot) }));
 }
 
 /** The spotlight that names checkout `top` (gc ends it before it removes the worktree), or null. */

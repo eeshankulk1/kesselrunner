@@ -183,6 +183,11 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     }
     if (!why) { keep(w, "not merged"); continue; }
     if (onMain && w.branch && untouchedNew(main, w.branch)) { keep(w, "new, nothing committed yet"); continue; }
+    // A session in it, or work not committed, keeps it before anything of its runtime is touched.
+    if (occupied(path)) { keep(w, "in use"); continue; }
+    const status = gitSync(path, ["status", "--porcelain"]);
+    if (status.status !== 0) { keep(w, "git status failed"); continue; }
+    if (status.stdout.trim()) { keep(w, "uncommitted changes"); continue; }
     // Its own run actions (a dev server rollcall started) stop with it, so they do not keep it "in use"; a spotlight on it ends.
     if (!dryRun) {
       stopAllActions(path);
@@ -190,10 +195,7 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
       if (spot) { const off = spotlightOff(spot); if (!off.ok) { keep(w, `its spotlight could not end: ${off.err}`); continue; } }
     }
     if (cwds === undefined) cwds = processCwds();
-    if (occupied(path) || cwds?.some((c) => c === path || c.startsWith(path + sep))) { keep(w, "in use"); continue; }
-    const status = gitSync(path, ["status", "--porcelain"]);
-    if (status.status !== 0) { keep(w, "git status failed"); continue; }
-    if (status.stdout.trim()) { keep(w, "uncommitted changes"); continue; }
+    if (cwds?.some((c) => c === path || c.startsWith(path + sep))) { keep(w, "in use"); continue; }
     doomed.push({ w, path, why });
   }
 

@@ -429,7 +429,7 @@ function list(args, ctx) {
   const h = homeFor(ctx);
   const homes = h ? [h] : store.listHomes();
   const all = take(args, "--all");
-  const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now), ...(json ? { runtime: runtimeOf(t, now) } : {}) }));
+  const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now), ...(json ? { runtime: runtimeOf(t) } : {}) }));
   if (json) { ctx.say(JSON.stringify({ home: h, tasks, decisions: allDecisions() }, null, 2)); return 0; }
   if (!tasks.length) ctx.say(h ? `rollcall: no tasks in supervisor ${h}` : "rollcall: no tasks");
   for (const t of tasks) {
@@ -447,7 +447,7 @@ function show(args, ctx) {
   const json = take(args, "--json");
   const t = resolve(args[0], ctx);
   const now = Date.now();
-  const rt = runtimeOf(t, now);
+  const rt = runtimeOf(t);
   if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now), runtime: rt }, null, 2)); return 0; }
   ctx.say(`${t.id}: "${t.title}" - ${t.state}${t.pr ? ` - ${t.pr}` : ""}`);
   ctx.say(`  supervisor ${t.home}, repo ${t.repo.name}, ${t.branch ? `worktree ${t.worktree} (${t.branch}, from ${t.base})` : `main checkout ${t.worktree}`}`);
