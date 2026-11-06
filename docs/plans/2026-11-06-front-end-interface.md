@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 date: 2026-11-06
 decided-with-owner: 2026-11-06 (Conductor comparison: the terminal Falcon and a native desktop and phone front end are both first-class over the same rollcall state; front ends show each worker's real CLI in a terminal, with panels around it)
 covers: "Plan D of the Conductor parity set: one versioned interface over rollcall that any front end uses, the terminal Falcon included: a snapshot, a stream of changes, every action, and terminal attach"

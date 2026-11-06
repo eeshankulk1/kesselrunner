@@ -775,6 +775,9 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "answered-elsewhere") {
+      // answer.mjs closed the Falcon's picker (Esc) once a front end answered every question in it.
+      line = `${label(t)}: the owner answered its question from ${e.by ?? "a front end"} ("${store.clip(store.oneLine(t.answered?.answer ?? ""), 200)}"), and it went to its worker, so rollcall closed your picker for it. Do not ask it again.`;
     } else if (e.kind === "hooks-untrusted" && isOpen(t)) {
       line = `${label(t)} runs on Codex, where ${e.count} of the owner's hooks are not trusted yet, so they do not run on its tool calls (the owner's guards and rollcall's checkout checks among them). Tell the owner in one line: it is their one step, once, in its window (/attach ${t.id}: "Review hooks", then trust all) or in Codex's /hooks.`;
     } else if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) {

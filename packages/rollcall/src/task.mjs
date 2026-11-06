@@ -1019,7 +1019,7 @@ export function mergeSeen(t0, { why, head = null }, w = workerState(t0), now = D
 // ---------------------------------------------------------------- the owner's words
 
 /** How the owner's words reached the task: through the supervisor (@tN, its picker, a relay), or typed in the worker's own window. */
-const VIA = { supervisor: "through the supervisor", worker: "in the worker's own window" };
+const VIA = { supervisor: "through the supervisor", worker: "in the worker's own window", app: "from a front end" };
 
 /**
  * Records the owner's words on `t` (call under the task lock). Every way of talking to a worker comes
@@ -1042,12 +1042,16 @@ export function ownerSaid(t, text, via, now = Date.now()) {
   return w.closed ?? null;
 }
 
-/** Records the owner's words on a task, under its lock. Returns the question they closed, or null. */
-export function recordWords(t0, text, via) {
+/**
+ * Records the owner's words on a task, under its lock. `mark(t)` also runs under it (a pick notes which question
+ * it answered, answer.mjs). Returns the question they closed, or null.
+ */
+export function recordWords(t0, text, via, mark = null) {
   const r = store.withTasksLock(t0.home, () => {
     const t = store.readTask(t0.home, t0.id);
     if (!t) return null;
     const closed = ownerSaid(t, text, via);
+    mark?.(t);
     store.writeTask(t);
     return closed;
   });
@@ -1075,7 +1079,8 @@ export function ownerTypedInWorker(t0, session, text, at) {
  * since it last heard. It never saw those words, and without this it would ask again about what they settled.
  */
 export function ownerNews(h, now = Date.now()) {
-  const fresh = (t) => t.words.filter((w) => w.via === "worker" && w.at > (t.toldAt ?? 0));
+  // Words typed in the worker's window, or sent from a front end (the cockpit app): the supervisor saw neither.
+  const fresh = (t) => t.words.filter((w) => (w.via === "worker" || w.via === "app") && w.at > (t.toldAt ?? 0));
   if (!store.listTasks(h).some((t) => fresh(t).length)) return [];
   const r = store.withTasksLock(h, () => {
     const lines = [];
@@ -1087,7 +1092,7 @@ export function ownerNews(h, now = Date.now()) {
       store.writeTask(t);
       const closed = said.filter((w) => w.closed).map((w) => `"${w.closed}"`);
       lines.push(
-        `${P} ${label(t)}: the owner talked to its worker in its own window, ${said.length} message${said.length === 1 ? "" : "s"}, the last ${ago(last.at, now)}: "${store.clip(store.oneLine(last.text), 160)}". ` +
+        `${P} ${label(t)}: the owner talked to its worker ${last.via === "app" ? `from ${last.client ?? "a front end"}` : "in its own window"}, ${said.length} message${said.length === 1 ? "" : "s"}, the last ${ago(last.at, now)}: "${store.clip(store.oneLine(last.text), 160)}". ` +
           `Their words are on its record (\`${cli()} task show ${t.id}\`) and count like any they send through you.` +
           (closed.length ? ` They closed its open question (${closed.join("; ")}); ${t.id} asks again if it still needs them.` : "") +
           ` Ask the owner nothing about ${t.id} that came before these words.`,

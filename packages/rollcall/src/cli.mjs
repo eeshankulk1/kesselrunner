@@ -64,6 +64,8 @@ ${TASK_USAGE}
   rollcall inbox                         in a task's worker: print the supervisor's unread messages
   rollcall attach <task> [--print]       show the task's worker (by name or id: luke, t3): its tab, inside
                                          falcon; else a new terminal tab on it (--print: the command only)
+  rollcall api version | snapshot | stream | do <action> <json> | attach <home>[:<task>]
+                                         the front-end interface, for apps over rollcall (JSON; see API.md)
   rollcall usage [--json] [--refresh]    each plan's room: Claude's five-hour and weekly limits, Codex's limits
   rollcall hook <event>                  hook entry point (stdin: the hook payload)
 
@@ -109,6 +111,8 @@ export async function main(argv) {
       case "supervise": return supervise(rest);
       case "inbox": return inbox(rest);
       case "attach": return attach(rest);
+      // The front-end interface (api.mjs), loaded only when asked for.
+      case "api": return await (await import("./api-cli.mjs")).apiCommand(rest, { say, whoAmI });
       case undefined: case "help": case "-h": case "--help": say(USAGE); return 0;
       default: return usageError(`unknown command "${cmd}"`);
     }
