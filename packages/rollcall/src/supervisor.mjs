@@ -1,14 +1,12 @@
 // Supervisors and their workers. A supervisor is a named home (store.mjs "supervisor homes") that one live
 // session holds at a time: `/supervisor alpha` in one tab, `/supervisor beta` in another, each with its own
-// tasks, id counter, wake queue and tmux session. A worker is an ordinary interactive `claude` in a tmux
-// window of its home's tmux session, started in the task's worktree with a known session id, so a dead one
-// resumes with its context. Its hooks (a settings file passed at launch) record what it is doing; the owner's
-// words and picks are typed into its pane, with a receipt (delivery.mjs); the supervisor's own messages go to its
-// file inbox.
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+// tasks, id counter, wake queue and tmux session. A worker is an ordinary interactive session of its task's
+// harness (Claude Code or Codex: harness/) in a tmux window of its home's tmux session, started in the task's
+// worktree with a known session id, so a dead one resumes with its context. Its hooks (Claude Code's, from a settings
+// file passed at launch) or its protocol events (Codex's, codex/worker.mjs) record what it is doing through
+// workerHook; the owner's words and picks reach it as its next prompt, with a receipt (delivery.mjs); the
+// supervisor's own messages go to its file inbox.
+import { existsSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe } from "./asked.mjs";
 import { dialogFlag, drop, enqueue, flush, keyQuietMs, launching, noteTyped, received, waiting } from "./delivery.mjs";
@@ -19,7 +17,8 @@ import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import * as tmux from "./tmux.mjs";
 import { openBlocker, resetAt } from "./trouble.mjs";
-import { launchLines } from "./runtime.mjs";
+import { adapter, effortOk, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
+import { MODES, modelOk } from "./harness/claude.mjs";
 
 /** A worker's environment names its task, so its own `rollcall task ...` commands need no home. */
 export const TASK_ENV = "ROLLCALL_TASK";
@@ -226,7 +225,9 @@ export function workerState(t, now = Date.now()) {
   const context = ctx?.pct ?? null;
   const tokens = ctx?.tokens ?? null;
   const size = ctx?.size ?? null;
-  if (!s.tmux) return { window: false, alive: false, busy: false, dialog: null, asks: null, session: s.id, legacy: true, parked: false, context, tokens, size, since: s.at, bg: null, last: null };
+  // A Codex worker's thread also says what it used in all, across compactions.
+  const total = ctx?.total ?? null;
+  if (!s.tmux) return { window: false, alive: false, busy: false, dialog: null, asks: null, session: s.id, harness: "claude", legacy: true, parked: false, context, tokens, size, total, since: s.at, bg: null, last: null };
   const w = tmux.windowOf(t.home, t.id);
   const r = running(store.readStatus(t.home, t.id));
   const idle = r.turn?.ev === "idle";
@@ -236,7 +237,7 @@ export function workerState(t, now = Date.now()) {
     window: !!w, alive: !!w?.alive, busy: !!w?.alive && !idle, dialog: w?.alive ? dialog : null,
     asks: w?.alive && dialog ? dialogAsks(t.home, t.id) : null,
     // Parked: rollcall stopped it while it sat idle. Stopped: on purpose (start.mjs --stop), and no one resumes it unasked.
-    session: s.id, legacy: false, parked: r.held === "parked" && !w?.alive, context, tokens, size, since: r.turn?.at ?? s.at,
+    session: s.id, harness: sessionHarness(s), legacy: false, parked: r.held === "parked" && !w?.alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
     stopped: r.held === "stopped",
     bg: idle ? r.turn.bg ?? null : null, last: idle ? r.turn.last ?? null : null,
     // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones.
@@ -302,7 +303,8 @@ export const HANDOFF_HOLDS =
   "the prompt the owner would paste into a fresh session to carry on: where the work stands, what is done (commits, PR, checks run), " +
   "the files to read first and what each is for, what remains, the owner's decisions and any open question. Facts, not orders: the next worker picks its own steps.";
 
-const capFlag = (h, id) => join(store.workerDir(h, id), "cap");
+/** The cap flag: up while the worker has something to hear about its context use (markCap). */
+export const capFlag = (h, id) => join(store.workerDir(h, id), "cap");
 
 // The session that heard the soft mark: the worker is told once, then judges for itself.
 const softFlag = (h, id) => join(store.workerDir(h, id), "soft");
@@ -370,18 +372,12 @@ function stillWaits(t, ours) {
 
 // ---------------------------------------------------------------- launching
 
-/** `claude --permission-mode` values a worker takes from its supervisor; "default" and "plan" start it as a new session would. */
-const MODES = new Set(["acceptEdits", "auto", "bypassPermissions", "dontAsk"]);
-const CLAUDE = () => process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude";
-
 /**
- * A worker starts on a model and effort named on its command line (`--model`, `--effort`), never on whatever
- * `/model` last saved to the owner's settings: one picked in a plain session once started a worker on a model
- * whose safeguards stopped it. A model is an alias or an id ("opus", "opus[1m]", "claude-opus-5-5").
+ * A worker starts on a model and effort named on its command line, never on whatever `/model` last saved to the
+ * owner's settings (harness/claude.mjs). Each harness maps a task's model to one it takes (harness/*.mjs `models`).
  */
-export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-export const modelOk = (m) => typeof m === "string" && /^[a-z][\w.-]*(\[1m\])?$/i.test(m);
-export const effortOk = (e) => EFFORTS.includes(e);
+export { EFFORTS, effortOk } from "./harness/index.mjs";
+export { modelOk, trusted } from "./harness/claude.mjs";
 
 /**
  * The plugins whose MCP servers drive a browser. Of the plugins the core enables, only these start a local
@@ -406,17 +402,6 @@ export function wantsBrowser(t) {
   return !!(m.devServer || m.routes || m.auth?.storageState || stacks.some((x) => /playwright|cypress|webdriver|puppeteer/i.test(String(x?.runner ?? "")) || webby.test(String(x?.name ?? "")) || webby.test(String(x?.dir ?? ""))));
 }
 
-/**
- * Whether Claude Code trusts task `t`'s worktree, by its own record, or null where that cannot be read. It asks once
- * per repo, before any hook runs, so this is the one word on why a worker has not started. As Claude Code 2.1.314
- * checks it: the repo's main checkout, or the worktree's own root. A folder above a repo does not count.
- */
-export function trusted(t) {
-  let config;
-  try { config = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json"), "utf8")); } catch { return null; }
-  return [t.repo?.main, t.worktree].some((d) => config.projects?.[d]?.hasTrustDialogAccepted === true);
-}
-
 /** Plugin choices for a session that needs no browser: the browser servers off. */
 export const noBrowser = () => Object.fromEntries(BROWSER_PLUGINS.map((p) => [p, false]));
 
@@ -424,49 +409,11 @@ export const noBrowser = () => Object.fromEntries(BROWSER_PLUGINS.map((p) => [p,
 export const statusLine = (seconds) => ({ type: "command", command: `node ${q(BIN)} statusline`, refreshInterval: seconds });
 
 /**
- * The worker's settings file: its hooks report to the task's status log, AskUserQuestion goes to the
- * owner's picker in the supervisor, and the 1Password plugin stays off (its MCP server reads 1Password's
- * database, which raised a macOS prompt for every new worker). Its status line draws nothing that changes
- * with time, so it runs on the session's own events only (the longest refresh there is: an hour); the
- * browser servers start only where the worker can use them (wantsBrowser).
- */
-function launchSettings(t) {
-  const { home: h, id } = t;
-  const hook = (ev) => `node ${q(BIN)} worker-hook ${q(h)} ${q(id)} ${ev}`;
-  const cmd = (ev) => [{ hooks: [{ type: "command", command: hook(ev), timeout: 10 }] }];
-  // A dialog flag is cleared by the next tool result, and a worker at the cap hears so after each tool call;
-  // testing for each flag in the shell keeps node off every tool call.
-  const after = [
-    { hooks: [{ type: "command", command: `[ -e ${q(dialogFlag(h, id))} ] && ${hook("clear")} || true`, timeout: 10 }] },
-    { hooks: [{ type: "command", command: `[ -e ${q(capFlag(h, id))} ] && ${hook("cap")} || true`, timeout: 10 }] },
-  ];
-  return {
-    enabledPlugins: { "1password@1password": false, ...(wantsBrowser(t) ? {} : noBrowser()) },
-    statusLine: statusLine(3600),
-    hooks: {
-      SessionStart: cmd("session-start"),
-      UserPromptSubmit: cmd("prompt-submit"),
-      Stop: cmd("stop"),
-      // A turn that ends on an API error (a usage limit among them) fires this instead of Stop.
-      StopFailure: cmd("stop-failure"),
-      SessionEnd: cmd("session-end"),
-      // PermissionRequest fires as a permission prompt or a picker opens; the notification for one comes 6 s later,
-      // and could raise the flag again over a dialog already answered. Only the elicitation has no hook of its own.
-      PermissionRequest: cmd("dialog"),
-      Notification: [{ matcher: "elicitation_dialog", hooks: [{ type: "command", command: hook("dialog"), timeout: 10 }] }],
-      PreToolUse: [{ matcher: "AskUserQuestion", hooks: [{ type: "command", command: hook("ask"), timeout: 10 }] }],
-      PostToolUse: after,
-      PostToolUseFailure: after,
-    },
-  };
-}
-
-/**
- * Starts the task's worker in its tmux window: a new session (`--session-id`, with `prompt` as its first
- * prompt: the brief) or, with `resume`, its last session again, or the earlier one `session` names
- * (`--resume`, with `prompt` as the owner's words or a nudge). A resumed worker whose worktree gc removed
- * gets it back first. `model` and `effort` go on its command line (modelOk, effortOk; else Claude Code's own
- * choice). Records the session on the task. Returns { ok, session, err }.
+ * Starts the task's worker in its tmux window on the task's harness (harness/): a new session, with `prompt` as its
+ * first prompt (the brief), or with `resume` its last session again, or the earlier one `session` names (with
+ * `prompt` as the owner's words or a nudge), each on the harness it ran on. A resumed worker whose worktree gc removed
+ * gets it back first. `model` and `effort` go on its command line where its harness takes them (else the harness's
+ * own choice). Records the session, and its harness, on the task. Returns { ok, session, err }.
  */
 export function launch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
   if (!tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };
@@ -474,11 +421,14 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   if (t.archived) return { ok: false, err: `${t.id} is archived: rollcall task restore ${t.id} brings back its worktree and its worker` };
   if (resume) { const r = restoreWorktree(t); if (!r.ok) return r; }
   const last = t.sessions?.at(-1);
+  const again = resume && last ? t.sessions.find((s) => s.id === (pick ?? last.id)) ?? last : null;
+  const harness = again ? sessionHarness(again) : harnessOf(t);
+  const a = adapter(harness);
   // A v2 worker is a background session the daemon may still run: stopped first, so one conversation has one process.
-  if (last && !last.tmux && !last.endedAt) spawnSync(CLAUDE(), ["stop", last.id.slice(0, 8)], { stdio: "ignore", timeout: 30_000 });
+  if (last && !last.tmux && !last.endedAt) adapter(last).stopLegacy(last.id);
   model = modelOk(model) ? model : null;
   effort = effortOk(effort) ? effort : null;
-  const { script, session } = writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort });
+  const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort });
   rmSync(dialogFlag(t.home, t.id), { force: true });
   launching(t, prompt, { fresh: session !== last?.id });
   // Another session than the last starts with a context of its own: the last one's use and cap flag are not its.
@@ -487,7 +437,7 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   if (!r.ok) return { ok: false, err: r.err || "tmux could not open the window" };
   // Its tab reads right at once; the supervisor's status line adds its state and color within seconds.
   tmux.setTabs(t.home, new Map([[t.id, { tab: label(t) }]]));
-  store.appendStatus(t.home, t.id, { ev: "launch", session, resume, mode: MODES.has(mode) ? mode : null, model, effort });
+  store.appendStatus(t.home, t.id, { ev: "launch", session, resume, harness, mode: MODES.has(mode) ? mode : null, model, effort });
   store.withTasksLock(t.home, () => {
     const x = store.readTask(t.home, t.id);
     if (!x) return;
@@ -498,7 +448,7 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
       // An earlier worker brought back becomes the task's worker again, under its own name.
       const was = x.sessions.find((s) => s.id === session);
       for (const s of x.sessions) s.endedAt ??= now;
-      x.sessions.push({ id: session, name: name ?? was?.name ?? null, at: now, endedAt: null, tmux: true });
+      x.sessions.push({ id: session, name: name ?? was?.name ?? null, at: now, endedAt: null, tmux: true, ...(harness !== "claude" ? { harness } : {}), ...(was?.thread ? { thread: was.thread } : {}) });
       transition(x, "fresh-worker", { now });
     }
     delete x.legacy;
@@ -511,46 +461,6 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
 function paneCommand(script) {
   const shell = process.env.SHELL || "/bin/zsh";
   return [shell, "-lic", `. ${q(script)}; exec ${q(shell)} -li`];
-}
-
-/**
- * Writes the worker's launch files (its settings, the first prompt, the script its pane sources) for a new
- * session, or with `resume` its last one again (or the one `session` names). Returns { script, session }.
- */
-function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
-  const dir = store.workerDir(t.home, t.id);
-  const last = t.sessions?.at(-1);
-  const session = resume && last ? pick ?? last.id : randomUUID();
-  const settings = join(dir, "settings.json");
-  const promptFile = join(dir, "prompt.txt");
-  const script = join(dir, "launch.sh");
-  writeFileSync(settings, JSON.stringify(launchSettings(t), null, 2));
-  if (prompt) writeFileSync(promptFile, prompt.startsWith("-") ? ` ${prompt}` : prompt); // a leading "-" would read as a flag
-  else rmSync(promptFile, { force: true });
-  const permission = `${MODES.has(mode) ? ` --permission-mode ${mode}` : ""}${modelOk(model) ? ` --model ${q(model)}` : ""}${effortOk(effort) ? ` --effort ${effort}` : ""}`;
-  const first = prompt ? ` "$(cat ${q(promptFile)})"` : "";
-  // The browser servers refuse a path outside the folders they know, and the owner's screenshots go to the task's
-  // own: Chrome DevTools reads Claude Code's folders (--add-dir), Playwright its output folder. --add-dir takes
-  // every word up to the next flag, so it never stands last, before the prompt.
-  const browser = wantsBrowser(t);
-  const files = store.filesDir(t.home, t.id);
-  if (browser) mkdirSync(files, { recursive: true });
-  const addDir = browser ? ` --add-dir ${q(files)}` : "";
-  const lines = [
-    `# rollcall: the worker for task ${t.home}:${t.id}. Its tmux pane sources this file.`,
-    "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_PROJECT_DIR CLAUDE_ENV_FILE ROLLCALL_SESSION",
-    `export ${TASK_ENV}=${q(`${t.home}:${t.id}`)}`,
-    ...["ROLLCALL_HOME", "ROLLCALL_TMUX_SOCKET", "ROLLCALL_WATCHER"].filter((k) => process.env[k]).map((k) => `export ${k}=${q(process.env[k])}`),
-    ...(browser ? [`export PLAYWRIGHT_MCP_OUTPUT_DIR=${q(files)}`] : []),
-    // Its worktree's environment (ports and all), and a wait for a setup still running: the first turn finds it ready.
-    ...launchLines(t, BIN),
-    `cd ${q(t.worktree)} || exit 1`,
-    resume
-      ? `${q(CLAUDE())} --resume ${q(session)}${addDir} --settings ${q(settings)}${permission}${first}`
-      : `${q(CLAUDE())} --session-id ${q(session)}${addDir} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
-  ];
-  writeFileSync(script, `${lines.join("\n")}\n`);
-  return { script, session };
 }
 
 /** Stops the task's worker (its worktree and record stay). */
@@ -594,7 +504,7 @@ export function parkDue(t, w, now = Date.now()) {
  * by itself when it is needed (unpark). Returns whether it parked.
  */
 export function park(t, w, now = Date.now()) {
-  const { script } = writeLaunch(t, { resume: true, mode: w.mode, model: w.model, effort: w.effort });
+  const { script } = workerAdapter(t).writeLaunch(t, { resume: true, mode: w.mode, model: w.model, effort: w.effort });
   const parked = join(store.workerDir(t.home, t.id), "parked.sh");
   const idle = Math.max(1, Math.round((now - w.since) / 60_000));
   const lines = [
@@ -849,9 +759,12 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       const text = typeof p.last_assistant_message === "string" ? store.clip(store.oneLine(p.last_assistant_message), 240) : undefined;
       store.appendStatus(h, id, { ev: "idle", bg: [], last: text, failed: p.error ?? "unknown" });
       if (ACCOUNT_ERRORS.has(p.error)) {
-        const until = resetAt(text);
-        openBlocker("usage", { until, text });
-        setWait(h, id, { on: "usage", until, at: Date.now() });
+        // Codex says when its limit resets; Claude Code only in its words.
+        const until = Number.isFinite(p.resets_at) ? p.resets_at : resetAt(text);
+        // Each plan's limit is its own blocker: a Codex limit holds only the tasks that run on Codex.
+        const kind = p.limit === "usage-codex" ? "usage-codex" : "usage";
+        openBlocker(kind, { until, text });
+        setWait(h, id, { on: kind, until, at: Date.now() });
       }
       return null;
     }

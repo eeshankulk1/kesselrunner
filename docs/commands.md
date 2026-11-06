@@ -28,6 +28,7 @@ Inside a supervisor:
 | You type | Does |
 |---|---|
 | a plain request | Becomes a task: a worker starts in its own worktree and tmux tab. "Ship it" in the request lets the worker ship without asking again |
+| a request "on codex" | The task's workers run on Codex instead of Claude Code (needs `codex login`; see [codex-parity.md](codex-parity.md#codex-as-a-falcon-worker)). "Move luke to codex" moves a running task, with a fresh worker there |
 | `@t3 <text>` (or the task's name) | Typed into that task's worker word for word; it never reaches the supervisor |
 | `@t3` alone | Every line after it goes to that task, until a line that is just `@` |
 | a pick in the picker | A worker's question opens in the supervisor's picker, and your pick is typed back into the worker |
@@ -40,6 +41,7 @@ What the supervisor and its workers do on their own:
 - A stopped worker resumes with its context. An idle worker whose task waits on a PR or on you parks after 15 minutes to free memory; your words, Enter in its tab or the supervisor's message bring it back.
 - A falcon supervisor parks after a quiet hour with no terminal on it; Enter in its tab, `falcon continue` or its tasks' news bring it back, as a fresh session once its conversation grew big.
 - Workers start the browser MCP servers only in repos with something a browser can test.
+- The status line shows how much of each plan's limits is used (Claude, and Codex once read). When one plan nears its limit and the other has room, the supervisor asks whether to move the tasks waiting on the full one; nothing moves unless you say so.
 - A landed or closed task's window closes 10 minutes after its worker's last turn (the tab bar, chips and `rollcall task list` show the countdown). The worker can still come back with `--resume` or an `@name` message.
 
 ## Inside a Claude Code session
@@ -64,7 +66,10 @@ The commands a person types. The full list, and what each session sees, is in [r
 | Command | Does |
 |---|---|
 | `rollcall status [--json] [--all]` | The other live sessions in this repo: branch, checkout, claim, edited files |
-| `rollcall task list` / `rollcall task show <id>` | A supervisor's open tasks, or one task whole: your words, notes, worker sessions, last report |
+| `rollcall task list` / `rollcall task show <id>` | A supervisor's open tasks, or one task whole: your words, notes, worker sessions, last report. The list starts with a `usage:` line once rollcall has read a plan's limits |
+| `rollcall task new "<title>" --harness codex` | Make a task whose workers run on Codex (the supervisor runs this when you say "on codex"); without `--harness`, `ROLLCALL_WORKER_HARNESS`, else Claude Code |
+| `rollcall task move <id> --harness codex\|claude` | Run a task on the other agent CLI from now on: a running worker is replaced by a fresh one there that carries on from the task's record, and a task held by its plan's usage limit stops waiting |
+| `rollcall usage [--json] [--refresh]` | How much of each plan's limits is used: Claude's five-hour and weekly windows, Codex's limits (`--refresh` reads Codex's now), for example `Claude 5h 62% · wk 40% \| Codex 5h 20%` |
 | `rollcall task new [title] --issue <n\|url>` / `--pr <n\|url>` / `--branch <name>` | A task from a GitHub issue (title, body and link become its first words; its PR says `Closes #N`), from an open same-repo PR (its branch checked out as is; the worker pushes to it and opens no new PR; forks are refused), or from an existing local or origin branch. They take no `--worktree`, `--no-worktree` or `--no-repo`; `--pr` and `--branch` take no `--base` |
 | `rollcall ports [--json]` | This checkout's block of 10 consecutive ports (41000-48999), handed out on first ask and given back when gc removes the worktree or the task is archived. The main checkout uses the manifest's `ports.default` |
 | `rollcall manifest [--json]` | The test manifest with this checkout's ports filled in for `{port}` and `{port+N}` ([test-manifest.md](test-manifest.md)) |
@@ -79,7 +84,7 @@ The commands a person types. The full list, and what each session sees, is in [r
 | `rollcall allow-shared` | Let a session edit, and run checkout-changing git in, a checkout another session is using, on purpose |
 | `rollcall gc [--dry-run] [--all]` | Remove merged, clean, unused task worktrees and their branches, running the manifest's `worktree.teardown` first. An open task's worktree, and a branch made in the last day with nothing committed yet, stay. It also sweeps what ended work left behind (DerivedData of gone projects, old session temp folders, orphan test browsers). Runs in the background at session start and end |
 | `rollcall clean [--yes]` | A low disk's delete list, with sizes; nothing goes until `--yes` |
-| `rollcall blockers [clear <kind>]` | What stops work on this machine or account now (usage limit, GitHub billing, disk, power, memory). You hear each once, work resumes by itself when the cause is gone, and `clear <kind>` says it is fixed |
+| `rollcall blockers [clear <kind>]` | What stops work on this machine or account now (usage limit, Codex's usage limit, which holds only Codex tasks, GitHub billing, disk, power, memory). You hear each once, work resumes by itself when the cause is gone, and `clear <kind>` says it is fixed |
 | `rollcall remind "<text>" --in <2h>` | A line for you later, for a step only you can take |
 
 The hooks keep agents in task worktrees: an edit in a repo's main checkout is denied with the `git worktree add` command to run instead (unless the repo ran `rollcall allow-main`), and a second session's edits and checkout-changing git commands (`checkout`, `reset`, `stash`, `commit`...) in a checkout another live session owns are denied the same way. While a task's PR is open or in the merge queue, rollcall holds `caffeinate -i` on AC power and tells you once if the Mac is on battery with a ship running.
@@ -92,6 +97,14 @@ The hooks keep agents in task worktrees: an edit in a repo's main checkout is de
 | `ROLLCALL_SETUP_MINUTES` | Time limit of a worktree's setup (30) |
 | `ROLLCALL_AWAKE=0` | Stop the `caffeinate` hold |
 | `ROLLCALL_DISABLE=1` | Turn rollcall's hooks into no-ops (shell or settings `env`) |
+| `ROLLCALL_WORKER_HARNESS=codex` | New tasks' workers run on Codex unless the task names another (default `claude`) |
+| `ROLLCALL_CODEX_BIN` | Path to the Codex CLI for Codex workers (else `KESSELRUNNER_CODEX_BIN`, PATH, then the ChatGPT app's) |
+| `ROLLCALL_CODEX_MODEL` / `ROLLCALL_CODEX_EFFORT` | The model and effort a Codex worker runs on when its task names no Codex model or no effort (default: Codex's own) |
+| `ROLLCALL_CODEX_ADD_DIRS` | More folders a Codex worker may write to, colon-separated |
+| `ROLLCALL_CODEX_QUESTIONS=0` | Start Codex workers without the under-development flag that gives them the question tool outside plan mode |
+| `ROLLCALL_USAGE_NEAR_PCT` | How full a window must be for a plan to count as near its limit (default 85) |
+
+Set these under `env` in `~/.claude/settings.json`, so the supervisor and its workers all see them.
 
 ## Running the helper agents on Codex
 
@@ -140,6 +153,8 @@ Keys under `env` in `~/.claude/settings.json`.
 | `node ~/.claude/kesselrunner/scripts/delegate/run.mjs status` | Which backend is set, and whether Codex is usable |
 | `node ~/.claude/kesselrunner/scripts/codex-bridge/generate.mjs` | Project this setup into `~/.codex` again (runs at every session start) |
 | `node ~/.claude/kesselrunner/scripts/supervisor/start.mjs <task>` | Start a task's worker (the supervisor runs it). `--fresh` replaces a worker that outgrew its session, `--resume "<why>"` brings a stopped one back with its conversation (also on a landed or closed task), `--session <id-prefix>` picks an earlier worker; `--dry-run`, `--stop`, `--interrupt` and `--home <name>` too |
+| `rollcall codex-worker <home> <task>` | A Codex worker: the process a Codex task's window runs (its own `codex app-server`, the task's thread, and Codex's UI on it). The launch script runs it |
+| `rollcall _codex-send <socket> <thread> say\|interrupt` | rollcall's words (stdin) into a Codex worker's thread, or a stop of its turn, through its app server. Internal |
 
 ## Developing kesselrunner
 

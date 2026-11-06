@@ -10,6 +10,9 @@
 // as a permission prompt or a picker opens (its notification comes 6 s later), and Enter there would answer it.
 // Cancelling a dialog fires no hook at all, so an open flag holds only while its tool call waits in the transcript.
 //
+// A Codex worker takes words through its app server instead of keys (harness/codex.mjs): the server's answer is the
+// receipt, and its UI's prompts are the owner's, since rollcall's carry an id of its own.
+//
 // Who wrote a prompt is the transcript's to say, and Claude Code writes that record only after the hook returns:
 // the hook notes a prompt that is no delivery of rollcall's (`typed-<id>.json`), and the watcher settles it.
 import { randomBytes } from "node:crypto";
@@ -17,7 +20,7 @@ import { readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { asked, promptAuthor, sameWords } from "./asked.mjs";
 import * as store from "./store.mjs";
-import * as tmux from "./tmux.mjs";
+import { workerAdapter } from "./harness/index.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 /** How long a typed prompt has to reach the session's prompt hook before it counts as lost. */
@@ -90,11 +93,11 @@ export function received(t, prompt, now = Date.now()) {
 }
 
 /**
- * Whether worker `w` can take typing now: it runs, its session has started (before that Claude Code may be showing
- * its trust prompt, which no hook reports and where Enter means "No, exit"), no dialog is open, and no key was
- * pressed in its window just now.
+ * Whether worker `w` can take words now: it runs, its session has started (before that Claude Code may be showing
+ * its trust prompt, which no hook reports and where Enter means "No, exit"), and its harness takes them: for Claude
+ * Code no dialog is open and no key was pressed in its window just now (harness/*.mjs takesTyping).
  */
-export const canTake = (t, w, now = Date.now()) => !!w?.alive && w.started && !w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs();
+export const canTake = (t, w, now = Date.now()) => !!w?.alive && w.started && workerAdapter(t).takesTyping(t, w, now);
 
 /**
  * Types what is due on the task's queue as one prompt, when worker `w` can take it. Returns { typed: how many
@@ -106,7 +109,7 @@ export function flush(t, w, now = Date.now()) {
   const items = waiting(h, id);
   if (!items.length || !canTake(t, w, now)) return quiet;
   // Its hook may have failed while the prompt went in: the transcript has the last word before anything goes twice.
-  const file = store.readGlobal(w.session)?.transcript;
+  const file = workerAdapter(t).transcriptOf(w);
   const overdue = items.filter((x) => x.typedAt && now - x.typedAt >= receiptMs());
   const arrived = overdue.filter((x) => promptAuthor(file, x.text, x.typedAt)).map((x) => x.id);
   const { due, lost } = edit(h, OUTBOX(id), (all) => {
@@ -128,7 +131,7 @@ export function flush(t, w, now = Date.now()) {
   }) ?? { due: [], lost: [] };
   if (!due.length) return { ...quiet, lost };
   // A dialog that opens in the moment between paste and Enter must not get that Enter.
-  const r = tmux.type(h, id, due.map((x) => x.text).join("\n\n"), { before: () => !dialogUp(h, id) });
+  const r = workerAdapter(t).type(t, due.map((x) => x.text).join("\n\n"), { before: () => !dialogUp(h, id) });
   if (r.ok) return { typed: due.length, err: null, lost };
   const ids = due.map((x) => x.id);
   edit(h, OUTBOX(id), (all) => ({ items: all.map((x) => (ids.includes(x.id) ? { ...x, typedAt: null, tries: x.tries - 1 } : x)) }));
@@ -167,8 +170,9 @@ export function settleDialog(t, now = Date.now()) {
 /** The worker's hook: a prompt rollcall did not send, for the watcher to settle once the transcript has it. */
 export function noteTyped(t, p, now = Date.now()) {
   const text = typeof p.prompt === "string" ? p.prompt.trim() : "";
-  if (!text || p.agent_id || !p.transcript_path) return;
-  edit(t.home, TYPED(t.id), (items) => ({ items: [...items, { at: now, text, session: p.session_id, transcript: p.transcript_path }] }));
+  // A harness that says who sent a prompt (Codex: a message rollcall sent carries its id) needs no transcript.
+  if (!text || p.agent_id || (!p.transcript_path && p.owner !== true)) return;
+  edit(t.home, TYPED(t.id), (items) => ({ items: [...items, { at: now, text, session: p.session_id, transcript: p.transcript_path ?? null, ...(p.owner === true ? { owner: true } : {}) }] }));
 }
 
 export const typedWaiting = (h, id) => store.readHomeFile(h, TYPED(id)) ?? [];
@@ -182,7 +186,7 @@ export function settleTyped(t, turnEnded, now = Date.now()) {
   return edit(t.home, TYPED(t.id), (items) => {
     const owner = [];
     const left = items.filter((x) => {
-      const who = promptAuthor(x.transcript, x.text, x.at);
+      const who = x.owner ? "owner" : promptAuthor(x.transcript, x.text, x.at);
       if (who === "owner") owner.push(x);
       return !who && !(turnEnded > x.at && now - turnEnded > SETTLE_GRACE_MS);
     });
