@@ -9,6 +9,7 @@ kesselrunner is a Claude Code setup in one repo: global instructions, skills, ag
 | Instructions | The rules every session follows: worktrees, build phase and ship phase, docs, delegation | `CLAUDE.md`, applied into `~/.claude/CLAUDE.md` |
 | Supervisor (the Falcon) | One session you talk to; a worker per task in its own worktree and tmux tab | `skills/supervisor/`, `scripts/supervisor/`, `falcon` in `packages/rollcall/` |
 | rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
+| Front-end interface | One versioned way in for every front end (the Falcon's actions, native apps, scripts): a snapshot, a stream of changes, every action, terminal attach, as `rollcall api` | `packages/rollcall/src/api*.mjs` ([API.md](../packages/rollcall/API.md)) |
 | Ship chain | `/pr-create` and the skills and agents it calls: checks, review, docs, PR, CI watch, landing, release steps | `skills/`, `agents/` |
 | Memory | Project state and notes, loaded into each session | [docsic](https://github.com/eeshankulk1/docsic), installed and wired up by sync |
 | Codex bridge | The same setup in OpenAI Codex, and the helper agents on a Codex plan | `scripts/codex-bridge/`, `scripts/delegate/` ([codex-parity.md](codex-parity.md)) |
@@ -83,6 +84,7 @@ To turn a mod off on one machine, set it to `false` under `enabledPlugins` in `~
 | [commands.md](commands.md) | Every command and setting a person types |
 | [overlay.md](overlay.md) | The personal layer, guards, optional rules, what sync changes in `~/.claude` |
 | [codex-parity.md](codex-parity.md) | The Codex bridge and running the helper agents on Codex |
+| [../packages/rollcall/API.md](../packages/rollcall/API.md) | rollcall's front-end interface: the snapshot, stream, actions and attach a front end relies on |
 | [project-docs.md](project-docs.md) | The docs standard the agents keep in each project repo |
 | [test-manifest.md](test-manifest.md) | The `.claude/test-manifest.json` schema test tooling reads |
 | [templates/](templates/) | Starting points for a project's docs |

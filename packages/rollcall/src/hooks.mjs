@@ -16,7 +16,7 @@ import {
 } from "./session.mjs";
 import * as store from "./store.mjs";
 import { sameWords } from "./asked.mjs";
-import { answeredElsewhere, droppedPick, joinLines, markAnswered, pickLine } from "./answer.mjs";
+import { answeredElsewhere, droppedPick, joinLines, markAnswered, pickLine, questionId } from "./answer.mjs";
 import { PICTURE, picturesFindable, picturesLater } from "./pictures.mjs";
 import { MENTION, tempDenial } from "./temp.mjs";
 import * as tmux from "./tmux.mjs";
@@ -451,7 +451,7 @@ function picks(g, p) {
     const pictured = picked.some((a) => a.own && a.said.includes(PICTURE));
     const findable = pictured && picturesFindable(p);
     const picture = !pictured ? "" : findable ? `\n${P} Their picture comes next, as a saved path: wait for it, and do not search for it.` : `\n${P} rollcall could not save their picture: ask them for it, and do not search for it.`;
-    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`, (t) => markAnswered(t, picked.map((a) => a.x), "the terminal Falcon", text)).stop}`);
+    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`, (t) => markAnswered(t, picked.map((a) => a.x), "the terminal Falcon", text, { qid: questionId(t0) })).stop}`);
     if (findable) picturesLater(h, id, p);
   }
   return lines;

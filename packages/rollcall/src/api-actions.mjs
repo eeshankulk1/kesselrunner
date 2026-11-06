@@ -4,7 +4,7 @@
 // repeat: a payload with a `requestId` seen in the last day returns the first result again, and races between two
 // front ends settle here (the first answer to a question wins), not in each front end.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { answerFromFrontEnd } from "./answer.mjs";
@@ -94,6 +94,8 @@ export const ACTIONS = {
     cli: "rollcall task new + start.mjs",
     run(p) {
       const h = homeOf(p);
+      // Checked before the task exists: a front end retrying a refusal must not make a second task.
+      if (!existsSync(START_FILE)) refuse("unavailable", `kesselrunner's launcher is not at ${START_FILE}`);
       const title = str(p, "title", { max: 200 });
       const words = str(p, "words");
       const repo = str(p, "repo", { required: !p.noRepo });
@@ -110,7 +112,7 @@ export const ACTIONS = {
       if (p.until) argv.push("--until", String(p.until));
       for (const [k, f] of [["ship", "--ship"], ["browser", "--browser"], ["hold", "--hold"]]) if (p[k]) argv.push(f);
       let made;
-      try { made = JSON.parse(task(argv)); } finally { try { writeFileSync(file, ""); } catch {} }
+      try { made = JSON.parse(task(argv)); } finally { rmSync(file, { force: true }); }
       // A task that waits on others (or is held) starts later, by rollcall or on the owner's word.
       if (made.after?.length || made.hold) return { task: refOf(made), started: false, view: fresh(made) };
       const s = start(made, []);
@@ -124,6 +126,7 @@ export const ACTIONS = {
     run(p, client) {
       const t = taskOf(p);
       const text = str(p, "text").trim();
+      if (!text) refuse("bad-payload", "text is required");
       if (!isOpen(t) && !t.sessions?.length) refuse("refused", `${label(t)} is ${t.state} and never had a worker`);
       const r = deliverWords(t, text, {
         record: (x) => recordWords(t, x, "app", (rec) => { rec.words.at(-1).client = client; }),
@@ -232,8 +235,8 @@ export const COMING = {
 const requestsPath = () => join(store.home(), "_machine", "api-requests.json");
 const KEEP_MS = 86400_000;
 
-function seen(requestId) {
-  try { return (JSON.parse(readFileSync(requestsPath(), "utf8")) ?? []).find((x) => x.id === requestId) ?? null; } catch { return null; }
+function seen(requestId, action) {
+  try { return (JSON.parse(readFileSync(requestsPath(), "utf8")) ?? []).find((x) => x.id === requestId && x.action === action) ?? null; } catch { return null; }
 }
 
 function remember(requestId, action, result, now = Date.now()) {
@@ -261,16 +264,18 @@ export function runAction(name, payload, { client = "frontend" } = {}) {
       : { ok: false, error: { code: "unknown-action", message: `no action ${name}: ${Object.keys(ACTIONS).join(", ")}` } };
   }
   const rid = typeof p.requestId === "string" && p.requestId ? p.requestId.slice(0, 100) : null;
-  const was = rid ? seen(rid) : null;
+  const was = rid ? seen(rid, name) : null;
   if (was) return { ...was.result, repeated: true };
   const by = typeof p.client === "string" && p.client.trim() ? p.client.trim().slice(0, 40) : client;
   let out;
   try {
     out = { ok: true, result: a.run(p, by) };
   } catch (e) {
-    if (!(e instanceof ApiError)) throw e;
-    out = { ok: false, error: { code: e.code, message: e.message, ...e.extra } };
+    out = e instanceof ApiError
+      ? { ok: false, error: { code: e.code, message: e.message, ...e.extra } }
+      : { ok: false, error: { code: "failed", message: String(e?.message ?? e) } };
   }
-  if (rid) remember(rid, name, out);
+  // A refusal is not kept: the same request may go through once what refused it is gone (a busy store).
+  if (rid && out.ok) remember(rid, name, out);
   return out;
 }

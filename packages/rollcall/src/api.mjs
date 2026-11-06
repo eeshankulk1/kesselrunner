@@ -24,6 +24,10 @@ import { view } from "./watch.mjs";
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
 export const INTERFACE = 1;
 
+// Whether tmux is installed, asked once per process: a stream builds a snapshot every few seconds.
+let tmuxThere = null;
+const tmuxAvailable = () => (tmuxThere ??= tmux.available());
+
 const VERSION = (() => { try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version; } catch { return null; } })();
 
 export const USAGE = `  rollcall api version | snapshot [--home <h>] | stream [--home <h>] [--client <name>] [--notifies]
@@ -119,7 +123,7 @@ function supervisorView(h, now) {
     terminal: { window: !!win, alive: !!win?.alive },
     turn: turn && holder && turn.session === holder.id ? { idle: !!turn.idle, at: turn.at } : null,
     context: ctx?.pct ?? null,
-    replyTo: store.readHomeFile(h, "reply-to")?.task ?? null,
+    replyTo: store.readHomeFile(h, "reply-to")?.task ? `${h}:${store.readHomeFile(h, "reply-to").task}` : null,
     feed: (store.readHomeFile(h, "feed") ?? []).slice(-20).map((e) => ({ at: e.at, task: e.task ? `${h}:${e.task}` : null, text: e.text, report: e.report ?? null })),
     reminders: (store.readHomeFile(h, "reminders") ?? []).map((r) => ({ at: r.at, text: r.text })),
     openTasks: store.listTasks(h).filter(isOpen).length,
@@ -133,7 +137,7 @@ function sessionsView(now) {
     for (const r of store.listRecords(key).filter(isAlive)) {
       out.push({
         id: r.id, repo: { key, name: r.repoName ?? key }, branch: r.branch ?? null, checkout: r.checkout ?? null, mainCheckout: !!r.main && r.checkout === r.main,
-        harness: r.harness ?? null, state: !isLive(r, now) ? "stale" : r.idle ? "idle" : "working", since: r.since ?? null, seen: r.seen ?? null,
+        harness: r.harness ?? null, state: !isLive(r, now) ? "stale" : r.idle ? "idle" : "working", since: r.since ?? null,
         intent: intentOf(r) ?? null, claim: r.claim ?? null,
       });
     }
@@ -170,7 +174,7 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
   const homes = store.listHomes().filter((h) => !home || h === home);
   return {
     interface: INTERFACE, rollcall: VERSION, at: now,
-    tmux: { socket: tmux.SOCKET(), available: tmux.available() },
+    tmux: { socket: tmux.SOCKET(), available: tmuxAvailable() },
     supervisors: homes.map((h) => supervisorView(h, now)),
     tasks: homes.flatMap((h) => visibleTasks(h, { now })).map((t) => taskView(t, now)),
     sessions: sessionsView(now),

@@ -28,6 +28,8 @@ export async function apiCommand(args, ctx) {
     case "attach": {
       const client = opt("--client") ?? "frontend";
       const resume = has("--resume");
+      // Bringing a worker back acts for the owner, as `do task.resume` does.
+      if (resume && (taskEnv() || ctx.whoAmI())) return error("refused", "attach --resume acts as the owner; an agent session uses start.mjs --resume");
       const ref = rest[0];
       if (!ref) return error("bad-payload", "usage: rollcall api attach <home>[:<task>] [--client <name>] [--resume]", 2);
       const r = attachInfo(ref, { client, resume: resume ? (t) => resumeFor(t, client) : null });

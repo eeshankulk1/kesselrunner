@@ -15,8 +15,13 @@ import * as store from "./store.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 // The beat for what no file announces; the snapshot is built at most this often on file changes too.
-const beatMs = () => ms("ROLLCALL_API_BEAT_MS", 2000);
+const beatMs = () => ms("ROLLCALL_API_BEAT_MS", 5000);
 const settleMs = () => Math.min(250, beatMs());
+// The least time between two builds (one costs a tmux call per supervisor, ~50 ms each), however busy the store is.
+const gapMs = () => Math.min(1000, beatMs());
+// Changes that reach a front end: supervisors' homes, the machine's records, merge queues. A repo's session files change
+// on every tool call of every agent; the beat picks up what they mean (a session idle, stale or gone).
+const RELEVANT = /^(_supervisors|_machine)\b|[\\/]queue[\\/]/;
 const heartbeatMs = () => ms("ROLLCALL_API_HEARTBEAT_MS", 15_000);
 // How often an open PR's checks are read (one gh call per PR).
 const prEveryMs = () => ms("ROLLCALL_API_PR_MS", 60_000);
@@ -67,7 +72,7 @@ export function changes(prev, next) {
   }
   for (const name of sup.keys()) if (!next.supervisors.some((s) => s.name === name)) out.push({ type: "supervisor.removed", name });
 
-  for (const k of ["sessions", "queues", "blockers", "decisions", "usage", "clients"]) {
+  for (const k of ["tmux", "sessions", "queues", "blockers", "blockerLines", "decisions", "usage", "clients"]) {
     if (!same(prev[k], next[k])) out.push({ type: `${k}.changed`, [k]: next[k] });
   }
   return out;
@@ -106,7 +111,7 @@ export function stream({ home = null, client = null, notifies = false, out = pro
       lastLine = Date.now();
       out.write(`${JSON.stringify({ v: INTERFACE, seq: ++seq, at: lastLine, ...o })}\n`);
     };
-    if (client) registerClient({ client, notifies });
+    if (client || notifies) registerClient({ client: client ?? "frontend", notifies });
     let prev = snapshot({ home });
     write({ type: "snapshot", snapshot: prev });
 
@@ -123,6 +128,7 @@ export function stream({ home = null, client = null, notifies = false, out = pro
         for (const c of changes(prev, next)) write(c);
         for (const n of noticesSince(noticeAt)) { noticeAt = Math.max(noticeAt, n.at); write({ type: "notice", ...n }); }
         prev = next;
+        builtAt = Date.now();
         if (Date.now() - lastLine >= heartbeatMs()) write({ type: "heartbeat" });
       } catch (e) {
         write({ type: "error", message: String(e?.message ?? e) });
@@ -130,7 +136,11 @@ export function stream({ home = null, client = null, notifies = false, out = pro
         building = false;
       }
     };
-    const soon = () => { if (!timer && !ended) timer = setTimeout(look, settleMs()); };
+    let builtAt = 0;
+    const soon = (_, file) => {
+      if (timer || ended || (file && !RELEVANT.test(String(file)))) return;
+      timer = setTimeout(look, Math.max(settleMs(), builtAt + gapMs() - Date.now()));
+    };
     let watcher = null;
     try { watcher = watchFolder(store.home(), { recursive: true }, soon); watcher.on("error", () => {}); } catch {}
     const beat = setInterval(look, beatMs());
@@ -141,15 +151,12 @@ export function stream({ home = null, client = null, notifies = false, out = pro
       clearInterval(beat);
       if (timer) clearTimeout(timer);
       try { watcher?.close(); } catch {}
-      if (client) unregisterClient();
-      // stdin was read to notice the front end leaving: let go of it, or the process never ends.
-      if (out === process.stdout) { try { process.stdin.destroy(); } catch {} }
+      if (client || notifies) unregisterClient();
       resolveEnd();
     };
     out.on?.("error", end);
     out.on?.("close", end);
+    // A front end that goes away ends the stream: a signal, or its end of stdout closing (the next line or heartbeat fails).
     for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(sig, end);
-    // A front end that closes its end of the pipe ends the stream too.
-    if (out === process.stdout) process.stdin.on("end", end).on("error", () => {}).resume();
   });
 }

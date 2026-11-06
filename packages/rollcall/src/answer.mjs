@@ -61,6 +61,8 @@ export function openQuestions(t) {
 export function answeredElsewhere(t, text) {
   const a = t?.answered;
   if (!a || !a.questions?.includes(text)) return null;
+  // A pick after a pick is the supervisor asking again in the same picker, not two surfaces racing: it goes.
+  if (a.by === "the terminal Falcon") return null;
   if (openQuestions(t).some((x) => x.question === text) && t.state === "needs-you") return null;
   return a;
 }
