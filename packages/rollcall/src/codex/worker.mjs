@@ -12,6 +12,7 @@
 //   item/tool/requestUserInput -> ask (the owner's picker in the supervisor), answered with the hook's reason
 //   thread/tokenUsage/updated  -> the context use the status line records for Claude Code, and the cap flag
 //   account/rateLimits/updated -> the usage meter
+// and, as Claude Code's SessionStart and Stop hooks do, a turn snapshot (snapshot.mjs) at the start and after each turn.
 // What a hook would add to the model's context goes in as a steer into the running turn; a Stop hook's block is a
 // new turn. rollcall's own messages carry a clientUserMessageId starting "rollcall-", so the UI's are the owner's.
 import { spawn, spawnSync } from "node:child_process";
@@ -21,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomBytes } from "node:crypto";
+import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { capFlag, markCap, workerHook } from "../supervisor.mjs";
 import { launchFile, stateFile } from "../harness/codex.mjs";
@@ -83,6 +85,19 @@ export async function codexWorker([h, id]) {
   try { cfg = JSON.parse(readFileSync(launchFile(h, id), "utf8")); } catch { process.stderr.write(`rollcall: ${h}:${id} has no Codex launch file\n`); return 1; }
   const { recordAsk } = await import("../task.mjs");
   const hook = (event, p = {}) => { try { return workerHook(h, id, event, { session_id: cfg.session, ...p }, { recordAsk }); } catch { return null; } };
+  // A turn snapshot of the worktree in its own detached process, as the Claude hooks start theirs (`turns take`
+  // skips a main checkout). Nothing here waits on it, except the first prompt on the baseline: resolves when the
+  // take exits, or after 10 s.
+  const snapshot = (...args) => new Promise((done) => {
+    if (!cfg.cwd || store.envFlag("ROLLCALL_SNAPSHOTS") === false) return done();
+    try {
+      const child = spawn(process.execPath, [BIN, "-C", cfg.cwd, "turns", "take", "--quiet", "--session", cfg.session, ...args], { detached: true, stdio: "ignore" });
+      child.on("error", () => done());
+      child.on("exit", () => done());
+      child.unref();
+      setTimeout(done, 10_000).unref();
+    } catch { done(); }
+  });
   const log = (line) => { try { store.appendStatus(h, id, { ev: "codex", line: store.clip(String(line), 300) }); } catch {} };
 
   // A worker of this task killed outright (SIGKILL: no handler runs) left its server and socket: they go first.
@@ -162,6 +177,7 @@ export async function codexWorker([h, id]) {
           void limitsNow().then((at) => hook("stop-failure", { error: "rate_limit", limit: "usage-codex", last_assistant_message: err.message ?? null, resets_at: at ?? resetsAt }));
           return;
         }
+        void snapshot();
         const out = hook("stop", { last_assistant_message: lastWords, background_tasks: [], stop_hook_active: blocked });
         const block = blockIn(out);
         blocked = !!block;
@@ -239,6 +255,9 @@ export async function codexWorker([h, id]) {
   save();
   recordThread(h, id, cfg.session, state.thread);
   hook("session-start", { source: cfg.thread ? "resume" : "startup" });
+  // The baseline goes first when a prompt follows at once, so a quick first turn's files are that turn's, not turn 0's.
+  const baseline = snapshot("--baseline");
+  if (cfg.prompt) await baseline;
   void checkHooks(conn, cfg.cwd, h, id);
 
   if (cfg.prompt) {

@@ -8,8 +8,10 @@
 //   LIMIT    fails on the usage limit
 //   TOKENS=n reports n tokens of a 1000-token window
 //   SLOW     runs 3 s before it ends (so a steer or interrupt can meet it)
+//   WRITE=f  writes file f (relative to the thread's cwd) as the turn ends, as a shell command would
 import { createHash } from "node:crypto";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join as joinPath } from "node:path";
 import net from "node:net";
 
 const args = process.argv.slice(2);
@@ -39,7 +41,7 @@ function serve(path) {
   const clients = new Set();
   let turnN = 0;
   let reqN = 1000;
-  const thread = { id: "th-1", turn: null };
+  const thread = { id: "th-1", turn: null, cwd: null };
   const waiting = new Map();
   const broadcast = (m) => { for (const c of clients) c.send(m); };
   const notify = (method, params) => broadcast({ method, params });
@@ -66,6 +68,8 @@ function serve(path) {
       await Promise.race([answered, wait(5000)]);
     }
     if (/SLOW/.test(text)) await wait(3000);
+    const write = /WRITE=(\S+)/.exec(text);
+    if (write && thread.cwd) { const f = joinPath(thread.cwd, write[1]); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `written by ${turnId}\n`); }
     if (thread.turn !== turnId) return; // interrupted meanwhile
     thread.turn = null;
     if (/LIMIT/.test(text)) {
@@ -84,7 +88,7 @@ function serve(path) {
     switch (m.method) {
       case "initialize": return reply({ userAgent: "fake", codexHome: "/tmp", platformFamily: "unix", platformOs: "macos" });
       case "initialized": return;
-      case "thread/start": reply({ thread: { id: thread.id } }); return notify("thread/started", { thread: { id: thread.id } });
+      case "thread/start": thread.cwd = p.cwd ?? null; reply({ thread: { id: thread.id } }); return notify("thread/started", { thread: { id: thread.id } });
       case "thread/resume": thread.id = p.threadId; return reply({ thread: { id: p.threadId } });
       case "thread/read": return reply({ thread: { id: thread.id, turns: thread.turn ? [{ id: thread.turn, status: "inProgress" }] : [] } });
       case "hooks/list": return reply({ data: [{ cwd: p.cwds?.[0] ?? "", hooks: [{ enabled: true, trustStatus: "untrusted" }], errors: [], warnings: [] }] });

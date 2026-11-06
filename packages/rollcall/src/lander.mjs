@@ -1,7 +1,7 @@
 // The lander: one per repo, a script and never an agent. It lands the merge queue's waiting entries in
 // trains: up to 4 PRs merged onto origin's default branch in the order they became ready, checked once
 // as one tree, and merged as that tree, so what lands is what passed. A train of one merges the entry's
-// own PR. A conflict, a red check or a guard hit goes back to the entry's session (queue.mjs finishEntry).
+// own PR. A conflict, a red check, a guard hit or a new review thread goes back to the entry's session (queue.mjs finishEntry).
 // What may clear by itself (GitHub down, git's sign-in) never ends an entry: it stays and retries, and past
 // ROLLCALL_QUEUE_STUCK_MS its task hears why, once.
 // `queue add` starts it; it exits once the queue has stayed empty for a while (ROLLCALL_LANDER_IDLE_MS).
@@ -15,6 +15,7 @@ import { checkOf, keyOf, passOf, pathspecs, recordPass } from "./results.mjs";
 import { changedFiles, checksOf, entryNews, finishEntry, gh, isAncestor, isStatus, manifestAt, mergeMethod, prLook, prView, serialGroups, span } from "./queue.mjs";
 import { fileList, short } from "./session.mjs";
 import * as store from "./store.mjs";
+import { prThreads, threadLine } from "./threads.mjs";
 import { look, openBlocker, openBlockers } from "./trouble.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
@@ -26,6 +27,12 @@ const NO_CHECKS_MS = () => ms("ROLLCALL_QUEUE_NO_CHECKS_MS", 180_000);
 /** How long after a push GitHub may still be making the workflows' check runs (60 s by default). */
 const SETTLE_MS = () => NO_CHECKS_MS() / 3;
 const MAX_TRAIN = () => ms("ROLLCALL_TRAIN_MAX", 4);
+/**
+ * How long the settle loop trusts its last look at a waiting PR's review threads. Rounds that land nothing come
+ * every few seconds; a GraphQL call per entry each time would spend GitHub's hourly budget beside gh pr view's.
+ * The look right before a merge is always fresh.
+ */
+const THREADS_MS = () => ms("ROLLCALL_QUEUE_THREADS_MS", 60_000);
 /** How long an entry may fail to move, the same way each round, before its task hears. */
 const STUCK_MS = () => ms("ROLLCALL_QUEUE_STUCK_MS", 10 * 60_000);
 /** No command runs longer than this. */
@@ -111,6 +118,10 @@ async function round(c) {
     }
     const got = gitSync(main, ["fetch", "--quiet", "--no-tags", "origin", `+refs/heads/${e.branch}:refs/rollcall/queue/${e.pr}`], { timeout: 60_000 });
     if (resolveRef(c.info, `refs/rollcall/queue/${e.pr}`) !== e.head) { trouble(c, [e], `git could not fetch ${short(e.head)}: ${(got.stderr ?? "").trim()}`, "settle"); continue; }
+    // A review thread opened since it joined sends it back to its worker.
+    const rv = reviewBack(c, e, { maxAge: THREADS_MS() });
+    if (rv.err) { trouble(c, [e], `could not read #${e.pr}'s review threads: ${rv.err}`, "settle"); continue; }
+    if (rv.back) { settled = true; continue; }
     clear(c, [e], "settle");
     // Another PR whose commits it carries: landed (in main, or merged by squash), still waiting ahead, or gone.
     const need = (e.carries ?? []).filter((x) => !isAncestor(main, x.head, base) && prView(main, x.pr)?.state !== "MERGED");
@@ -217,6 +228,27 @@ function clear(c, entries, where = null) {
     c.log(`#${e.pr}: moving again`);
     if (s.told) entryNews(c.key, e, "moving", `#${e.pr} is moving again in the merge queue (it was stuck: ${store.clip(s.why, 120)}).`);
   }
+}
+
+/**
+ * Sends an entry back to its worker when its PR has an open review thread the owner did not say to land with
+ * (queue add --owner-ok): { back }, or { err } when gh could not say. A bot's repeat of an answered thread does not count.
+ * Not a bounce: a reviewer's new point is no failure of the fix, so it counts toward no limit.
+ */
+function reviewBack(c, e, { maxAge = 0 } = {}) {
+  c.threadsSeen ??= new Map();
+  const seen = c.threadsSeen.get(e.pr);
+  if (maxAge && seen?.head === e.head && Date.now() - seen.at < maxAge) return { back: false };
+  const r = prThreads(c.main, e.pr);
+  if (r.err) { c.threadsSeen.delete(e.pr); return { err: r.err }; }
+  const ok = new Set(e.threadsOk?.ids ?? []);
+  const fresh = r.open.filter((t) => !ok.has(t.id));
+  if (!fresh.length) { c.threadsSeen.set(e.pr, { head: e.head, at: Date.now() }); return { back: false }; }
+  c.threadsSeen.delete(e.pr);
+  const lines = fresh.slice(0, 6).map((t) => threadLine(t, 160)).join("; ");
+  c.log(`#${e.pr}: ${fresh.length} new review thread${fresh.length === 1 ? "" : "s"}; back to its worker`);
+  finishEntry(c.key, e, "review", `#${e.pr} got ${fresh.length} review thread${fresh.length === 1 ? "" : "s"} after it joined, so it left the merge queue: ${lines}${fresh.length > 6 ? `; and ${fresh.length - 6} more` : ""}. Next: rollcall pr threads, fix or answer each and resolve the fixed ones (rollcall pr reply, rollcall pr resolve), push, wait for green checks, then rollcall queue add.`);
+  return { back: true };
 }
 
 /** Sends an entry back to its session (or parks it, past the bounce limit). */
@@ -368,9 +400,18 @@ async function land(c, t) {
   stage("merging");
   fetchSync(main, b);
   const now = resolveRef(c.info, `refs/remotes/origin/${b}`);
+  // A thread left while CI ran: that member goes back, and the train forms again without it.
+  // A thread nobody could read is not a clear one: after one retry the train forms again, and the settle loop
+  // holds the entry (and tells its task, past STUCK_MS) until GitHub answers.
+  let unread = null;
+  for (const e of members) {
+    let rv = reviewBack(c, e);
+    if (rv.err) { await sleep(Math.min(POLL_MS(), 5000)); rv = reviewBack(c, e); }
+    if (rv.err) { unread = `could not read #${e.pr}'s review threads before merging (${rv.err})`; break; }
+  }
   const still = store.readQueue(key).entries;
-  if (now !== base || members.some((e) => still[e.pr]?.state !== "waiting")) {
-    c.log(`train ${n}: ${now !== base ? `${b} moved to ${short(now)}` : "a member left"}; it forms again`);
+  if (unread || now !== base || members.some((e) => still[e.pr]?.state !== "waiting")) {
+    c.log(`train ${n}: ${unread ?? (now !== base ? `${b} moved to ${short(now)}` : "a member left")}; it forms again`);
     closeTrain(c, members, prn);
     return true;
   }

@@ -1,5 +1,5 @@
-// The CLI agents (and people) run: status, claim, done, send, wait, queue, results, allow-shared, allow-main,
-// gc, clean, blockers, task, supervise, inbox and attach.
+// The CLI agents (and people) run: status, claim, done, send, wait, queue, pr, results, allow-shared, allow-main,
+// gc, clean, blockers, task, turns, supervise, inbox and attach.
 // It finds its own session by walking up its process ancestry to a harness pid
 // the hooks recorded, so no session id is passed around.
 import { spawnSync } from "node:child_process";
@@ -16,7 +16,9 @@ import { deleteListed, deleteListSeen, saveDeleteList, sizeOf, sweepLeftovers } 
 import { reminders, watchHome } from "./watch.mjs";
 import { backText, comeBack, unparkHome, writeWindow } from "./window.mjs";
 import { USAGE as QUEUE_USAGE, queueCommand } from "./queue.mjs";
+import { USAGE as PR_USAGE, prCommand } from "./threads.mjs";
 import { USAGE as RESULTS_USAGE, results } from "./results.mjs";
+import { USAGE as TURNS_USAGE, pruneSnapshots, turnsCommand } from "./snapshot.mjs";
 import { USAGE as RUNTIME_USAGE, runtimeCommand } from "./runtime-cli.mjs";
 import {
   P, ago, autoSummary, claimLabel, cli, doneLine, fileList, intentOf, isAlive, isDone, isLive, joinRepo, markDone,
@@ -40,6 +42,7 @@ const USAGE = `rollcall - awareness for parallel agent sessions on one machine
   rollcall wait <session|claim> [--timeout <minutes>]
                                          block until that session runs done (run it in the background)
 ${QUEUE_USAGE}
+${PR_USAGE}
 ${RESULTS_USAGE}
   rollcall allow-shared [--off]          let this session edit a checkout another session is using
   rollcall allow-main [--off]            let agents edit this repo's main checkout (default: worktrees only)
@@ -62,6 +65,7 @@ ${RESULTS_USAGE}
                                          status line; it edits no project files. One live session per name.
                                          \`falcon\` (its own command) opens one with its tasks as tabs.
 ${TASK_USAGE}
+${TURNS_USAGE}
 ${RUNTIME_USAGE}
   rollcall inbox                         in a task's worker: print the supervisor's unread messages
   rollcall attach <task> [--print]       show the task's worker (by name or id: luke, t3): its tab, inside
@@ -94,6 +98,7 @@ export async function main(argv) {
       case "send": return send(rest);
       case "wait": return await wait(rest);
       case "queue": return await queueCommand(rest, { say, fail, flag, whoAmI });
+      case "pr": return prCommand(rest, { say, fail, flag, whoAmI });
       case "land": return landGone(rest);
       case "results": return await results(rest, { say });
       case "allow-shared": return allowShared(rest);
@@ -110,6 +115,7 @@ export async function main(argv) {
       case "back": return back(rest);
       case "watch": return store.listHomes().includes(rest[0]) ? await watchHome(rest[0], { once: rest[1] === "--once" }) : usageError("usage: rollcall watch <supervisor> [--once]");
       case "task": return await taskCommand(rest, { say, fail, flag, whoAmI });
+      case "turns": return await turnsCommand(rest, { say, fail, flag, whoAmI });
       case "ports": case "manifest": case "setup": case "run": case "serving": case "_setup": return await runtimeCommand(cmd, rest, { say, fail, flag });
       case "supervise": return supervise(rest);
       case "inbox": return inbox(rest);
@@ -592,6 +598,8 @@ async function gc(args) {
     if (line) out.push(line);
     for (const k of res.kept) out.push(`  kept ${k.name}${k.branch ? ` (${k.branch})` : ""}: ${k.why}`);
   }
+  // Snapshot repos of worktrees that are gone (removed by hand, or before snapshots were pruned with them).
+  if (!dryRun) pruneSnapshots();
   // Once an hour on this machine from the background; a gc by hand always looks.
   if (!report || store.claimLeftoversSlot()) {
     const { line } = sweepLeftovers({ dryRun });

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asksText, promptAuthor } from "./asked.mjs";
+import { addComment, commentsCommand, commentsLine, readComments } from "./comments.mjs";
 import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoKey } from "./git.mjs";
 import { BIN, P, ago, cli, short } from "./session.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
@@ -90,6 +91,15 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
   rollcall task move <id> --to <home>       hand a task to another supervisor (its worker stops; resume it there)
   rollcall task move <id> --harness <h>     run the task on the other harness (claude, codex): a fresh worker there
                                          carries on from the task's record, as at a handoff
+  rollcall task comment <id|here> <file>:<line>[-<end>] "<text>" | -
+                                         the owner's review comment on a line (or lines) of the task's
+                                         worktree; it waits until sent
+  rollcall task comments <id|here> [--json]   its review comments: state, and where each sits now
+  rollcall task comments <id|here> send       every unsent comment to its worker, as one message
+  rollcall task comments <id|here> resolve <n> "<what I changed>"
+  rollcall task comments <id|here> reply <n> "<answer>" [--open]
+                                         the worker's answer: resolve or reply closes a comment;
+                                         reply --open leaves it for the owner, and the supervisor hears
   rollcall task decisions [add "<decision>" [--where "<how the owner answers>"] [--from <task>] | done <n> ["<answer>"]]
                                          what waits on the owner beyond any one task, one list for every
                                          supervisor: listed until answered
@@ -137,7 +147,7 @@ function homeFor(ctx) {
   return (g && homeOf(g.id)) || null;
 }
 
-function resolve(id, ctx) {
+export function resolve(id, ctx) {
   if (!id) ctx.fail("which task? (a name like luke, an id like t3, or `here` inside a task's worktree)");
   if (id === "here") {
     const env = taskEnv();
@@ -172,7 +182,7 @@ function update(t0, ctx, fn) {
 }
 
 /** Who is writing: the task's supervisor, one of its workers, or someone else. */
-function author(t, g) {
+export function author(t, g) {
   const env = taskEnv();
   if (env?.home === t.home && env.id === t.id) return "worker";
   if (!g) return "a shell";
@@ -181,7 +191,7 @@ function author(t, g) {
 }
 
 /** Another supervisor never writes to a task that is not its own (one once guessed the next id). */
-function mayWrite(t, g, ctx) {
+export function mayWrite(t, g, ctx) {
   const mine = g && homeOf(g.id);
   if (mine && mine !== t.home) ctx.fail(`${t.id} is supervisor ${t.home}'s task, not this one's (${mine}): only ${t.home} and the task's workers write to it`);
 }
@@ -461,7 +471,7 @@ function show(args, ctx) {
   const t = resolve(args[0], ctx);
   const now = Date.now();
   const rt = runtimeOf(t);
-  if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now), runtime: rt }, null, 2)); return 0; }
+  if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now), runtime: rt, comments: readComments(t.home, t.id).items }, null, 2)); return 0; }
   ctx.say(`${t.id}: "${t.title}" - ${t.state}${t.pr ? ` - ${t.pr}` : ""}`);
   ctx.say(`  supervisor ${t.home}, repo ${t.repo.name}, ${t.branch ? `worktree ${t.worktree} (${t.branch}, from ${t.base})` : `main checkout ${t.worktree}`}`);
   ctx.say(`  ${workerLine(t, workerState(t, now), now)}`);
@@ -470,6 +480,8 @@ function show(args, ctx) {
   if (t.wait) ctx.say(`  ${waitLabel(t.wait, now)}, since ${ago(t.wait.at, now)}`);
   if (t.from) ctx.say(`  from ${t.from.kind === "branch" ? `the branch ${t.from.name}` : `${t.from.kind === "pr" ? "PR" : "issue"} #${t.from.number} (${t.from.url})`}`);
   for (const line of runtimeLines(t, rt, now)) ctx.say(`  ${line}`);
+  const comments = commentsLine(t);
+  if (comments) ctx.say(`  ${comments}`);
   ctx.say("\nThe owner's words, verbatim (oldest first):");
   for (const w of t.words) ctx.say(`--- ${new Date(w.at).toISOString()}${w.via === "worker" ? " (typed in the worker's own window)" : w.via === "issue" ? " (the GitHub issue the task came from, as written there)" : ""}\n${w.text}`);
   if (!t.words.length) ctx.say("(none recorded)");
@@ -806,6 +818,8 @@ function move(args, ctx) {
   for (const [a, b] of [["status", ".jsonl"], ["inbox", ""]]) {
     try { mkdirSync(join(store.homeDir(to), a), { recursive: true }); renameSync(join(store.homeDir(t0.home), a, `${t0.id}${b}`), join(store.homeDir(to), a, `${t.id}${b}`)); } catch {}
   }
+  // Its review comments are the owner's words about its diff: they stay with the task.
+  try { renameSync(join(store.homeDir(t0.home), `comments-${t0.id}.json`), join(store.homeDir(to), `comments-${t.id}.json`)); } catch {}
   ctx.say(`${t0.home}:${t0.id} is now ${to}:${t.id} ("${t.title}").${t.sessions.length ? ` Its worker stopped; from supervisor ${to}: ${START} ${t.id} --resume "moved here"` : ""}`);
   return 0;
 }
@@ -1092,6 +1106,7 @@ async function spotlight(args, ctx) {
 
 const COMMANDS = {
   new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, decisions, stage, "wait-for": waitFor,
+  comment: addComment, comments: commentsCommand,
   setup: inTask("setup"), run: inTask("run"), ports: inTask("ports"), archive, restore, spotlight,
   words: (a, c) => addText(a, c, "words"),
   note: (a, c) => addText(a, c, "notes"),
@@ -1306,7 +1321,8 @@ export function ownerNews(h, now = Date.now()) {
   return r?.out ?? [];
 }
 
-function take(args, name) {
+/** Removes flag `name` from `args`; true when it was there. */
+export function take(args, name) {
   const i = args.indexOf(name);
   if (i >= 0) args.splice(i, 1);
   return i >= 0;

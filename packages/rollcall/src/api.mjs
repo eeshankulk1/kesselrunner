@@ -10,6 +10,7 @@
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
 import { readFileSync } from "node:fs";
 import { asksText } from "./asked.mjs";
+import { readComments } from "./comments.mjs";
 import { runtimeOf } from "./checkout.mjs";
 import { openQuestions, questionId } from "./answer.mjs";
 import { liveClients } from "./clients.mjs";
@@ -18,6 +19,7 @@ import { isAlive, isLive, intentOf } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
 import { colorOf, holderOf, idOf, label, nameOf } from "./supervisor.mjs";
+import { turnsSummary } from "./snapshot.mjs";
 import { allDecisions, visibleTasks } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import * as trouble from "./trouble.mjs";
@@ -105,6 +107,9 @@ export function taskView(t, now = Date.now()) {
     report: t.output ? { at: t.output.at, by: t.output.by, text: t.output.text } : null,
     handoff: t.handoff ? { at: t.handoff.at, context: t.handoff.context ?? null } : null,
     pr: prView(t),
+    // The owner's line comments on its diff, where they were written (`rollcall task comments <task> --json` says where each sits now).
+    comments: readComments(t.home, t.id).items.map((c) => ({ n: c.n, state: c.state, file: c.file, line: c.line, end: c.end, text: c.text, by: c.by, at: c.at, sentAt: c.sentAt ?? null, reply: c.reply ?? null, resolved: c.resolved ?? null })),
+    turns: t.worktree ? turnsSummary(t.worktree) : null,
     stage: t.stage ?? null,
     wait: t.wait ? { ...t.wait, label: trouble.waitLabel(t.wait, now) } : null,
     worker: workerView(w),

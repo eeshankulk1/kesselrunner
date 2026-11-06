@@ -1,8 +1,10 @@
 // The merge queue: PRs that are ready to land, in the order they became ready. A session joins with
 // `rollcall queue add` once its PR is open, pushed and green; the lander (lander.mjs, one per repo)
 // lands them in trains and tells each entry's session what happened: landed, a conflict to resolve,
-// a check that failed, or parked for the owner. An agent never decides order and never merges.
-//   q.entries[<pr>] = { pr, branch, head, session, who, checkout, task, at, state: waiting|parked, why, solo, files, carries }
+// a check that failed, a review thread opened after it joined, or parked for the owner. An agent never decides order and never merges.
+//   q.entries[<pr>] = { pr, branch, head, session, who, checkout, task, at, state: waiting|parked, why, solo, files, carries, threadsOk }
+//     threadsOk: { ids, words, at }, the open review threads the owner said to land with (queue add --owner-ok); any
+//     other open thread sends it back (kind "review"; threads.mjs)
 //     carries: [{ pr, branch, head }], other PRs whose unlanded commits this head holds; it lands only with or after them
 //     pushed: { head, at }, the lander's own push of a merge of main (its checks count from then, even in a later train)
 //     stuck: { since, where, why, told }, what has kept it from moving for a while; it stays and the lander keeps trying
@@ -21,11 +23,16 @@ import { pidAlive, sameProcess, spawnDetached } from "./proc.mjs";
 import { BIN, P, ago, fileList, isAlive, msgLine, short, who } from "./session.mjs";
 import * as store from "./store.mjs";
 import { queueState, taskAt } from "./task.mjs";
+import { prThreads, threadLine } from "./threads.mjs";
 
-export const USAGE = `  rollcall queue add                     join the merge queue with this branch's PR, once it is open, pushed and
-                                         green; the lander lands it in turn (never gh pr merge it yourself)
+export const USAGE = `  rollcall queue add [--owner-ok "<their words>"]
+                                         join the merge queue with this branch's PR, once it is open, pushed, green
+                                         and has no open review thread; the lander lands it in turn (never gh pr
+                                         merge it yourself). --owner-ok: the owner said to land it with the threads
+                                         open now (their words, recorded on the task)
   rollcall queue wait [--timeout <min>]  block until this branch's entry has news (landed, a conflict to resolve, a
-                                         failed check, parked) and print the next step; run it in the background
+                                         failed check, a new review thread, parked) and print the next step; run it
+                                         in the background
   rollcall queue status [--json]         the line: the train landing now (its suite's time against its usual time,
                                          its log's last line, what else runs tests on this machine), who waits, who
                                          is parked, their files, recent landings with "joined to landed" and "ship it
@@ -224,7 +231,7 @@ export function finishEntry(key, e, kind, text, extra = {}) {
   if (e.task) {
     const [h, id] = e.task.split(":");
     if (kind === "parked") queueState(h, id, "queue-parked", { question: `merge queue parked #${e.pr}: ${store.clip(store.oneLine(text), 300)}` });
-    else if (kind === "conflict" || kind === "failed" || kind === "left") queueState(h, id, "queue-sent-back", { note: `merge queue: ${kind} - ${store.clip(store.oneLine(text), 300)}` });
+    else if (kind === "conflict" || kind === "failed" || kind === "left" || kind === "review") queueState(h, id, "queue-sent-back", { note: `merge queue: ${kind} - ${store.clip(store.oneLine(text), 300)}` });
   }
 }
 
@@ -289,7 +296,9 @@ export async function queueCommand(args, ctx) {
 }
 
 function add(args, ctx) {
+  const [ownerOk] = ctx.flag(args, "--owner-ok");
   if (args.length) ctx.fail(`queue add: unknown argument "${args[0]}"`);
+  if (ownerOk !== undefined && !store.oneLine(ownerOk)) ctx.fail('queue add: --owner-ok takes the owner\'s words: --owner-ok "<what they said>"');
   const h = here(ctx);
   const { top, key, b, branch } = h;
   if (!branch) ctx.fail("nothing to queue from the default branch or a detached HEAD: run it in the task worktree, on its branch");
@@ -310,6 +319,13 @@ function add(args, ctx) {
   const c = checksOf(pr.statusCheckRollup);
   if (c.failed.length) ctx.fail(`#${pr.number} has red checks: ${c.failed.map((x) => x.name).join(", ")}. The queue takes green PRs: fix them first (/pr-create Step 5)`);
   if (c.pending.length) ctx.fail(`#${pr.number}'s checks are still running (${fileList(c.pending, 4)}): wait for them (gh pr checks ${pr.number} --watch), then queue add`);
+  // Review threads: an open one lands only on the owner's word, given for exactly the threads open now.
+  const th = prThreads(top, pr.number);
+  if (th.err) ctx.fail(`could not read #${pr.number}'s review threads (${th.err}): try again in a moment`);
+  if (th.open.length && ownerOk === undefined) {
+    ctx.fail(`#${pr.number} has ${th.open.length} open review thread${th.open.length === 1 ? "" : "s"}:\n${th.open.slice(0, 10).map((x) => `  - ${threadLine(x)}`).join("\n")}\nTwo ways forward: fix or answer each and resolve the fixed ones (rollcall pr threads, rollcall pr reply, rollcall pr resolve), push, then queue add; or, if the owner says to land it as it is, rollcall queue add --owner-ok "<their words>"`);
+  }
+  const threadsOk = th.open.length ? { ids: th.open.map((x) => x.id), words: store.oneLine(ownerOk), at: Date.now() } : null;
 
   const g = ctx.whoAmI();
   const t = taskAt(top);
@@ -325,7 +341,7 @@ function add(args, ctx) {
   const now = Date.now();
   const entry = {
     pr: pr.number, branch, head, session: g?.id ?? null, who: g ? who({ id: g.id, branch, checkout: top, main: mainCheckout(h.info) }) : `#${pr.number}`,
-    checkout: top, task: t ? `${t.home}:${t.id}` : null, at: now, state: "waiting", why: null, solo: false, files: files.slice(0, 50), carries,
+    checkout: top, task: t ? `${t.home}:${t.id}` : null, at: now, state: "waiting", why: null, solo: false, files: files.slice(0, 50), carries, threadsOk,
   };
   if (hits.length) {
     finishEntry(key, entry, "parked", `#${pr.number} changed what its tests check after it was sent back: ${hits.join("; ")}. The owner decides whether that stands (rollcall queue leave, or fix and queue add).`);
@@ -344,7 +360,8 @@ function add(args, ctx) {
   });
   if (!res) ctx.fail("the queue's state is busy; try again");
   if (res.out.parked) ctx.fail(`#${pr.number} is parked for the owner (${res.out.parked.why}); rollcall queue leave first`);
-  if (t) queueState(t.home, t.id, "queue-joined", { note: `merge queue: #${pr.number} joined`, pr: pr.url ?? null });
+  const okNote = threadsOk ? ` with ${threadsOk.ids.length} open review thread${threadsOk.ids.length === 1 ? "" : "s"} on the owner's word: "${store.clip(threadsOk.words, 300)}"` : "";
+  if (t) queueState(t.home, t.id, "queue-joined", { note: `merge queue: #${pr.number} joined${okNote}`, pr: pr.url ?? null });
   store.appendEvent(key, { type: "queue", kind: "added", session: g?.id ?? "user", pr: pr.number, branch, text: `#${pr.number} joined the merge queue` });
   ensureLander(key, mainCheckout(h.info));
   const { place, size, train } = res.out;

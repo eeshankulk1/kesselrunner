@@ -71,9 +71,9 @@ test("api version names the interface, its verbs, every action and the ones comi
   assert.equal(v.interface, 1);
   assert.match(String(v.rollcall), /^\d+\.\d+\.\d+/);
   assert.deepEqual(v.verbs, ["version", "snapshot", "stream", "do", "attach"]);
-  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "decision.answer", "question.answer", "task.archive", "task.close", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell"]);
+  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "decision.answer", "question.answer", "review.comment", "review.send", "task.archive", "task.close", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff"]);
   for (const cli of Object.values(v.actions)) assert.equal(typeof cli, "string");
-  assert.ok(!v.coming["task.archive"] && v.coming["review.comment"], "plan A's actions arrived; plan C's is still coming");
+  assert.deepEqual(v.coming, {}, "plans A and C landed: nothing is still coming");
   const bad = owner(sb, ["api", "frobnicate"]);
   assert.equal(bad.code, 2);
   assert.equal(parsed(bad).error.code, "bad-payload");
@@ -350,7 +350,7 @@ test("api do acts as the owner only: refused with a task in the environment or f
   assert.ok(!denied(sup.bashPre("rollcall api stream --client x")));
 });
 
-test("api do: bad JSON exits 2, unknown and coming actions say so, and a requestId repeat returns the first result without running again", (t) => {
+test("api do: bad JSON exits 2, unknown actions say so, and a requestId repeat returns the first result without running again", (t) => {
   const { sb } = setup(t);
   const bad = owner(sb, ["api", "do", "task.tell", "{nope"]);
   assert.equal(bad.code, 2);
@@ -358,9 +358,7 @@ test("api do: bad JSON exits 2, unknown and coming actions say so, and a request
   assert.equal(owner(sb, ["api", "do"]).code, 2);
   assert.equal(act(sb, "task.tell", []).error.code, "bad-payload", "a payload is an object");
   assert.equal(act(sb, "task.frob", {}).error.code, "unknown-action");
-  const coming = act(sb, "review.comment", { task: "alpha:t1" });
-  assert.equal(coming.error.code, "not-available");
-  assert.match(coming.error.message, /plan C/);
+  // Every planned action has landed (COMING is empty): a coming one would answer not-available.
   assert.equal(act(sb, "task.tell", { task: "t1", text: "x" }).error.code, "bad-payload", "a task is <home>:<task>");
 
   // The payload on stdin works too.
@@ -490,6 +488,41 @@ test("api attach: unknown supervisors and tasks are not found, and a task with n
     assert.equal(r.code, 1);
     assert.equal(parsed(r).error.code, tmux ? "no-window" : "unavailable", ref);
   }
+});
+
+test("plan C through the interface: review comments in the snapshot, review.comment and review.send as the owner, turn.diff of a turn", (t) => {
+  const { sb, sup } = setup(t, { worktree: true });
+  const wt = record(sb).worktree;
+  write(join(wt, "src/a.js"), "one\ntwo\nthree\n");
+  assert.equal(act(sb, "review.comment", { task: "alpha:t1", file: "src/a.js", line: 0, text: "x" }).error.code, "bad-payload");
+  const one = act(sb, "review.comment", { task: "alpha:yoda", file: "src/a.js", line: 2, text: "name this for what it holds", client: "mac" });
+  assert.equal(one.ok, true, JSON.stringify(one));
+  assert.equal(one.result.comment, 1);
+  assert.deepEqual(one.result.view.comments.map((c) => [c.n, c.state, c.file, c.line, c.text]), [[1, "pending", "src/a.js", 2, "name this for what it holds"]]);
+  const sent = act(sb, "review.send", { task: "alpha:t1" });
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  assert.match(sent.result.message, /1 comment \(#1\) sent as one message/);
+  assert.equal(snap(sb).tasks.find((x) => x.ref === "alpha:t1").comments[0].state, "sent");
+  assert.equal(act(sb, "review.send", { task: "alpha:t1" }).error.code, "refused", "nothing left to send");
+  assert.equal(act(sb, "review.comment", { task: "alpha:t1", file: "src/a.js", line: 1, text: "--help" }).error.code, "bad-payload");
+  assert.equal(act(sb, "review.comment", { task: "alpha:t1", file: "src/a.js", line: 1, text: "x", send: "false" }).error.code, "bad-payload");
+
+  // Turns: none yet, then two taken by hand (the hooks do it in a real worker).
+  assert.equal(snap(sb).tasks.find((x) => x.ref === "alpha:t1").turns, null);
+  const take = () => { const r = spawnSync(process.execPath, [BIN, "turns", "take"], { cwd: wt, encoding: "utf8", env: { ...sb.env, ROLLCALL_SNAPSHOTS: "1" } }); assert.equal(r.status, 0, r.stderr); };
+  take();
+  write(join(wt, "gen/out.js"), "generated\n");
+  take();
+  assert.deepEqual(snap(sb).tasks.find((x) => x.ref === "alpha:t1").turns, { count: 3, last: 2 });
+  const d = act(sb, "turn.diff", { task: "alpha:t1", n: 2 });
+  assert.equal(d.ok, true, JSON.stringify(d));
+  assert.deepEqual(d.result.files, [{ status: "A", path: "gen/out.js" }]);
+  assert.match(d.result.patch, /\+generated/);
+  assert.equal(d.result.truncated, false);
+  // Read-only: a requestId repeat runs it again rather than replay a stored copy.
+  assert.equal(act(sb, "turn.diff", { task: "alpha:t1", n: 2, requestId: "d1" }).repeated, undefined);
+  assert.equal(act(sb, "turn.diff", { task: "alpha:t1", n: 2, requestId: "d1" }).repeated, undefined);
+  assert.equal(act(sb, "turn.diff", { task: "alpha:t1", n: 9 }).error.code, "not-found");
 });
 
 test("plan A in the interface: a task's runtime in the snapshot; archive shows what goes before it removes anything, then restore and spotlight", (t) => {

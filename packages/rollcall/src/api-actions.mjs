@@ -12,6 +12,7 @@ import { parseRef, refOf, taskView } from "./api.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
 import { deliverWords, holderOf, label } from "./supervisor.mjs";
+import { turnDiff, worktreeOf } from "./snapshot.mjs";
 import { recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
@@ -237,6 +238,57 @@ export const ACTIONS = {
     },
   },
 
+  // A line comment on a task's diff, as `rollcall task comment` leaves one; `send: true` sends every pending one too.
+  "review.comment": {
+    cli: 'rollcall task comment <task> <file>:<line>[-<end>] "<text>"',
+    run(p) {
+      const t = taskOf(p);
+      const file = str(p, "file", { max: 1000 });
+      const line = p.line;
+      const end = p.end ?? null;
+      if (!Number.isInteger(line) || line < 1 || (end !== null && (!Number.isInteger(end) || end < line))) refuse("bad-payload", "line is a number from 1, and end (optional) one at or after it");
+      const text = str(p, "text");
+      // What the command would read as stdin or a help flag rather than as the comment.
+      if (["-", "-h", "--help"].includes(text.trim())) refuse("bad-payload", "text is the comment itself");
+      if (p.send !== undefined && typeof p.send !== "boolean") refuse("bad-payload", "send is true or false");
+      const out = task(["comment", t.id, "--home", t.home, `${file}:${line}${end !== null && end !== line ? `-${end}` : ""}`, text]);
+      // Its own number, as the command printed it: another front end may have added one since.
+      const n = Number(/comment #(\d+)/.exec(out)?.[1]);
+      if (!n) refuse("failed", `the comment command printed no number: ${out}`);
+      if (!p.send) return { comment: n, sent: false, message: null, view: fresh(t) };
+      // The comment is saved either way: a send that fails comes back as sent: false, so a retry never adds it twice.
+      try { return { comment: n, sent: true, message: task(["comments", t.id, "--home", t.home, "send"]), view: fresh(t) }; }
+      catch (e) { if (!(e instanceof ApiError)) throw e; return { comment: n, sent: false, message: e.message, view: fresh(t) }; }
+    },
+  },
+
+  // Every pending comment to the worker as one message, as `rollcall task comments <task> send` does.
+  "review.send": {
+    cli: "rollcall task comments <task> send",
+    run(p) {
+      const t = taskOf(p);
+      return { message: task(["comments", t.id, "--home", t.home, "send"]), view: fresh(t) };
+    },
+  },
+
+  // What turn n of a task's worktree changed (turn n-1 to turn n): { from, to, files, patch }.
+  // Read-only and safe to repeat, so a requestId keeps no copy of it (a patch can be large).
+  "turn.diff": {
+    cli: "rollcall turns diff <n> <task> --json",
+    repeatable: true,
+    run(p) {
+      const t = taskOf(p);
+      if (!Number.isInteger(p.n) || p.n < 0) refuse("bad-payload", "n is a turn number from 0");
+      const wt = t.worktree ? worktreeOf(t.worktree) : null;
+      if (!wt) refuse("refused", `${label(t)} has no linked worktree with turns`);
+      let d;
+      try { d = turnDiff(wt, p.n); } catch (e) { refuse(/^no turn /.test(e.message) ? "not-found" : "failed", e.message); }
+      // Every file is named; the patch stops at 1 MB (the CLI's `rollcall turns diff` prints all of it).
+      const cut = d.patch.length > PATCH_MAX;
+      return { ...d, patch: cut ? d.patch.slice(0, PATCH_MAX) : d.patch, truncated: cut };
+    },
+  },
+
   // The worktree runtime (plan A). Archive shows what goes first, as the Falcon does: the owner says yes with confirm.
   "task.archive": {
     cli: "rollcall task archive <task> [--yes]",
@@ -295,9 +347,10 @@ export const ACTIONS = {
   },
 };
 
+const PATCH_MAX = 1024 * 1024;
+
 /** Actions the plans in flight add; a front end that asks for one now hears `not-available`, not `unknown-action`. */
 export const COMING = {
-  "review.comment": "plan C (review loop)",
 };
 
 // ---------------------------------------------------------------- repeats
@@ -334,14 +387,14 @@ export function runAction(name, payload, { client = "frontend" } = {}) {
       : { ok: false, error: { code: "unknown-action", message: `no action ${name}: ${Object.keys(ACTIONS).join(", ")}` } };
   }
   const rid = typeof p.requestId === "string" && p.requestId ? p.requestId.slice(0, 100) : null;
-  const was = rid ? seen(rid, name) : null;
+  const was = rid && !a.repeatable ? seen(rid, name) : null;
   if (was) return { ...was.result, repeated: true };
   const by = typeof p.client === "string" && p.client.trim() ? p.client.trim().slice(0, 40) : client;
   const failed = (e) => (e instanceof ApiError
     ? { ok: false, error: { code: e.code, message: e.message, ...e.extra } }
     : { ok: false, error: { code: "failed", message: String(e?.message ?? e) } });
   // A refusal is not kept: the same request may go through once what refused it is gone (a busy store).
-  const done = (out) => { if (rid && out.ok) remember(rid, name, out); return out; };
+  const done = (out) => { if (rid && out.ok && !a.repeatable) remember(rid, name, out); return out; };
   let result;
   try { result = a.run(p, by); } catch (e) { return failed(e); }
   // An action that finishes later (the worktree runtime's) answers with a promise of the same shape.

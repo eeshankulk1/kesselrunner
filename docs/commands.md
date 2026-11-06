@@ -80,6 +80,9 @@ The commands a person types. The full list, and what each session sees, is in [r
 | `rollcall task archive <id> [--yes]` | Free a task's worktree folder and ports without losing work. Without `--yes` it prints what goes (folder, size freed, uncommitted files, run actions, ports) and changes nothing. With `--yes` it stops the worker and run actions, saves uncommitted work (untracked too, not gitignored) to `refs/rollcall/archive/<home>/<id>` (never pushed), runs teardown and removes the worktree; the record and conversation stay. Yours or the supervisor's, never a worker's |
 | `rollcall task restore <id>` | The worktree back at its old path on its branch, the saved work applied as uncommitted changes (staged comes back unstaged), a note if origin's branch moved (it never rebases), the ref dropped, setup run again, the worker resumed |
 | `rollcall queue status` | Who is landing now, and who touches your files |
+| `rollcall task comment <id> <file>:<line> "<text>"` | A line comment on a running task's worktree. `rollcall task comments <id>` lists them, `... comments <id> send` delivers all pending ones to the worker as one message |
+| `rollcall pr threads [<pr>]` | The PR's open review threads. Answer with `rollcall pr reply <thread-id> "<text>" [--resolve]`, resolve with `rollcall pr resolve <thread-id>...`. `rollcall queue add` refuses a PR with open threads unless you pass `--owner-ok "<your words>"` |
+| `rollcall turns [<task>]` | A task worktree's per-turn snapshots, shell changes included. `turns diff <n>` and `turns since <n>` show changes; `turns restore <n>` puts the files back to turn n (the state it replaces is saved first) |
 | `rollcall allow-main [--off]` | Let agents edit this repo's main checkout, shared by every session (for example a notes repo that commits straight to main) |
 | `rollcall allow-shared` | Let a session edit, and run checkout-changing git in, a checkout another session is using, on purpose |
 | `rollcall gc [--dry-run] [--all]` | Remove merged, clean, unused task worktrees and their branches, running the manifest's `worktree.teardown` first. An open task's worktree, and a branch made in the last day with nothing committed yet, stay. It also sweeps what ended work left behind (DerivedData of gone projects, old session temp folders, orphan test browsers). Runs in the background at session start and end |
@@ -99,6 +102,7 @@ The hooks keep agents in task worktrees: an edit in a repo's main checkout is de
 | `ROLLCALL_PORT_MIN` / `_MAX` / `_BLOCK` | The range port blocks come from (41000-48999) and a block's size (10) |
 | `ROLLCALL_SETUP_MINUTES` | Time limit of a worktree's setup (30) |
 | `ROLLCALL_AWAKE=0` | Stop the `caffeinate` hold |
+| `ROLLCALL_SNAPSHOTS=0` | Stop the per-turn snapshots |
 | `ROLLCALL_DISABLE=1` | Turn rollcall's hooks into no-ops (shell or settings `env`) |
 | `ROLLCALL_WORKER_HARNESS=codex` | New tasks' workers run on Codex unless the task names another (default `claude`) |
 | `ROLLCALL_CODEX_BIN` | Path to the Codex CLI for Codex workers (else `KESSELRUNNER_CODEX_BIN`, PATH, then the ChatGPT app's) |

@@ -14,6 +14,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, sep } from "node:path";
 import { defaultBranch, fetchSync, gitSync, locate, mainSha } from "./git.mjs";
 import { keyOf, manifestAt } from "./results.mjs";
+import { dropSnapshots } from "./snapshot.mjs";
 
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, ...opts });
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -231,6 +232,7 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     const rm = gitSync(main, ["worktree", "remove", d.path]);
     if (rm.status !== 0) { keep(d.w, `remove failed: ${lastLine(rm.stderr)}`); continue; }
     if (d.w.branch) gitSync(main, ["branch", "-D", d.w.branch]);
+    dropSnapshots(d.path);
     runtime.forgetCheckout(d.path);
     out.removed.push({ name: basename(d.path), branch: d.w.branch, kb: sizes.get(d.path) ?? 0, why: d.why });
   }

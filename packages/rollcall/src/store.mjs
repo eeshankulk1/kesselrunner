@@ -5,6 +5,8 @@
 //   _machine/trouble.json          what stops work on this Mac or account now, one record per cause (trouble.mjs)
 //   _machine/clean-list.{json,txt} what `rollcall clean --yes` would delete
 //   _machine/decisions.json        what waits on the owner, one list for every supervisor
+//   _snapshots/<hash>.git/         per-turn snapshots of one linked worktree (snapshot.mjs): a private bare repo
+//                                  that borrows the repo's objects, so its refs are never pushed
 //   <repo-key>/events.jsonl        append-only: claim, done, msg, wait
 //   <repo-key>/sessions/<id>.json  the session's live state in this repo
 //   <repo-key>/sessions/<id>.touched  append-only list of repo-relative paths it edited
@@ -173,7 +175,7 @@ export function pruneTasks(now = Date.now()) {
     if (t.output?.text) {
       try { writeReport(t.home, t.id, t.output.text); } catch { continue; }
     }
-    for (const p of [taskPath(t.home, t.id), statusPath(t.home, t.id)]) { try { rmSync(p, { force: true }); } catch {} }
+    for (const p of [taskPath(t.home, t.id), statusPath(t.home, t.id), join(homeDir(t.home), `comments-${t.id}.json`)]) { try { rmSync(p, { force: true }); } catch {} }
     for (const p of [join(homeDir(t.home), "inbox", safeId(t.id)), join(homeDir(t.home), "workers", safeId(t.id))]) { try { rmSync(p, { recursive: true, force: true }); } catch {} }
   }
 }
@@ -428,6 +430,9 @@ const sessionsDir = (key) => join(repoDir(key), "sessions");
 /** A per-session file in a repo store: `.json` (the record), `.touched`, `.main`, `.lock`. */
 const sessionFile = (key, id, ext) => join(sessionsDir(key), `${safeId(id)}.${ext}`);
 const eventsPath = (key) => join(repoDir(key), "events.jsonl");
+
+/** Where per-turn worktree snapshots live (snapshot.mjs owns what is inside). */
+export const snapshotsDir = () => join(home(), "_snapshots");
 
 export function listRepoKeys() {
   let names = [];
