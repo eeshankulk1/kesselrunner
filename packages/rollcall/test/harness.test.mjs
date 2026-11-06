@@ -158,6 +158,8 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   assert.equal(ctx.pct, 40);
   assert.equal(ctx.total, 800);
   assert.match(store.readTask(h, "t1").notes.map((n) => n.text).join("\n"), /not trusted/, "untrusted hooks are said on the task");
+  assert.ok(store.listWakes(h).queued.some((e) => e.kind === "hooks-untrusted"), "and are news for the supervisor");
+  assert.match((await mod("watch.mjs")).wakeText(h, store.listWakes(h).queued), /not trusted yet/);
 
   // rollcall's words go through the protocol, with an id of its own, and the server's answer is the receipt.
   const { enqueue } = await mod("delivery.mjs");

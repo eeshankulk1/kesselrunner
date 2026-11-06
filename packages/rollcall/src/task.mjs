@@ -316,7 +316,7 @@ function workerLine(t, w, now) {
   if (w.parked) return `worker ${short(w.session)} parked (stopped while idle, to free memory): it comes back when written to, or on Enter in its tab`;
   if (!w.alive) return `worker ${short(w.session)} stopped${w.window ? "" : ", no window"}`;
   const doing = w.dialog ? `waiting on ${asksText(w.asks)} in its window` : w.busy ? "working" : `idle, its turn ended ${ago(w.since, now)}`;
-  const ctx = w.context === null ? "" : `, context ${w.context}%${w.tokens ? ` (${kTokens(w.tokens)}${w.size ? ` of ${kTokens(w.size)}` : ""})` : ""}`;
+  const ctx = w.context === null ? "" : `, context ${w.context}%${w.tokens ? ` (${kTokens(w.tokens)}${w.size ? ` of ${kTokens(w.size)}` : ""})` : ""}${w.total ? `, ${kTokens(w.total)} used in all` : ""}`;
   // What an idle worker waits on: the background work it left running (its shipper, a CI watch), or nothing.
   const bg = w.busy || w.dialog || !w.bg ? "" : w.bg.length ? `, waiting on ${w.bg.join("; ")}` : ", nothing running";
   // A finished task's window stays a while after its worker's last turn, so the owner can still ask it something.

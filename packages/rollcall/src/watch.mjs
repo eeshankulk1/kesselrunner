@@ -774,6 +774,8 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
     } else if (e.kind === "failed" && isOpen(t)) {
       line = `${label(t)}: rollcall could not start its worker (${e.what}): ${e.err || "no reason given"}. Fix what you can, or tell the owner in one line.`;
+    } else if (e.kind === "hooks-untrusted" && isOpen(t)) {
+      line = `${label(t)} runs on Codex, where ${e.count} of the owner's hooks are not trusted yet, so they do not run on its tool calls (the owner's guards and rollcall's checkout checks among them). Tell the owner in one line: it is their one step, once, in its window (/attach ${t.id}: "Review hooks", then trust all) or in Codex's /hooks.`;
     } else if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) {
       const [full, other] = [HARNESSES[e.harness].title, HARNESSES[e.other].title];
       line = `${label(t)} runs on ${full}, whose ${e.window} limit is at ${e.pct}%${e.resetsAt ? ` (it resets ${when(e.resetsAt)})` : ""}; ${other} has room (${e.room}% used). ` +

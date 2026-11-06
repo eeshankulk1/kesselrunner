@@ -286,5 +286,7 @@ async function checkHooks(conn, cwd, h, id) {
       x.notes.push({ at: Date.now(), by: "rollcall", text: `codex: ${untrusted.length} of its hooks are not trusted, so they do not run on this worker (the owner's guards among them). The owner trusts them once: in the worker's window, "Review hooks", then trust all.` });
       store.writeTask(x);
     });
+    // The owner's step, so it is news for the supervisor too.
+    store.enqueueWake(h, { task: id, kind: "hooks-untrusted", count: untrusted.length });
   } catch {}
 }
