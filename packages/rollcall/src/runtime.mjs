@@ -35,12 +35,18 @@ export const portRange = () => ({ min: num("ROLLCALL_PORT_MIN", 41000), max: num
 const portsPath = () => join(runtimeRoot(), "ports.json");
 const readBlocks = () => readJson(portsPath())?.blocks ?? [];
 
-/** Whether ports base..base+size-1 are all free to listen on now (a child node binds each, on every interface and on 127.0.0.1). */
-export function portsFree(base, size) {
-  const script = `const net=require("net");const ports=${JSON.stringify(Array.from({ length: size }, (_, i) => base + i))};
+/**
+ * Up to `want` of `bases` whose ports base..base+size-1 are all free to listen on now, in order. One child node binds
+ * each port (every interface, 127.0.0.1 and ::1) and stops once it has found `want` wholly free blocks.
+ */
+export function freeBlocks(bases, size, want = 8) {
+  if (!bases.length) return [];
+  const script = `const net=require("net");const bases=${JSON.stringify(bases)};const size=${size};
 const tryOn=(p,host)=>new Promise((ok)=>{const s=net.createServer();s.once("error",(e)=>ok(e.code==="EADDRNOTAVAIL"||e.code==="EAFNOSUPPORT"));s.listen({port:p,host,exclusive:true},()=>s.close(()=>ok(true)));});
-(async()=>{for(const p of ports){if(!(await tryOn(p))||!(await tryOn(p,"127.0.0.1"))||!(await tryOn(p,"::1")))process.exit(1);}process.exit(0);})();`;
-  return spawnSync(process.execPath, ["-e", script], { stdio: "ignore", timeout: 10_000 }).status === 0;
+const free=async(b)=>{for(let p=b;p<b+size;p++){if(!(await tryOn(p))||!(await tryOn(p,"127.0.0.1"))||!(await tryOn(p,"::1")))return false;}return true;};
+(async()=>{const out=[];for(const b of bases){if(await free(b)){out.push(b);if(out.length>=${want})break;}}process.stdout.write(JSON.stringify(out));})();`;
+  const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 20_000 });
+  try { return JSON.parse(r.stdout); } catch { return []; }
 }
 
 /**
@@ -50,23 +56,33 @@ const tryOn=(p,host)=>new Promise((ok)=>{const s=net.createServer();s.once("erro
  */
 export function portsFor(path, { allocate = false } = {}) {
   const p = real(path);
-  const r = store.withRuntimeLock(() => {
-    const kept = readBlocks().filter((b) => existsSync(b.path));
-    const own = kept.find((b) => b.path === p);
-    if (own || !allocate) { if (kept.length !== readBlocks().length) writeJson(portsPath(), { blocks: kept }); return own ?? null; }
-    const { min, max, size } = portRange();
-    const taken = new Set(kept.map((b) => b.base));
-    for (let base = min; base + size - 1 <= max; base += size) {
-      if (taken.has(base) || !portsFree(base, size)) continue;
+  const shape = (b) => (b ? { base: b.base, size: b.size, last: b.base + b.size - 1 } : null);
+  // Reading takes no lock: front ends ask for every task's ports on each refresh, and a write is one atomic rename.
+  const own = readBlocks().find((b) => b.path === p);
+  if (own || !allocate) return shape(own);
+  const { min, max, size } = portRange();
+  for (let tries = 0; tries < 5; tries++) {
+    // Free ports are found outside the lock (one child, however many blocks are busy); the lock only claims one, the
+    // first that no other checkout claimed while this one looked.
+    const held = new Set(readBlocks().filter((b) => existsSync(b.path)).map((b) => b.base));
+    const bases = [];
+    for (let base = min; base + size - 1 <= max; base += size) if (!held.has(base)) bases.push(base);
+    const free = freeBlocks(bases, size);
+    if (!free.length) return null;
+    const r = store.withRuntimeLock(() => {
+      const kept = readBlocks().filter((b) => existsSync(b.path));
+      const mine = kept.find((b) => b.path === p);
+      if (mine) return mine;
+      const taken = new Set(kept.map((b) => b.base));
+      const base = free.find((x) => !taken.has(x));
+      if (base === undefined) return null;
       const b = { base, size, path: p, at: Date.now() };
       writeJson(portsPath(), { blocks: [...kept, b] });
       return b;
-    }
-    writeJson(portsPath(), { blocks: kept });
-    return null;
-  });
-  const b = r?.out ?? null;
-  return b ? { base: b.base, size: b.size, last: b.base + b.size - 1 } : null;
+    });
+    if (r?.out) return shape(r.out);
+  }
+  return null;
 }
 
 /** Gives checkout `path`'s block back (its worktree went: gc, archive). */

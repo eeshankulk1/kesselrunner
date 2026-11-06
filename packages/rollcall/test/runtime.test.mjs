@@ -348,3 +348,16 @@ test("gc gives a merged worktree's ports back and stops its run actions", async 
   await until(() => fetch(`http://127.0.0.1:${ports.base}`).then(() => false, () => true));
   assert.ok(!readFileSync(join(sb.home, "_runtime/ports.json"), "utf8").includes(wt));
 });
+
+test("checkouts that ask for ports at the same moment each get a block of their own", async (t) => {
+  const { sb, sup } = project(t, { devServer: { baseUrl: "http://localhost:{port}" } });
+  const trees = Array.from({ length: 5 }, (_, i) => sb.worktree(`feat/p${i}`));
+  const runs = trees.map((wt) => sup.cliAsync(["ports", "--json"], { cwd: wt }));
+  const out = await Promise.all(runs.map((r) => r.exited));
+  const bases = out.map((r) => { assert.equal(r.code, 0); return JSON.parse(r.stdout).ports.base; });
+  assert.equal(new Set(bases).size, 5, `distinct blocks: ${bases}`);
+  const held = JSON.parse(readFileSync(join(sb.home, "_runtime/ports.json"), "utf8")).blocks;
+  assert.equal(held.length, 5);
+  // Asking again hands back the same block, with no new one.
+  assert.equal(json(sup.cli(["ports", "--json"], { cwd: trees[0] })).ports.base, bases[0]);
+});
