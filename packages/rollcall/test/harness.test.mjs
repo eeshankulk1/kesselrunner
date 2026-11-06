@@ -193,10 +193,13 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
 
   // The usage limit: the task waits on it, until the plan resets.
   assert.deepEqual(codex.type(store.readTask(h, "t1"), "LIMIT"), { ok: true });
-  await until(() => store.readTask(h, "t1").wait?.on === "usage", "the usage wait");
+  // Codex's own blocker: the Claude supervisor's news does not pause for it, and the wait ends when Codex resets.
+  const wait = await until(() => store.readTask(h, "t1").wait?.on === "usage-codex" && store.readTask(h, "t1").wait, "the Codex usage wait");
+  assert.ok(wait.until > Date.now() + 3600_000, "its reset time came from Codex");
   assert.ok(status().some((e) => e.ev === "idle" && e.failed === "rate_limit"));
-  const usage = (await mod("usage.mjs")).usageOf();
-  assert.equal(usage.codex.primary.pct, 12, "the rate limits it heard are on the meter");
+  const trouble = await mod("trouble.mjs");
+  assert.ok(trouble.openBlockers()["usage-codex"] && !trouble.paused(), "Codex's limit is its own blocker");
+  assert.equal((await mod("usage.mjs")).usageOf().codex.primary.pct, 100, "the limits read at the failure are on the meter");
 
   // An interrupt stops the running turn.
   assert.deepEqual(codex.type(store.readTask(h, "t1"), "SLOW one"), { ok: true });

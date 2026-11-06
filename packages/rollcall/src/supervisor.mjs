@@ -760,8 +760,10 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       if (ACCOUNT_ERRORS.has(p.error)) {
         // Codex says when its limit resets; Claude Code only in its words.
         const until = Number.isFinite(p.resets_at) ? p.resets_at : resetAt(text);
-        openBlocker("usage", { until, text });
-        setWait(h, id, { on: "usage", until, at: Date.now() });
+        // Each plan's limit is its own blocker: a Codex limit holds only the tasks that run on Codex.
+        const kind = p.limit === "usage-codex" ? "usage-codex" : "usage";
+        openBlocker(kind, { until, text });
+        setWait(h, id, { on: kind, until, at: Date.now() });
       }
       return null;
     }

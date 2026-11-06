@@ -88,7 +88,7 @@ function serve(path) {
       case "thread/resume": thread.id = p.threadId; return reply({ thread: { id: p.threadId } });
       case "thread/read": return reply({ thread: { id: thread.id, turns: thread.turn ? [{ id: thread.turn, status: "inProgress" }] : [] } });
       case "hooks/list": return reply({ data: [{ cwd: p.cwds?.[0] ?? "", hooks: [{ enabled: true, trustStatus: "untrusted" }], errors: [], warnings: [] }] });
-      case "account/rateLimits/read": return reply({ rateLimits: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } });
+      case "account/rateLimits/read": return reply({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 }, planType: "plus" } }, rateLimits: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } });
       case "turn/start": {
         const text = (p.input ?? []).map((x) => x.text).join("\n");
         const turnId = await play(text);

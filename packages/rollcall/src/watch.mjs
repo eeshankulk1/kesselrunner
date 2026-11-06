@@ -460,7 +460,7 @@ function usageOffers(h, views, seen, now) {
     if (!room || room.pct >= nearPct()) continue; // no room known on the other plan: nothing to offer
     for (const { t, w: worker } of views) {
       if (!isOpen(t) || harnessOf(t) !== w.harness) continue;
-      const waits = !t.sessions?.length || t.wait?.on === "usage" || (t.state === "working" && (worker?.parked || worker?.stopped));
+      const waits = !t.sessions?.length || trouble.isUsage(t.wait?.on) || (t.state === "working" && (worker?.parked || worker?.stopped));
       const key = `usage:${t.id}:${w.harness}:${w.resetsAt ?? w.name}`;
       if (!waits || seen[key]) continue;
       seen[key] = now;
@@ -500,7 +500,7 @@ const checked = new Map();
 /** What a worker hears when its wait ends. */
 function waitOver(t, wait) {
   const on = `\`${cli()} task show ${t.id}\` has the record.`;
-  if (wait.on === "usage") return `${P} The usage limit that stopped you is over. Carry on where you left off; ${on}`;
+  if (trouble.isUsage(wait.on)) return `${P} The usage limit that stopped you is over. Carry on where you left off; ${on}`;
   if (wait.on === "disk") return `${P} The disk has room again. Carry on where you left off, and run again what failed for lack of space; ${on}`;
   if (wait.on === "power") return `${P} The Mac is on power again. Carry on where you left off; ${on}`;
   if (wait.on === "billing") return `${P} GitHub is starting jobs again. Re-run what it refused (\`gh run rerun <run> --failed\`) if that has not started, and carry on; ${on}`;
@@ -517,7 +517,7 @@ function endWait(t, now) {
   const w = workerState(t, now);
   if (!w || w.stopped) return;
   const text = waitOver(t, wait);
-  if (!w.alive || wait.on === "usage") unpark(t, text, w);
+  if (!w.alive || trouble.isUsage(wait.on)) unpark(t, text, w);
   else enqueue(t, "notice", text);
 }
 

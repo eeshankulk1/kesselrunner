@@ -14,7 +14,7 @@ import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoK
 import { P, ago, cli, short } from "./session.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
-import { WAITABLE, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
+import { WAITABLE, isUsage, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
 import { HARNESSES, NAMES, defaultHarness, harnessName, harnessOf } from "./harness/index.mjs";
 import { usageLine, usageOf } from "./usage.mjs";
 import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, workerState } from "./supervisor.mjs";
@@ -717,7 +717,7 @@ function moveHarness(t0, name, ctx) {
   if (holderOf(t0.home)) mayWrite(t0, ctx.whoAmI(), ctx);
   const t = update(t0, ctx, (x) => {
     x.harness = to;
-    if (x.wait?.on === "usage") x.wait = null;
+    if (isUsage(x.wait?.on)) x.wait = null;
     x.notes.push({ at: Date.now(), by: "rollcall", text: `moved to ${title}: its workers run there from now on` });
   });
   if (!t.sessions.length || !isOpen(t)) { ctx.say(`${t.id} runs on ${title} from now on${t.sessions.length ? "" : ": its first worker starts there"}.`); return 0; }

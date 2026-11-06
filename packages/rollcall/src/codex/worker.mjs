@@ -149,7 +149,9 @@ export async function codexWorker([h, id]) {
         const turn = p.turn ?? {};
         if (turn.status === "failed") {
           const err = turn.error ?? {};
-          hook("stop-failure", { error: usageLimited(err) ? "rate_limit" : "unknown", last_assistant_message: err.message ?? null, resets_at: usageLimited(err) ? resetsAt : null });
+          if (!usageLimited(err)) { hook("stop-failure", { error: "unknown", last_assistant_message: err.message ?? null }); return; }
+          // When the plan resets: from the limits Codex last sent, else asked now (the failure itself does not say).
+          void limitsNow().then((at) => hook("stop-failure", { error: "rate_limit", limit: "usage-codex", last_assistant_message: err.message ?? null, resets_at: at ?? resetsAt }));
           return;
         }
         const out = hook("stop", { last_assistant_message: lastWords, background_tasks: [], stop_hook_active: blocked });
@@ -178,6 +180,17 @@ export async function codexWorker([h, id]) {
       default:
     }
   };
+  /** Codex's plan limits read now: recorded on the meter; resolves to when the fullest window resets (ms), or null. */
+  const limitsNow = async () => {
+    try {
+      const r = await conn.request("account/rateLimits/read", undefined, 10_000);
+      const x = r?.rateLimitsByLimitId?.codex ?? r?.rateLimits;
+      recordCodex(x);
+      const wins = [x?.primary, x?.secondary].filter((w) => w && Number.isFinite(w.resetsAt)).sort((a, b) => (b.usedPercent ?? 0) - (a.usedPercent ?? 0));
+      return wins[0] ? wins[0].resetsAt * 1000 : null;
+    } catch { return null; }
+  };
+
   const onRequest = async (m) => {
     if (m.method === "item/tool/requestUserInput") {
       const questions = questionsOf(m.params);
