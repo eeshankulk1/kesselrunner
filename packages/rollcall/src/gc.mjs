@@ -14,8 +14,6 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, sep } from "node:path";
 import { defaultBranch, fetchSync, gitSync, locate, mainSha } from "./git.mjs";
 import { keyOf, manifestAt } from "./results.mjs";
-import { forgetCheckout, stopAllActions } from "./runtime.mjs";
-import { spotlightNaming, spotlightOff } from "./archive.mjs";
 
 const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, ...opts });
 const real = (p) => { try { return realpathSync(p); } catch { return p; } };
@@ -132,15 +130,28 @@ export function sizesKb(paths) {
   return sizes;
 }
 
+/** gc with no word on checkouts' runtime (a caller that loads none): it removes worktrees and touches nothing else. */
+const NO_RUNTIME = { stopAllActions: () => [], endSpotlight: () => null, forgetCheckout: () => {} };
+
+/**
+ * What gc does to a checkout's runtime (runtime.mjs, archive.mjs), loaded only by a gc that runs: a worktree it removes
+ * has its run actions stopped, its spotlight ended ({ ok, err }, or null with none) and its ports given back.
+ */
+export async function gcRuntime() {
+  const [{ forgetCheckout, stopAllActions }, { spotlightNaming, spotlightOff }] = await Promise.all([import("./runtime.mjs"), import("./archive.mjs")]);
+  return { stopAllActions, forgetCheckout, endSpotlight: (main, path) => { const spot = spotlightNaming(main, path); return spot ? spotlightOff(spot) : null; } };
+}
+
 /**
  * Collects one repo. `occupied(path)` adds session knowledge (rollcall records)
  * on top of the process check. `task(path)` is the open task that names a worktree
  * ({ id, state, baseSha, land(why, head), hold(head) }) or null: an open task keeps its worktree, unless
  * its branch has commits of its own since its base and that work has landed, which marks it landed
  * (`land`; it returns what keeps the task open instead, and `hold` says it without writing) and lets the
- * other checks decide. Returns { removed: [{ name, branch, kb, why }], kept: [{ name, branch, why }] }.
+ * other checks decide. `runtime` (gcRuntime) cleans up after a worktree it removes. Returns { removed: [{ name,
+ * branch, kb, why }], kept: [{ name, branch, why }] }.
  */
-export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task = () => null } = {}) {
+export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task = () => null, runtime = NO_RUNTIME } = {}) {
   const out = { removed: [], kept: [] };
   const info = locate(mainPath);
   if (!info) return out;
@@ -190,9 +201,9 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     if (status.stdout.trim()) { keep(w, "uncommitted changes"); continue; }
     // Its own run actions (a dev server rollcall started) stop with it, so they do not keep it "in use"; a spotlight on it ends.
     if (!dryRun) {
-      stopAllActions(path);
-      const spot = spotlightNaming(main, path);
-      if (spot) { const off = spotlightOff(spot); if (!off.ok) { keep(w, `its spotlight could not end: ${off.err}`); continue; } }
+      runtime.stopAllActions(path);
+      const off = runtime.endSpotlight(main, path);
+      if (off && !off.ok) { keep(w, `its spotlight could not end: ${off.err}`); continue; }
     }
     if (cwds === undefined) cwds = processCwds();
     if (cwds?.some((c) => c === path || c.startsWith(path + sep))) { keep(w, "in use"); continue; }
@@ -220,7 +231,7 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     const rm = gitSync(main, ["worktree", "remove", d.path]);
     if (rm.status !== 0) { keep(d.w, `remove failed: ${lastLine(rm.stderr)}`); continue; }
     if (d.w.branch) gitSync(main, ["branch", "-D", d.w.branch]);
-    forgetCheckout(d.path);
+    runtime.forgetCheckout(d.path);
     out.removed.push({ name: basename(d.path), branch: d.w.branch, kb: sizes.get(d.path) ?? 0, why: d.why });
   }
   if (missing) gitSync(main, ["worktree", "prune"]);

@@ -31,8 +31,7 @@ import {
   unpark, watcherEnv, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
-import { syncSpotlights } from "./archive.mjs";
-import { setupState } from "./runtime.mjs";
+import { allSpotlights, setupState } from "./checkout.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
 import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
@@ -440,7 +439,7 @@ export function tick(h, now = Date.now()) {
   try { keepAwake(h, views, now); } catch {}
   try { trouble.look(now); } catch {}
   try { settleWaits(h, views, now); } catch {}
-  try { followSpotlights(h, seen); } catch {}
+  try { followSpotlights(h); } catch {}
   try { remindOwner(h, now); } catch {}
   drawTabs(h, now);
 }
@@ -449,16 +448,25 @@ export function tick(h, now = Date.now()) {
  * A spotlit task's changes reach the main checkout each poll. One that can no longer follow (someone changed the main
  * checkout) is news for the supervisor, once per reason.
  */
-function followSpotlights(h, seen) {
-  for (const { spot, result } of syncSpotlights(h)) {
-    const key = `spotlight:${spot.task.id}`;
-    // A sync that works again forgets the failure, so the same one later is news again.
-    if (result.ok) { if (key in seen) { delete seen[key]; store.writeHomeFile(h, "seen", seen); } continue; }
-    if (seen[key] === result.err) continue;
-    seen[key] = result.err;
-    store.writeHomeFile(h, "seen", seen);
-    store.enqueueWake(h, { task: spot.task.id, kind: "spotlight", err: result.err });
-  }
+function followSpotlights(h) {
+  // Most polls find no spotlight: one folder read, and the code that moves a checkout never loads.
+  if (!allSpotlights().some((s) => s.task?.home === h)) return;
+  import("./archive.mjs").then(({ syncSpotlights }) => {
+    const results = syncSpotlights(h);
+    // Read again now: the poll that started this wrote its own changes meanwhile.
+    const seen = store.readHomeFile(h, "seen") ?? {};
+    let changed = false;
+    for (const { spot, result } of results) {
+      const key = `spotlight:${spot.task.id}`;
+      // A sync that works again forgets the failure, so the same one later is news again.
+      if (result.ok) { if (key in seen) { delete seen[key]; changed = true; } continue; }
+      if (seen[key] === result.err) continue;
+      seen[key] = result.err;
+      changed = true;
+      store.enqueueWake(h, { task: spot.task.id, kind: "spotlight", err: result.err });
+    }
+    if (changed) store.writeHomeFile(h, "seen", seen);
+  }).catch(() => {});
 }
 
 /**

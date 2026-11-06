@@ -17,9 +17,9 @@ import * as store from "./store.mjs";
 import { WAITABLE, isUsage, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
 import { HARNESSES, NAMES, defaultHarness, harnessName, harnessOf } from "./harness/index.mjs";
 import { usageLine, usageOf } from "./usage.mjs";
-import { archivePlan, archiveTask, planLines, restoreTask, spotlightOff, spotlightOn, spotlightSync } from "./archive.mjs";
-import { checkoutFacts, runtimeLines, runtimeOf, spotlightOf, startSetup } from "./runtime.mjs";
-import { runtimeCommand } from "./runtime-cli.mjs";
+// A checkout's runtime (runtime.mjs, archive.mjs, runtime-cli.mjs) loads only in the commands that use it: every hook
+// imports this module, and each module it loads is time on every tool call.
+const runtime = () => import("./runtime.mjs");
 import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
 
 const TYPES = ["feat", "fix", "refactor", "test", "docs"];
@@ -202,7 +202,7 @@ function baseRef(arg, main, h, ctx) {
   return ref;
 }
 
-function create(args, ctx) {
+async function create(args, ctx) {
   const json = take(args, "--json");
   const noWorktree = take(args, "--no-worktree");
   const browser = take(args, "--browser");
@@ -340,6 +340,7 @@ function create(args, ctx) {
   }
   // A new worktree runs on its own before its worker's first turn: its ports, then its files and setup in the background.
   const fresh = !own && t.branch && existsSync(t.worktree);
+  const { checkoutFacts, runtimeOf, startSetup } = await runtime();
   const facts = fresh ? checkoutFacts(t.worktree) : null;
   const setup = fresh ? startSetup(t.worktree, { bin: BIN, skipCommand: kind === "discuss" }) : null;
   if (json) { ctx.say(JSON.stringify({ ...t, runtime: runtimeOf(t) }, null, 2)); return 0; }
@@ -432,12 +433,13 @@ function workerLine(t, w, now) {
   return `worker ${short(w.session)}${on} ${doing}${ctx}${bg}${gone ? `, its window ${gone}` : ""}${unread.length ? `, ${unread.length} message${unread.length === 1 ? "" : "s"} unread, the oldest from ${ago(unread[0].at, now)}` : ""}`;
 }
 
-function list(args, ctx) {
+async function list(args, ctx) {
   const json = take(args, "--json");
   const now = Date.now();
   const h = homeFor(ctx);
   const homes = h ? [h] : store.listHomes();
   const all = take(args, "--all");
+  const runtimeOf = json ? (await runtime()).runtimeOf : null;
   const tasks = homes.flatMap((x) => visibleTasks(x, { all, now })).map((t) => ({ ...t, worker: workerState(t, now), ...(json ? { runtime: runtimeOf(t) } : {}) }));
   if (json) { ctx.say(JSON.stringify({ home: h, tasks: tasks.map((t) => ({ ...t, harness: harnessOf(t) })), decisions: allDecisions(), usage: usageOf(now) }, null, 2)); return 0; }
   if (!tasks.length) ctx.say(h ? `rollcall: no tasks in supervisor ${h}` : "rollcall: no tasks");
@@ -454,10 +456,11 @@ function list(args, ctx) {
   return 0;
 }
 
-function show(args, ctx) {
+async function show(args, ctx) {
   const json = take(args, "--json");
   const t = resolve(args[0], ctx);
   const now = Date.now();
+  const { runtimeLines, runtimeOf } = await runtime();
   const rt = runtimeOf(t);
   if (json) { ctx.say(JSON.stringify({ ...t, worker: workerState(t, now), runtime: rt }, null, 2)); return 0; }
   ctx.say(`${t.id}: "${t.title}" - ${t.state}${t.pr ? ` - ${t.pr}` : ""}`);
@@ -1009,10 +1012,10 @@ function worktreeOf(t, ctx) {
 
 /** `task setup|run|ports <id> ...`: the checkout command, run in the task's worktree. */
 function inTask(cmd) {
-  return (args, ctx) => {
+  return async (args, ctx) => {
     const t = resolve(args.shift(), ctx);
     process.chdir(worktreeOf(t, ctx));
-    return runtimeCommand(cmd, args, ctx);
+    return (await import("./runtime-cli.mjs")).runtimeCommand(cmd, args, ctx);
   };
 }
 
@@ -1021,7 +1024,8 @@ function notWorker(what, ctx) {
   if (taskEnv()) ctx.fail(`${what} is the owner's or the supervisor's action, not a worker's: ask for it (task note "<why>", or AskUserQuestion)`);
 }
 
-function archive(args, ctx) {
+async function archive(args, ctx) {
+  const { archivePlan, archiveTask, planLines } = await import("./archive.mjs");
   const yes = take(args, "--yes");
   const t0 = resolve(args.shift(), ctx);
   notWorker("archive", ctx);
@@ -1039,7 +1043,8 @@ function archive(args, ctx) {
   return 0;
 }
 
-function restore(args, ctx) {
+async function restore(args, ctx) {
+  const { restoreTask } = await import("./archive.mjs");
   const t0 = resolve(args.shift(), ctx);
   notWorker("restore", ctx);
   mayWrite(t0, ctx.whoAmI(), ctx);
@@ -1056,7 +1061,8 @@ function restore(args, ctx) {
   return 0;
 }
 
-function spotlight(args, ctx) {
+async function spotlight(args, ctx) {
+  const [{ spotlightOff, spotlightOn, spotlightSync }, { spotlightOf }] = await Promise.all([import("./archive.mjs"), runtime()]);
   const off = take(args, "--off");
   const force = take(args, "--force");
   const sync = take(args, "--sync");

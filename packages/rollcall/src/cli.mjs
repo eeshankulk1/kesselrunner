@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { gcRepo, pruneRefs, summary } from "./gc.mjs";
+import { gcRepo, gcRuntime, pruneRefs, summary } from "./gc.mjs";
 import { gitSync, locate, mainCheckout, repoKey } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
 import { ancestry, pidAlive } from "./proc.mjs";
@@ -579,7 +579,7 @@ async function gc(args) {
     let res;
     let refs = 0;
     try {
-      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task });
+      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task, runtime: await gcRuntime() });
       if (!dryRun && store.claimRefsSlot(key)) refs = pruneRefs(main, { queued: Object.keys(store.readQueue(key).entries) });
     } finally { release(); }
     const line = summary(name, res, { dryRun });

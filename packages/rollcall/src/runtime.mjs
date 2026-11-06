@@ -10,30 +10,28 @@
 //   _runtime/<key>/actions/<name>.json     a run action that was started: { pid, start, at, command, dir, url, log }
 //   _runtime/<key>/actions/<name>.log      its output
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { defaultBranch, gitSync, locate, mainCheckout } from "./git.mjs";
 import { pidAlive, startOf } from "./proc.mjs";
 import * as store from "./store.mjs";
+import {
+  checkoutEnv, factsOf, fillPorts, launchLines, manifestOf, num, portRange, portsPath, q, readBlocks, readJson, real, runtimeDir,
+  runtimeRoot, setupLog, setupPath, setupState, spotDir, spotlightOf, spotlightPath, usesPorts,
+} from "./checkout.mjs";
 
-const real = (p) => { try { return realpathSync(p); } catch { return p; } };
-const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; } };
+// The read-only half lives in checkout.mjs, light enough for every hook; its names are this module's too.
+export {
+  allSpotlights, checkoutEnv, factsOf, fillPorts, heldPorts, keyOf, launchLines, manifestOf, portRange, runtimeDir, runtimeRoot, setupLog,
+  setupState, spotlightOf, spotlightPath,
+} from "./checkout.mjs";
+
 const writeJson = (p, v) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(`${p}.${process.pid}.tmp`, JSON.stringify(v)); renameSync(`${p}.${process.pid}.tmp`, p); };
-const num = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 
-export const runtimeRoot = () => join(store.home(), "_runtime");
-/** A checkout's own folder in the store, by its path. */
-export const keyOf = (path) => createHash("sha1").update(real(path)).digest("hex").slice(0, 16);
-export const runtimeDir = (path) => join(runtimeRoot(), keyOf(path));
 
 // ---------------------------------------------------------------- ports
 
-/** The range blocks come from and a block's size: ROLLCALL_PORT_MIN / _MAX / _BLOCK. */
-export const portRange = () => ({ min: num("ROLLCALL_PORT_MIN", 41000), max: num("ROLLCALL_PORT_MAX", 48999), size: num("ROLLCALL_PORT_BLOCK", 10) });
-const portsPath = () => join(runtimeRoot(), "ports.json");
-const readBlocks = () => readJson(portsPath())?.blocks ?? [];
 
 /**
  * Up to `want` of `bases` whose ports base..base+size-1 are all free to listen on now, in order. One child node binds
@@ -97,45 +95,20 @@ export function releasePorts(path) {
 
 // ---------------------------------------------------------------- the manifest, with this checkout's ports
 
-/** The test manifest of the checkout at `top`, raw, or null. */
-export function manifestOf(top) {
-  return readJson(join(top, ".claude", "test-manifest.json"));
-}
-
-const PORT_REF = /\{port(?:\s*\+\s*(\d+))?\}/g;
-const usesPorts = (m) => /\{port(?:\s*\+\s*\d+)?\}/.test(JSON.stringify(m ?? {}));
 
 /**
- * The checkout's facts for its manifest and run actions: { top, main, isMain, ports, base }. `base` is the number
- * `{port}` stands for: the main checkout's manifest `ports.default` when it names one (an OAuth callback registered
- * on one URL keeps working there), else the checkout's own block, handed out when the manifest uses `{port}` and
- * `allocate` says so (or always, with "always").
+ * factsOf, and a block of ports handed out when the checkout holds none: when the manifest uses `{port}` and `allocate`
+ * says so, or always with "always" (rollcall ports). The main checkout keeps the manifest's ports.default when it names one.
  */
 export function checkoutFacts(dir, { allocate = true } = {}) {
-  const info = locate(dir);
-  if (!info) return null;
-  const top = info.top;
-  const main = mainCheckout(info);
-  const isMain = real(top) === real(main);
-  const m = manifestOf(top);
-  const dflt = Number(m?.ports?.default);
-  // A block is handed out when the manifest uses {port}, or on an explicit ask (`allocate: "always"`, rollcall ports);
-  // the main checkout keeps the manifest's ports.default when it names one.
-  let ports = portsFor(top);
-  const wanted = allocate === "always" || (allocate && usesPorts(m));
-  if (!ports && wanted && !(isMain && dflt > 0)) ports = portsFor(top, { allocate: true });
-  const base = isMain && dflt > 0 ? dflt : ports?.base ?? null;
-  return { top, main, isMain, info, manifest: m, ports, base };
+  const f = factsOf(dir);
+  if (!f || f.ports) return f;
+  const wanted = allocate === "always" || (allocate && usesPorts(f.manifest));
+  if (!wanted || (f.isMain && f.dflt)) return f;
+  const ports = portsFor(f.top, { allocate: true });
+  return { ...f, ports, base: f.isMain && f.dflt ? f.dflt : ports?.base ?? null };
 }
 
-/** `value` with every `{port}` and `{port+N}` filled in from `base` (left as written when there is none). */
-export function fillPorts(value, base) {
-  if (base === null || base === undefined) return value;
-  if (typeof value === "string") return value.replace(PORT_REF, (_, n) => String(base + Number(n ?? 0)));
-  if (Array.isArray(value)) return value.map((v) => fillPorts(v, base));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, fillPorts(v, base)]));
-  return value;
-}
 
 /** The manifest of the checkout holding `dir` with its ports filled in, or null with none. */
 export function resolvedManifest(dir) {
@@ -144,23 +117,6 @@ export function resolvedManifest(dir) {
   return fillPorts(f.manifest, f.base);
 }
 
-/**
- * The environment a checkout's setup, teardown, run actions and worker get: who it is and where. `task` is its
- * task record when it has one. ROLLCALL_TASK itself stays the worker's alone (it makes rollcall's commands act as
- * that worker).
- */
-export function checkoutEnv(f, task = null) {
-  const env = {
-    ROLLCALL_WORKTREE: f.top,
-    ROLLCALL_MAIN_CHECKOUT: f.main,
-  };
-  const b = f.info && defaultBranch(f.info);
-  if (b) env.ROLLCALL_DEFAULT_BRANCH = b;
-  if (f.base !== null && f.base !== undefined) env.ROLLCALL_PORT = String(f.base);
-  if (f.ports) env.ROLLCALL_PORT_COUNT = String(f.ports.size);
-  if (task) Object.assign(env, { ROLLCALL_TASK_ID: task.id, ROLLCALL_TASK_HOME: task.home, ROLLCALL_TASK_NAME: task.name ?? task.id });
-  return env;
-}
 
 // ---------------------------------------------------------------- .worktreeinclude
 
@@ -194,8 +150,6 @@ export function copyIncludes(main, top) {
 
 // ---------------------------------------------------------------- setup
 
-const setupPath = (top) => join(runtimeDir(top), "setup.json");
-export const setupLog = (top) => join(runtimeDir(top), "setup.log");
 const setupMs = () => num("ROLLCALL_SETUP_MINUTES", 30) * 60_000;
 
 /** The manifest's worktree.setup command for `top`, or null. */
@@ -204,18 +158,6 @@ export function setupCommand(top) {
   return typeof cmd === "string" && cmd.trim() ? cmd.trim() : null;
 }
 
-/**
- * The checkout's last setup: { state: running|done|failed, cmd, copied, exit, at, endedAt, log, last } or null when
- * none ran. A run whose process is gone without a word is failed ("stopped").
- */
-export function setupState(top) {
-  const s = readJson(setupPath(top));
-  if (!s) return null;
-  // pid is null for the moment between startSetup writing the record and the background run writing its own.
-  const gone = s.pid ? !pidAlive(s.pid, s.start) : Date.now() - s.at > 60_000;
-  if (s.state === "running" && gone) return { ...s, state: "failed", exit: null, last: "it stopped before it finished (the machine slept or restarted, or it was killed)" };
-  return s;
-}
 
 /**
  * Starts the checkout's setup in the background: `rollcall _setup <top>` copies the `.worktreeinclude` files, then runs
@@ -451,36 +393,10 @@ export function snapshot(top, message = "rollcall snapshot", { unless = null } =
 
 // ---------------------------------------------------------------- spotlight state (archive.mjs runs it)
 
-const spotDir = () => join(runtimeRoot(), "spotlight");
-/** The spotlight file of the repo whose main checkout is `main`. */
-export const spotlightPath = (main) => join(spotDir(), `${keyOf(main)}.json`);
-/** The repo's spotlight: { main, worktree, task: { home, id }, before: { branch, head }, mirrored: { tree, at } } or null. */
-export const spotlightOf = (main) => readJson(spotlightPath(main));
-/** Every spotlight on the machine. */
-export function allSpotlights() {
-  try { return readdirSync(spotDir()).filter((n) => n.endsWith(".json")).map((n) => readJson(join(spotDir(), n))).filter(Boolean); } catch { return []; }
-}
 export const writeSpotlight = (main, v) => (v ? writeJson(spotlightPath(main), v) : rmSync(spotlightPath(main), { force: true }));
 
 // ---------------------------------------------------------------- a task's runtime, for task show and front ends
 
-const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
-
-/**
- * The shell lines a worker's launch script runs before it starts the harness: the checkout's environment, and a wait
- * for a setup still running, so the worker's first turn finds its worktree ready. `bin` is rollcall's own script.
- */
-export function launchLines(t, bin) {
-  if (!t.branch || !t.repo?.key || !existsSync(t.worktree)) return [];
-  const f = checkoutFacts(t.worktree);
-  if (!f) return [];
-  const env = checkoutEnv(f, t);
-  return [
-    ...Object.entries(env).map(([k, v]) => `export ${k}=${q(v)}`),
-    // Only where a setup ran here: every other launch skips a node start.
-    `[ -e ${q(setupPath(t.worktree))} ] && { ${q(process.execPath)} ${q(bin)} -C ${q(t.worktree)} setup --wait --quiet || true; }`,
-  ];
-}
 
 /**
  * Task `t`'s runtime as front ends draw it: { ports: { base, last } | null, setup, actions: [{ name, url, running, log,

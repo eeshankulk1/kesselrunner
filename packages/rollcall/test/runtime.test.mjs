@@ -361,3 +361,19 @@ test("checkouts that ask for ports at the same moment each get a block of their 
   // Asking again hands back the same block, with no new one.
   assert.equal(json(sup.cli(["ports", "--json"], { cwd: trees[0] })).ports.base, bases[0]);
 });
+
+test("the hook path loads only the read-only runtime facts, never the code that changes a checkout", (t) => {
+  // Every tool call runs a hook: each module it loads is time on every call (this once cost ~10 ms a call).
+  const sb = sandbox(t);
+  const src = new URL("../src/", import.meta.url).pathname;
+  const tracer = join(sb.root, "trace.mjs");
+  write(tracer, `export async function resolve(s, c, n) { const r = await n(s, c); if (r.url.includes(${JSON.stringify(src)})) process.stderr.write("LOADED " + r.url.split("/").pop() + "\\n"); return r; }\n`);
+  const reg = join(sb.root, "register.mjs");
+  write(reg, `import { register } from "node:module"; register(${JSON.stringify(`file://${tracer}`)});\n`);
+  const r = spawnSync(process.execPath, ["--import", `file://${reg}`, "--input-type=module", "-e",
+    ["entry", "hooks", "watch", "supervisor"].map((m) => `await import(${JSON.stringify(`${src}${m}.mjs`)});`).join(" ")], { encoding: "utf8", env: sb.env });
+  assert.equal(r.status, 0, r.stderr);
+  const loaded = new Set(r.stderr.split("\n").filter((l) => l.startsWith("LOADED ")).map((l) => l.slice(7)));
+  assert.ok(loaded.has("hooks.mjs") && loaded.has("checkout.mjs"), [...loaded].join(" "));
+  for (const heavy of ["runtime.mjs", "archive.mjs", "runtime-cli.mjs"]) assert.ok(!loaded.has(heavy), `${heavy} loads on the hook path`);
+});

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dialogFlag, keyQuietMs } from "../delivery.mjs";
-import { launchLines } from "../runtime.mjs";
+import { launchLines } from "../checkout.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { TASK_ENV, capFlag, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
