@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { asksText } from "./asked.mjs";
 import { openQuestions, questionId } from "./answer.mjs";
 import { liveClients } from "./clients.mjs";
+import { harnessOf, sessionHarness } from "./harness/index.mjs";
 import { isAlive, isLive, intentOf } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
@@ -19,6 +20,7 @@ import { colorOf, holderOf, idOf, label, nameOf } from "./supervisor.mjs";
 import { allDecisions, visibleTasks } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import * as trouble from "./trouble.mjs";
+import { usageOf } from "./usage.mjs";
 import { view } from "./watch.mjs";
 
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
@@ -91,7 +93,7 @@ export function taskView(t, now = Date.now()) {
     kind: t.kind ?? "build", state: t.state, stateAt: t.stateAt ?? null, open: isOpen(t),
     // What its tab says ("PR open", "needs you", "parked", "CI 12m (usual 8m)"), and what it waits on from the owner.
     status: v.said, needsOwner: v.wait ? { kind: v.wait.kind, since: v.wait.since } : null,
-    harness: t.harness ?? "claude", model: t.model ?? null, effort: t.effort ?? null,
+    harness: harnessOf(t), model: t.model ?? null, effort: t.effort ?? null,
     repo: t.repo, worktree: t.worktree, branch: t.branch, base: t.base ?? null,
     after: t.after ?? [], until: t.until ?? null, hold: !!t.hold, ship: !!t.ship, browser: !!t.browser,
     words: (t.words ?? []).map((x) => ({ at: x.at, text: x.text, via: x.via ?? "supervisor", client: x.client ?? null, closed: x.closed ?? null })),
@@ -137,7 +139,7 @@ function sessionsView(now) {
     for (const r of store.listRecords(key).filter(isAlive)) {
       out.push({
         id: r.id, repo: { key, name: r.repoName ?? key }, branch: r.branch ?? null, checkout: r.checkout ?? null, mainCheckout: !!r.main && r.checkout === r.main,
-        harness: r.harness ?? null, state: !isLive(r, now) ? "stale" : r.idle ? "idle" : "working", since: r.since ?? null,
+        harness: sessionHarness(r), state: !isLive(r, now) ? "stale" : r.idle ? "idle" : "working", since: r.since ?? null,
         intent: intentOf(r) ?? null, claim: r.claim ?? null,
       });
     }
@@ -182,8 +184,8 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
     blockers: Object.values(trouble.openBlockers()).map((b) => ({ ...b })),
     blockerLines: trouble.lines(now),
     decisions: allDecisions().filter((d) => !home || d.home === home).map((d) => ({ ...d, from: d.from ? `${d.home}:${d.from}` : null })),
-    // Plan B fills this: the usage meter across the owner's accounts.
-    usage: null,
+    // The usage meter: each plan's room (usage.mjs), as `rollcall usage --json` prints it.
+    usage: usageOf(now),
     clients: liveClients().map(({ client, pid, notifies, at }) => ({ client, pid, notifies, at })),
   };
 }
@@ -225,7 +227,7 @@ export function attachInfo(ref, { client = "frontend", resume = null } = {}) {
   const view = `${session}-${window}-view-${tag}`;
   const w = t ? workerViewFor(t) : null;
   return {
-    ok: true, ref: t ? refOf(t) : r.home, harness: t?.harness ?? "claude",
+    ok: true, ref: t ? refOf(t) : r.home, harness: t ? harnessOf(t) : "claude",
     socket: tmux.SOCKET(), session, window, pane: win.pane, alive: !!win.alive, parked: !!w?.parked, resumed,
     view,
     argv: ["tmux", "-L", tmux.SOCKET(), "new-session", "-A", "-t", `=${session}`, "-s", view, ";", "set-option", "destroy-unattached", "on", ";", "select-window", "-t", `=${view}:=${window}`],

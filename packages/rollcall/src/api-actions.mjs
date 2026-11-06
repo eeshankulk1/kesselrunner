@@ -15,6 +15,7 @@ import { deliverWords, holderOf, label } from "./supervisor.mjs";
 import { recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
+import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
 const START_FILE = process.env.ROLLCALL_START_FILE || fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
@@ -99,14 +100,14 @@ export const ACTIONS = {
       const title = str(p, "title", { max: 200 });
       const words = str(p, "words");
       const repo = str(p, "repo", { required: !p.noRepo });
-      if (p.harness !== undefined && p.harness !== "claude") refuse("unsupported", `harness ${p.harness} is not available yet: workers run on claude`);
+      if (p.harness !== undefined && !harnessName(p.harness)) refuse("bad-payload", `harness is one of ${HARNESS_NAMES.join(", ")}`);
       const tmp = join(store.homeDir(h), "api");
       mkdirSync(tmp, { recursive: true });
       const file = join(tmp, `words-${process.pid}-${Date.now()}.txt`);
       writeFileSync(file, words);
       const argv = ["new", title, "--home", h, "--words-file", file, "--json"];
       if (p.noRepo) argv.push("--no-repo"); else argv.push("--repo", repo);
-      for (const [k, f] of [["type", "--type"], ["kind", "--kind"], ["model", "--model"], ["effort", "--effort"], ["base", "--base"], ["slug", "--slug"]]) if (p[k]) argv.push(f, String(p[k]));
+      for (const [k, f] of [["type", "--type"], ["kind", "--kind"], ["model", "--model"], ["effort", "--effort"], ["base", "--base"], ["slug", "--slug"], ["harness", "--harness"]]) if (p[k]) argv.push(f, String(p[k]));
       for (const a of p.after ?? []) argv.push("--after", String(a));
       for (const n of p.notes ?? []) argv.push("--note", String(n));
       if (p.until) argv.push("--until", String(p.until));
@@ -192,9 +193,17 @@ export const ACTIONS = {
   },
 
   "task.move": {
-    cli: "rollcall task move <task> --to <supervisor>",
+    cli: "rollcall task move <task> --to <supervisor> | --harness <claude|codex>",
     run(p) {
       const t = taskOf(p);
+      // To the other harness: a fresh worker there carries on from the task's record (task.mjs moveHarness).
+      if (p.harness !== undefined) {
+        const on = harnessName(p.harness);
+        if (!on) refuse("bad-payload", `harness is one of ${HARNESS_NAMES.join(", ")}`);
+        if (harnessOf(t) === on) return { moved: true, already: true, harness: on, view: fresh(t) };
+        task(["move", t.id, "--home", t.home, "--harness", on]);
+        return { moved: true, harness: on, view: fresh(t) };
+      }
       const to = str(p, "to");
       if (t.movedTo?.startsWith(`${to}:`)) return { moved: true, already: true, task: t.movedTo };
       task(["move", t.id, "--home", t.home, "--to", to]);

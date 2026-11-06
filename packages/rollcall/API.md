@@ -57,7 +57,7 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `blockers` | array | What stops work on this machine or account: `{ kind, since, ... }` per cause (`usage`, `billing`, `disk`, `power`, `memory`), with the cause's own fields (`until`, `gb`, `pct`...) |
 | `blockerLines` | string[] | The same, one plain line each, as the owner reads them |
 | `decisions` | array | What waits on the owner beyond any one task: `{ n, text, where, home, from, at }`, `from` a task ref or null |
-| `usage` | null | The usage meter. Null until plan B fills it |
+| `usage` | object | The usage meter, as `rollcall usage --json` prints it: `{ claude: { fiveHour, weekly, at } \| null, codex: { primary, secondary, plan, at } \| null }`, each window `{ pct, resetsAt }` (ms). A plan with no fresh reading is null |
 | `clients` | array | Front ends following rollcall now: `{ client, pid, notifies, at }` |
 
 ### A supervisor
@@ -91,7 +91,7 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `open` | bool | Its state is an open one |
 | `status` | string | What its tab says: `needs you`, `PR open`, `parked`, `CI 12m (usual 8m)`, `landed · closes in 7m` |
 | `needsOwner` | `{ kind, since }` \| null | What waits on the owner: `prompt` (a dialog open in its worker, or a launch stuck at a prompt), `needs-you` (a question), `stopped` (its worker is gone while the task is worked) |
-| `harness` | string | `claude`. Plan B adds `codex` |
+| `harness` | string | The agent CLI its workers run on: `claude` or `codex` |
 | `model`, `effort` | string \| null | What its workers run on, when the task sets it |
 | `repo` | `{ key, name, main }` | The repo's key, name and main checkout path (`key: null` for a job on no repo) |
 | `worktree`, `branch` | string | Where it works, on which branch |
@@ -144,7 +144,6 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 The plans in flight add their state here, as added fields (no version bump):
 
 - Plan A (worktree runtime), per task: its ports, its setup's progress, its run actions and their preview links, whether it is spotlit, and archived tasks.
-- Plan B (harness layer): `harness: "codex"` on tasks and sessions, and `usage`, the meter across the owner's accounts.
 - Plan C (review loop): review comments (line comments and PR review threads) and each turn's snapshot and diff.
 
 ## `rollcall api stream [--home <h>] [--client <name>] [--notifies]`
@@ -182,7 +181,7 @@ How it works: it wakes on a file change in the supervisors' homes, the machine's
 | `blockerLines.changed` | `blockerLines` | The same, as plain lines |
 | `tmux.changed` | `tmux` | tmux came or went |
 | `decisions.changed` | `decisions` | The whole new list |
-| `usage.changed` | `usage` | Plan B |
+| `usage.changed` | `usage` | A plan's reading moved (the stream reads it on its beat) |
 | `clients.changed` | `clients` | A front end opened or closed a stream |
 | `notice` | `title`, `text`, `sound` | A notification for the owner |
 | `heartbeat` | | Nothing else was written for 15 s (`ROLLCALL_API_HEARTBEAT_MS`) |
@@ -222,7 +221,6 @@ Exit 0 on `ok: true`, 1 on a refusal, 2 when the payload is not JSON or the acti
 | `refused` | The command it runs refused, with that command's words (a `task.tell` to a finished task that never had a worker, say), or an agent session called `do` |
 | `unavailable` | Something it needs is not installed: tmux, or kesselrunner's launcher (`ROLLCALL_START_FILE`) |
 | `failed` | The launcher failed starting, stopping or resuming a worker, or something went wrong inside rollcall; the message says what |
-| `unsupported` | A value this version cannot do yet (`harness` other than `claude`) |
 | `not-available` | An action from `coming`: it lands with its plan |
 | `unknown-action` | No such action; the message lists them |
 | `already-answered` | The question this answer names was answered first elsewhere; `answered` has that answer |
@@ -234,14 +232,14 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 
 | Action | Payload | Result | The Falcon's way |
 |---|---|---|---|
-| `task.start` | `home`, `title` (up to 200), `words`, `repo` (a path) or `noRepo: true`; optional `type`, `kind`, `model`, `effort`, `base`, `slug`, `after` (ids), `notes` (strings), `until`, `ship`, `browser`, `hold`, `harness` (`claude` only) | `task` (its ref), `started`, `trustPrompt`, `message`, `view` | `rollcall task new` + `start.mjs` |
+| `task.start` | `home`, `title` (up to 200), `words`, `repo` (a path) or `noRepo: true`; optional `type`, `kind`, `model`, `effort`, `base`, `slug`, `after` (ids), `notes` (strings), `until`, `ship`, `browser`, `hold`, `harness` (`claude` or `codex`) | `task` (its ref), `started`, `trustPrompt`, `message`, `view` | `rollcall task new` + `start.mjs` |
 | `task.tell` | `task`, `text` | `delivered`, `how` (`typed`, `held`, `resumed`), `why`, `view` | `@luke <text>` |
 | `question.answer` | `task`, `question` (its id), `answers` (question text to answer) or `answer` (a single question) | `delivered`, `how`, `why`, `pickerClosed`, `view` | a pick in the Falcon's picker |
 | `task.interrupt` | `task` | `interrupted`, `why` | `start.mjs <task> --interrupt` (Esc in its window) |
 | `task.stop` | `task` | `stopped`, `why`, `view` | `start.mjs <task> --stop` |
 | `task.resume` | `task`, optional `why` (up to 300) | `resumed`, `trustPrompt`, `message`, `view` | `start.mjs <task> --resume "<why>"` |
 | `task.close` | `task`, optional `why` (up to 300) | `closed`, `already`, `view` | `rollcall task close <task> "<why>"` |
-| `task.move` | `task`, `to` (a supervisor) | `moved`, `already`, `task` (the new ref) | `rollcall task move <task> --to <supervisor>` |
+| `task.move` | `task`, and `to` (a supervisor) or `harness` (`claude` or `codex`) | `moved`, `already`, `task` (the new ref, for `to`), `harness` and `view` (for `harness`) | `rollcall task move <task> --to <supervisor>` or `--harness <h>` |
 | `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already` | `rollcall task decisions done <n> "<answer>"` |
 | `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
 
@@ -272,7 +270,7 @@ What a front end runs to show a session's real terminal: a tmux client on rollca
 - **A parked worker** still has its window: it shows the parked line, where Enter resumes the same conversation. `parked: true` says so.
 - **`--resume`** brings back a worker whose window is gone first (as `task.resume` does, noting the front end), then answers as above with `resumed: true`. Without it, a task with no window gets `no-window`.
 - **The supervisor**: a bare `<home>` attaches to the supervisor's own window, when it runs under `falcon`. One started in a plain terminal tab has no window there (`no-window`).
-- `alive`: the window runs something other than a shell. `harness` says what runs there; plan B's Codex route may add fields a Codex terminal needs.
+- `alive`: the window runs something other than a shell. `harness` says what runs there (`claude` or `codex`).
 - Errors: `bad-payload` (a malformed ref; exit 2 when the ref is missing), `not-found`, `unavailable` (no tmux), `failed` (the resume failed), `no-window`.
 
 ## Several front ends at once

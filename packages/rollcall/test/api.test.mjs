@@ -88,7 +88,7 @@ test("api snapshot holds every top-level section and a task's panel fields", (t)
   assert.equal(typeof s.tmux.available, "boolean");
   assert.equal(s.tmux.socket, sb.env.ROLLCALL_TMUX_SOCKET);
   assert.deepEqual(s.clients, []);
-  assert.equal(s.usage, null);
+  assert.deepEqual(s.usage, { claude: null, codex: null }, "the usage meter, with no reading yet");
   const sup = s.supervisors.find((x) => x.name === "alpha");
   assert.equal(sup.running, true, "its session holds it");
   assert.equal(sup.openTasks, 1);
@@ -411,6 +411,9 @@ test("task.tell, task.interrupt, task.close and task.move from a front end", (t)
   assert.equal(moved.result.task, "beta:t1");
   assert.equal(record(sb, "t1", "beta").title, "footer");
   assert.equal(act(sb, "task.move", { task: "alpha:t2", to: "beta" }).result.already, true);
+  // To the other harness (plan B): the task's own harness is no move, and a harness with no adapter is refused.
+  assert.deepEqual(act(sb, "task.move", { task: "alpha:t1", harness: "claude" }).result.already, true);
+  assert.equal(act(sb, "task.move", { task: "alpha:t1", harness: "gemini" }).error.code, "bad-payload");
 
   const closed = act(sb, "task.close", { task: "alpha:t1", why: "not needed", client: "mac" });
   assert.equal(closed.ok, true, JSON.stringify(closed));
@@ -449,7 +452,7 @@ test("task.start makes the task and runs kesselrunner's launcher; a held task wa
   write(fake, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(args)}, JSON.stringify(process.argv.slice(2)));\nconsole.log("started");\nprocess.exit(Number(process.env.FAKE_START_EXIT || 0));\n`);
   const env = { ROLLCALL_START_FILE: fake };
 
-  assert.equal(act(sb, "task.start", { home: "alpha", title: "x", words: "y", repo: sb.main, harness: "codex" }, { env }).error.code, "unsupported");
+  assert.equal(act(sb, "task.start", { home: "alpha", title: "x", words: "y", repo: sb.main, harness: "gemini" }, { env }).error.code, "bad-payload", "a harness rollcall has no adapter for");
   assert.equal(act(sb, "task.start", { home: "alpha", title: "x", repo: sb.main }, { env }).error.code, "bad-payload", "words are required");
   assert.equal(act(sb, "task.start", { home: "Bad Home", title: "x", words: "y", noRepo: true }, { env }).error.code, "bad-payload");
 

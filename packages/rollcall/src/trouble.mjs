@@ -39,7 +39,7 @@ const PROBE_SETTLE_MS = 60_000;
 
 /** The causes a worker can wait on by name (`usage` comes from its own hooks). */
 export const WAITABLE = ["disk", "power", "billing"];
-export const NAMES = { usage: "the usage limit", billing: "GitHub billing", disk: "disk space", power: "power", memory: "memory" };
+export const NAMES = { usage: "the usage limit", "usage-codex": "Codex's usage limit", billing: "GitHub billing", disk: "disk space", power: "power", memory: "memory" };
 
 const appleString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 export function notify(title, text, { sound = true } = {}) {
@@ -94,6 +94,12 @@ export function loadNote() {
 // ---------------------------------------------------------------- the record
 
 export const openBlockers = () => store.readTrouble().open;
+/**
+ * A usage limit is a blocker per plan: "usage" is Claude's (the supervisor's own harness, so its news waits too),
+ * "usage-codex" Codex's, which holds only the tasks that run there.
+ */
+export const USAGE_KINDS = ["usage", "usage-codex"];
+export const isUsage = (kind) => USAGE_KINDS.includes(kind);
 /** Whether Claude itself is refusing work now: news for a supervisor's model waits for this to end. */
 export const paused = () => !!openBlockers().usage;
 
@@ -102,7 +108,7 @@ export function openBlocker(kind, fields = {}, now = Date.now()) {
   store.updateTrouble((t) => {
     const b = t.open[kind];
     t.open[kind] = { ...b, ...fields, kind, since: b?.since ?? now };
-    if (kind === "usage" && b?.until) t.open[kind].until = fields.until ? Math.max(b.until, fields.until) : b.until;
+    if (isUsage(kind) && b?.until) t.open[kind].until = fields.until ? Math.max(b.until, fields.until) : b.until;
   });
 }
 
@@ -135,7 +141,7 @@ export function assess(f, open, now) {
     if (f.memoryPct <= MEMORY_LOW) want.push({ kind: "memory", pct: f.memoryPct });
     else if (open.memory && f.memoryPct >= MEMORY_OK) gone.push("memory");
   }
-  if (open.usage && now >= (open.usage.until ?? open.usage.since + retryMs()) + graceMs()) gone.push("usage");
+  for (const k of USAGE_KINDS) if (open[k] && now >= (open[k].until ?? open[k].since + retryMs()) + graceMs()) gone.push(k);
   return { want, gone };
 }
 
@@ -188,7 +194,7 @@ export function clock(at, now = Date.now()) {
 
 /** What a task's tab says while it waits: "paused until 2:20 PM", "waits on disk space", "waits on `curl ...`". */
 export function waitLabel(wait, now = Date.now()) {
-  if (wait.on === "usage") return wait.until ? `paused until ${clock(wait.until, now)}` : "paused at the usage limit";
+  if (isUsage(wait.on)) return wait.until ? `paused until ${clock(wait.until, now)}` : "paused at the usage limit";
   if (wait.on) return `waits on ${NAMES[wait.on]}`;
   return `waits on ${wait.why ?? `\`${store.clip(wait.check, 40)}\``}`;
 }
@@ -224,7 +230,7 @@ const CLEAR = (kind) => `Already fixed? rollcall blockers clear ${kind}`;
 
 /** What the owner hears of blocker `b`, once. The disk's notice comes from `rollcall clean --low-disk`, with its list. */
 function notice(b, now) {
-  if (b.kind === "usage") return `${(b.text ?? "Claude's usage limit stopped your workers").replace(/\.?$/, ".")} ${b.until ? `rollcall resumes them after ${clock(b.until, now)}.` : `rollcall tries them again every ${Math.round(retryMs() / 60_000)} minutes.`} ${CLEAR("usage")}`;
+  if (isUsage(b.kind)) return `${(b.text ?? (b.kind === "usage" ? "Claude's usage limit stopped your workers" : "Codex's usage limit stopped its workers")).replace(/\.?$/, ".")} ${b.until ? `rollcall resumes them after ${clock(b.until, now)}.` : `rollcall tries them again every ${Math.round(retryMs() / 60_000)} minutes.`} ${CLEAR(b.kind)}`;
   if (b.kind === "billing") return `GitHub would not start jobs over billing${b.text ? `: "${store.clip(b.text, 200)}"` : ""}. Fix it under Billing and plans on GitHub${b.run ? `: rollcall retries by itself, and what waits on it goes on. ${CLEAR("billing")}` : ", then run rollcall blockers clear billing."}`;
   if (b.kind === "memory") return `Memory is low (${b.pct}% free). rollcall closed the test browsers nothing uses; anything that ran out comes back by itself.`;
   if (b.kind === "power") return `The Mac is on battery${b.pct ? ` at ${b.pct}%` : ""}${b.shipping ? " with a ship running: a sleep stalls it until it wakes" : ""}. Plug it in, and what waits on power goes on.`;
@@ -276,7 +282,7 @@ export function diskRunEnded({ freed, found }, now = Date.now()) {
 /** One line per open blocker, for the status line. */
 export function lines(now = Date.now()) {
   return Object.values(openBlockers()).map((b) => {
-    if (b.kind === "usage") return b.until ? `usage limit: workers resume after ${clock(b.until, now)}` : "usage limit: rollcall tries again shortly";
+    if (isUsage(b.kind)) return b.until ? `${b.kind === "usage" ? "" : "Codex "}usage limit: workers resume after ${clock(b.until, now)}` : "usage limit: rollcall tries again shortly";
     if (b.kind === "disk") return `disk: ${b.gb ?? "?"} GB free${b.total ? `, rollcall clean lists ${b.total} it can free` : ""}`;
     if (b.kind === "billing") return b.run ? "GitHub billing refuses jobs: rollcall retries by itself" : "GitHub billing refuses jobs: rollcall blockers clear billing once fixed";
     if (b.kind === "power") return `on battery${b.pct ? ` at ${b.pct}%` : ""}: plug in the Mac`;

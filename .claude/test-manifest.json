@@ -101,7 +101,7 @@
       "dir": ".",
       "runner": "node",
       "tier": "fast",
-      "testCommand": "for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs; do node --check \"$f\" || exit 1; done",
+      "testCommand": "for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs packages/*/src/*/*.mjs; do node --check \"$f\" || exit 1; done",
       "ci": "pr"
     }
   ]
