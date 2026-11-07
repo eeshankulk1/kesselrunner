@@ -45,12 +45,13 @@ export function pending(entries) {
   return calls.filter((c) => !done.has(c.id));
 }
 
-// As tmux.type sends it: no control characters but line breaks and tabs.
-const flat = (s) => String(s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim();
+// As tmux.type sends it: no control characters but line breaks and tabs. Claude Code escapes a tag it finds inside a
+// paste it wraps (`<pasted_content` comes back `<\pasted_content`, its end `<\/pasted_content`), so that backslash goes.
+const flat = (s) => String(s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").replace(/<\\/g, "<").replace(/\s+/g, " ").trim();
 
 /**
- * Whether `prompt`, as a hook or the transcript has it, holds `sent`: Claude Code wraps a long paste in a tag,
- * and what was in the box already goes in front.
+ * Whether `prompt`, as a hook or the transcript has it, holds `sent`: Claude Code wraps a long paste in a tag
+ * (escaping any tag inside it), and what was in the box already goes in front.
  */
 export function sameWords(sent, prompt) {
   const a = flat(sent);

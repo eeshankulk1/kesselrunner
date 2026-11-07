@@ -39,7 +39,8 @@ const QUESTIONS = [{ question: "Which header style?", header: "Style", multiSele
  * holding that text, a draft; "limit <text>" ends its turn on a usage limit, as an API error does: StopFailure and
  * no Stop; "limit-dialog <text>" does too and then shows the limit dialog, which takes no typed line; "error" ends its
  * turn on another API error; "/exit" quits. A file `fake-mode` beside it changes how prompts land: "lost" (seen
- * by nothing), "no-hook" (the transcript has it, the hook failed). A file `fake-trust` puts Claude Code's trust prompt
+ * by nothing), "no-hook" (the transcript has it, the hook failed), "wrap" (wrapped as Claude Code wraps a long paste,
+ * a paste's tag inside it escaped), "reshaped" (reversed: nothing rollcall typed is known again). A file `fake-trust` puts Claude Code's trust prompt
  * first, where no hook runs, Enter means "No, exit" and "y" goes on.
  */
 function fakeClaude(sb) {
@@ -83,7 +84,9 @@ function submit(text) {
   if (mode() === "lost") return;
   if (text === "/stop") { turn = false; hook("Stop"); return; }
   const wakeup = text.startsWith("wakeup ");
-  const said = wakeup ? text.slice(7) : text;
+  const given = wakeup ? text.slice(7) : text;
+  const said = mode() === "wrap" ? '\\n\\n<pasted_content id="1325">\\n' + given.replace(/<(\\/?)pasted_content/g, "<\\\\$1pasted_content") + '\\n</pasted_content id="1325">\\n'
+    : mode() === "reshaped" ? [...given].reverse().join("") : given;
   if (mode() !== "no-hook") hook("UserPromptSubmit", { prompt: said });
   if (turn) { record({ type: "attachment", attachment: { type: "queued_command", prompt: said, origin: { kind: "human" } } }); return; }
   record({ type: "user", message: { role: "user", content: said }, ...(wakeup ? { isMeta: true, promptSource: "system", turnOrigin: "scheduled" } : HUMAN) });
@@ -453,6 +456,42 @@ test("no receipt: the words go out again, three tries, then the owner hears once
   await until(() => times(w, "keep the icon") === 4, { timeout: 8000 });
   await until(() => outbox(w).length === 0, { timeout: 5000 });
   assert.equal(feed(w).filter((l) => /did not reach/.test(l)).length, 1, "one notice");
+  await run.stop();
+});
+
+test("a relayed paste comes back wrapped with its own tag escaped, and still counts as rollcall's: it goes in once and is no line of the owner's in the worker's window", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  await until(() => outbox(w).length === 0, { timeout: 5000 });
+  fakeMode(w, "wrap");
+  const pasted = 'it failed: <pasted_content id="11a4">make: *** Error 127</pasted_content id="11a4">';
+  routed(w.sup.prompt(`@t1 ${pasted}`));
+  await until(() => w.claude.prompts().includes(pasted), { timeout: 5000 });
+  await until(() => outbox(w).length === 0, { timeout: 5000 });
+  const run = watcher(w, { ROLLCALL_RECEIPT_MS: "200", ROLLCALL_WATCH_HELD_MS: "100" });
+  t.after(() => run.proc.kill());
+  await sleep(1000);
+  assert.equal(times(w, pasted), 1, "no second try");
+  assert.equal(homeFile(w, "typed-t1"), null, "its receipt says it is rollcall's");
+  assert.deepEqual(w.task().words.slice(1).map((x) => x.text), [pasted], "the owner's words once, as relayed");
+  await run.stop();
+});
+
+test("words that go in but are never known again stop after six sends, though each one moves the worker, and the owner hears once", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  await until(() => outbox(w).length === 0, { timeout: 5000 });
+  fakeMode(w, "reshaped");
+  routed(w.sup.prompt("@t1 keep the icon"));
+  const run = watcher(w, { ROLLCALL_RECEIPT_MS: "300", ROLLCALL_WATCH_HELD_MS: "100" });
+  t.after(() => run.proc.kill());
+  await until(() => outbox(w).length === 0, { timeout: 20_000 });
+  await until(() => feed(w).some((l) => /stopped typing your words into its worker/.test(l)), { timeout: 5000 });
+  await sleep(1000);
+  assert.equal(times(w, "keep the icon"), 6);
+  assert.equal(feed(w).filter((l) => /stopped typing/.test(l)).length, 1, "one notice");
   await run.stop();
 });
 

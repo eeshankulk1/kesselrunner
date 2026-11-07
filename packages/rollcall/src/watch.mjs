@@ -1083,7 +1083,13 @@ function typeWaiting(h, now) {
     const turnEnded = store.readStatus(h, id).findLast((e) => e.ev === "idle")?.at ?? 0;
     for (const x of settleTyped(t, turnEnded, now)) ownerTypedInWorker(t, x.session, x.text, x.at);
     const r = pump(t, now);
-    for (const x of r.lost) told(h, t, `${label(t)}: ${x.kind === "doorbell" ? "a message from the supervisor" : "your words"} did not reach its worker after three tries. ${x.kind === "doorbell" ? "It stays in its inbox" : "They are on its record"}, and rollcall tries again once the worker moves. Look in ${nameOf(t.id)}'s tab.`, { sound: true });
+    for (const x of r.lost) {
+      const what = x.kind === "doorbell" ? "a message from the supervisor" : "your words";
+      const where = x.kind === "doorbell" ? "It stays in its inbox" : "They are on its record";
+      // One that left the queue: rollcall saw no sign it arrived, though it went in again and again.
+      if (x.gone) told(h, t, `${label(t)}: rollcall stopped typing ${what} into its worker: they went in several times with no sign they arrived. ${where}. Look in ${nameOf(t.id)}'s tab.`, { sound: true });
+      else told(h, t, `${label(t)}: ${what} did not reach its worker after three tries. ${where}, and rollcall tries again once the worker moves. Look in ${nameOf(t.id)}'s tab.`, { sound: true });
+    }
     if ((waiting(h, id).length && workerState(t, now)?.alive) || typedWaiting(h, id).length) soon = true;
   }
   return soon;
