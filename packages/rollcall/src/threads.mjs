@@ -42,7 +42,7 @@ const RESOLVE = `mutation($id: ID!) {
 }`;
 
 /** One GraphQL call through gh: { data } or { err }. `{owner}` and `{repo}` are gh's: the repo of `cwd`. */
-function graphql(cwd, query, fields = {}) {
+export function graphql(cwd, query, fields = {}) {
   const args = ["api", "graphql", "-f", `query=${query}`];
   // -F types numbers and fills gh's placeholders; -f keeps text as text (a body starting with @ is not a file).
   for (const [k, v] of Object.entries(fields)) if (v !== undefined && v !== null) args.push(typeof v === "number" || k === "owner" || k === "name" ? "-F" : "-f", `${k}=${v}`);

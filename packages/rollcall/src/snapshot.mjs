@@ -312,12 +312,56 @@ function patch(snap, a, b) {
   return r.stdout;
 }
 
-/** What turn n changed: { from, to, files, patch }. Turn 0 is the baseline and changed nothing. */
-export function turnDiff(wt, n) {
+/**
+ * What turn n changed: { from, to, files, patch }. Turn 0 is the baseline and changed nothing. `rich`: as richDiff
+ * gives it (renames found, line counts), for a reader such as a front end; otherwise the CLI's plain list.
+ */
+export function turnDiff(wt, n, { rich = false } = {}) {
   const t = turnOf(wt, n);
   const parent = snapGit(wt.snap, ["rev-parse", "-q", "--verify", `${t.sha}^`]).stdout?.trim() || null;
   if (!parent) return { from: null, to: n, files: [], patch: "" };
+  if (rich) return { from: n - 1, to: n, ...richDiff(wt, parent, t.sha) };
   return { from: n - 1, to: n, files: changes(wt.snap, parent, t.sha).map(({ status, path }) => ({ status, path })), patch: patch(wt.snap, parent, t.sha) };
+}
+
+/**
+ * What changed between commits or trees `a` and `b`, for a reader: { files, patch }, renames found. Each file is
+ * { status (git's letter), path, oldPath (a rename or copy only), added, removed } (counts null for a binary file).
+ * Runs in the worktree's snapshot repo, which sees the repo's own objects too; `inWorktree` runs in the worktree
+ * itself, for two commits it has (no snapshot repo needed).
+ */
+export function richDiff(wt, a, b, { inWorktree = false } = {}) {
+  const run = (args) => {
+    const opts = { env: baseEnv(), maxBuffer: 256 * 1024 * 1024 };
+    const r = inWorktree ? gitSync(wt.top, args, opts) : snapGit(wt.snap, args, opts);
+    if (r.status !== 0) throw new Error(`git ${args.join(" ").slice(0, 40)} failed: ${r.stderr.trim()}`);
+    return r.stdout;
+  };
+  const diff = (...more) => run(["diff", "-M", "--no-ext-diff", "--no-textconv", ...more, a, b]);
+  const files = [];
+  const raw = diff("--raw", "-z").split("\0");
+  for (let i = 0; i + 1 < raw.length;) {
+    const m = /^:\d+ \d+ \S+ \S+ ([A-Z])\d*$/.exec(raw[i]);
+    if (!m) { i++; continue; }
+    if (m[1] === "R" || m[1] === "C") { files.push({ status: m[1], path: raw[i + 2], oldPath: raw[i + 1] }); i += 3; }
+    else { files.push({ status: m[1], path: raw[i + 1] }); i += 2; }
+  }
+  // --numstat -z: "added\tremoved\tpath\0", or for a rename "added\tremoved\t\0old\0new\0"; "-" for a binary file.
+  const counts = new Map();
+  const ns = diff("--numstat", "-z").split("\0");
+  for (let i = 0; i < ns.length;) {
+    const m = /^(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(ns[i]);
+    if (!m) { i++; continue; }
+    const c = { added: m[1] === "-" ? null : Number(m[1]), removed: m[2] === "-" ? null : Number(m[2]) };
+    if (m[3] === "") { counts.set(ns[i + 2], c); i += 3; } else { counts.set(m[3], c); i += 1; }
+  }
+  for (const f of files) Object.assign(f, counts.get(f.path) ?? { added: null, removed: null });
+  return { files, patch: diff("--no-color", "--src-prefix=a/", "--dst-prefix=b/") };
+}
+
+/** The worktree's files now as a tree in its snapshot repo: records no turn, and nothing the worker sees changes. */
+export function worktreeNowTree(wt) {
+  return withSnapLock(wt.snap, () => { ensureRepo(wt); return worktreeTree(wt); });
 }
 
 /** What changed from turn n to the worktree now (nothing is recorded). */

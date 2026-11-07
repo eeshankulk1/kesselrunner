@@ -6,12 +6,12 @@
 // safely by requestId, and refuses with a fixed code; attach names what it cannot show.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import { changes } from "../src/api-stream.mjs";
-import { BIN, denied, reason, sandbox, until, write } from "./helpers.mjs";
+import { BIN, denied, git, reason, sandbox, until, write } from "./helpers.mjs";
 
 const SRC = new URL("../src/", import.meta.url).href;
 const WORKER = { env: { ROLLCALL_TASK: "alpha:t1" } };
@@ -71,7 +71,7 @@ test("api version names the interface, its verbs, every action and the ones comi
   assert.equal(v.interface, 1);
   assert.match(String(v.rollcall), /^\d+\.\d+\.\d+/);
   assert.deepEqual(v.verbs, ["version", "snapshot", "stream", "do", "attach"]);
-  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "decision.answer", "question.answer", "review.comment", "review.send", "task.archive", "task.close", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff"]);
+  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "check.log", "decision.answer", "pr.timeline", "question.answer", "repo.items", "review.comment", "review.comments", "review.send", "task.archive", "task.close", "task.diff", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff", "turn.restore", "turns.list"]);
   for (const cli of Object.values(v.actions)) assert.equal(typeof cli, "string");
   assert.deepEqual(v.coming, {}, "plans A and C landed: nothing is still coming");
   const bad = owner(sb, ["api", "frobnicate"]);
@@ -83,7 +83,7 @@ test("api snapshot holds every top-level section and a task's panel fields", (t)
   const { sb } = setup(t, { worktree: true });
   sb.session(sb.main).start();
   const s = snap(sb);
-  assert.deepEqual(Object.keys(s).sort(), ["at", "blockerLines", "blockers", "clients", "decisions", "interface", "queues", "rollcall", "sessions", "supervisors", "tasks", "tmux", "usage"].sort());
+  assert.deepEqual(Object.keys(s).sort(), ["at", "blockerLines", "blockers", "clients", "decisions", "interface", "queues", "rollcall", "sessions", "supervisors", "tasks", "tmux", "usage", "usageOffer"].sort());
   assert.equal(s.interface, 1);
   assert.equal(typeof s.tmux.available, "boolean");
   assert.equal(s.tmux.socket, sb.env.ROLLCALL_TMUX_SOCKET);
@@ -516,7 +516,7 @@ test("plan C through the interface: review comments in the snapshot, review.comm
   assert.deepEqual(snap(sb).tasks.find((x) => x.ref === "alpha:t1").turns, { count: 3, last: 2 });
   const d = act(sb, "turn.diff", { task: "alpha:t1", n: 2 });
   assert.equal(d.ok, true, JSON.stringify(d));
-  assert.deepEqual(d.result.files, [{ status: "A", path: "gen/out.js" }]);
+  assert.deepEqual(d.result.files, [{ status: "A", path: "gen/out.js", added: 1, removed: 0 }]);
   assert.match(d.result.patch, /\+generated/);
   assert.equal(d.result.truncated, false);
   // Read-only: a requestId repeat runs it again rather than replay a stored copy.
@@ -563,4 +563,238 @@ test("plan A in the interface: a task's runtime in the snapshot; archive shows w
   assert.equal(off.ok, true, JSON.stringify(off));
   assert.equal(off.result.view.runtime.spotlit, null);
   assert.ok(!existsSync(join(sb.main, "notes.md")));
+});
+
+// ---------------------------------------------------------------- review and ship reads (cockpit plan 2)
+
+test("task.diff against main, committed and uncommitted: renames found, line counts, untracked files in, ignored ones out", (t) => {
+  const { sb } = setup(t, { worktree: true });
+  const wt = record(sb).worktree;
+  write(join(wt, "src/c.js"), "c1\nc2\n");
+  git(wt, "mv", "src/b.js", "src/renamed.js");
+  git(wt, "add", ".");
+  git(wt, "commit", "-qm", "committed work");
+  write(join(wt, "src/a.js"), "src/a.js\nmore\n");
+  write(join(wt, "new.txt"), "untracked\n");
+  write(join(wt, ".gitignore"), "ignored.log\n");
+  write(join(wt, "ignored.log"), "noise\n");
+  const files = (r) => r.result.files.map((f) => [f.status, f.path, f.oldPath ?? null, f.added, f.removed]).sort((a, b) => a[1].localeCompare(b[1]));
+
+  const base = act(sb, "task.diff", { task: "alpha:t1" });
+  assert.equal(base.ok, true, JSON.stringify(base));
+  assert.equal(base.result.against, "base");
+  assert.equal(base.result.base, "main");
+  assert.equal(base.result.from, git(sb.main, "rev-parse", "origin/main"));
+  assert.equal(base.result.to, "worktree");
+  assert.deepEqual(files(base), [
+    ["A", ".gitignore", null, 1, 0], ["A", "new.txt", null, 1, 0], ["M", "src/a.js", null, 1, 0], ["A", "src/c.js", null, 2, 0], ["R", "src/renamed.js", "src/b.js", 0, 0],
+  ]);
+  assert.match(base.result.patch, /^\+more$/m);
+  assert.doesNotMatch(base.result.patch, /noise/);
+  assert.equal(base.result.truncated, false);
+
+  const committed = act(sb, "task.diff", { task: "alpha:t1", against: "committed" });
+  assert.equal(committed.result.to, git(wt, "rev-parse", "HEAD"));
+  assert.deepEqual(files(committed), [["A", "src/c.js", null, 2, 0], ["R", "src/renamed.js", "src/b.js", 0, 0]]);
+
+  const unc = act(sb, "task.diff", { task: "alpha:t1", against: "uncommitted" });
+  assert.equal(unc.result.from, git(wt, "rev-parse", "HEAD"));
+  assert.deepEqual(files(unc), [["A", ".gitignore", null, 1, 0], ["A", "new.txt", null, 1, 0], ["M", "src/a.js", null, 1, 0]]);
+  assert.equal(git(wt, "status", "--porcelain").includes("?? new.txt"), true, "the worker's index is untouched");
+
+  assert.equal(act(sb, "task.diff", { task: "alpha:t1", against: "theirs" }).error.code, "bad-payload");
+  assert.equal(act(sb, "task.diff", { task: "alpha:t9" }).error.code, "not-found");
+});
+
+test("turns.list and turn.restore: the turns with their files, a restore puts files back, and its undo turn puts them back again", (t) => {
+  const { sb } = setup(t, { worktree: true });
+  const wt = record(sb).worktree;
+  const take = () => { const r = spawnSync(process.execPath, [BIN, "turns", "take"], { cwd: wt, encoding: "utf8", env: { ...sb.env, ROLLCALL_SNAPSHOTS: "1" } }); assert.equal(r.status, 0, r.stderr); };
+  assert.deepEqual(act(sb, "turns.list", { task: "alpha:t1" }).result.turns, []);
+  write(join(wt, "src/a.js"), "first\n");
+  take();
+  write(join(wt, "src/a.js"), "second\n");
+  take();
+  const list = act(sb, "turns.list", { task: "alpha:t1" }).result.turns;
+  assert.deepEqual(list.map((x) => [x.n, x.kind, x.files, x.restored]), [
+    [0, "baseline", [], null], [1, "turn", [{ status: "M", path: "src/a.js" }], null], [2, "turn", [{ status: "M", path: "src/a.js" }], null],
+  ]);
+  assert.equal(typeof list[1].at, "number");
+
+  // turn.diff now counts lines.
+  assert.deepEqual(act(sb, "turn.diff", { task: "alpha:t1", n: 2 }).result.files, [{ status: "M", path: "src/a.js", added: 1, removed: 1 }]);
+
+  const back = act(sb, "turn.restore", { task: "alpha:t1", n: 1 });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(back.result.restored, 1);
+  assert.equal(readFileSync(join(wt, "src/a.js"), "utf8"), "first\n");
+  assert.match(back.result.message, /^restored to turn 1: 1 file/);
+  assert.equal(typeof back.result.view, "object");
+  const undo = act(sb, "turn.restore", { task: "alpha:t1", n: back.result.undo });
+  assert.equal(undo.ok, true, JSON.stringify(undo));
+  assert.equal(readFileSync(join(wt, "src/a.js"), "utf8"), "second\n");
+  // The state it replaced was turn 2 already, so no before-restore turn was needed: undo names turn 2.
+  assert.equal(back.result.undo, 2);
+  assert.deepEqual(act(sb, "turns.list", { task: "alpha:t1" }).result.turns.slice(3).map((x) => [x.n, x.kind, x.restored]), [[3, "restored", 1], [4, "restored", 2]]);
+  assert.equal(act(sb, "turn.restore", { task: "alpha:t1", n: 99 }).error.code, "not-found");
+  assert.equal(act(sb, "turn.restore", { task: "alpha:t1" }).error.code, "bad-payload");
+});
+
+test("review.comments: where each comment sits now, moved with its lines or null once they are gone", (t) => {
+  const { sb } = setup(t, { worktree: true });
+  const wt = record(sb).worktree;
+  write(join(wt, "src/a.js"), "one\ntwo\nthree\n");
+  assert.equal(act(sb, "review.comment", { task: "alpha:t1", file: "src/a.js", line: 2, text: "rename" }).ok, true);
+  assert.equal(act(sb, "review.comment", { task: "alpha:t1", file: "src/a.js", line: 3, text: "drop" }).ok, true);
+  let c = act(sb, "review.comments", { task: "alpha:t1" }).result.comments;
+  assert.deepEqual(c.map((x) => [x.n, x.state, x.now]), [[1, "pending", { file: "src/a.js", line: 2, end: 2, moved: false }], [2, "pending", { file: "src/a.js", line: 3, end: 3, moved: false }]]);
+  write(join(wt, "src/a.js"), "zero\none\ntwo\n");
+  c = act(sb, "review.comments", { task: "alpha:t1" }).result.comments;
+  assert.deepEqual(c[0].now, { file: "src/a.js", line: 3, end: 3, moved: true });
+  assert.equal(c[1].now, null);
+  assert.match(c[1].stale, /no longer in src\/a\.js/);
+});
+
+/** A fake gh for the ship reads: answers from FAKE_GH (JSON) and logs each call. */
+function fakeGh(sb, state) {
+  const file = join(sb.root, "gh-state.json");
+  const bin = join(sb.root, "fake-gh.mjs");
+  write(file, JSON.stringify(state));
+  write(bin, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const s = JSON.parse(readFileSync(${JSON.stringify(file)}, "utf8"));
+const a = process.argv.slice(2);
+(s.calls ??= []).push(a);
+writeFileSync(${JSON.stringify(file)}, JSON.stringify(s));
+const out = (o) => { process.stdout.write(typeof o === "string" ? o : JSON.stringify(o)); process.exit(0); };
+if (s.fail) { process.stderr.write(s.fail); process.exit(1); }
+const q = a.find((x) => x.startsWith("query=")) ?? "";
+if (a[0] === "api" && q.includes("reviewThreads")) out({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: s.threads ?? [] } } } } });
+if (a[0] === "api" && q.includes("defaultBranchRef")) out({ data: { repository: s.repository } });
+if (a[0] === "run" && a.includes("--log-failed")) out(s.failedLog ?? "");
+if (a[0] === "run" && a.includes("--log")) out(s.wholeLog ?? "");
+if (a[0] === "issue") out(s.issues ?? []);
+if (a[0] === "pr" && a[1] === "list") out(s.prs ?? []);
+process.stderr.write("fake gh: no answer for " + a.join(" "));
+process.exit(1);
+`);
+  spawnSync("chmod", ["+x", bin]);
+  return { env: { ROLLCALL_GH: bin }, calls: () => JSON.parse(readFileSync(file, "utf8")).calls ?? [], set: (more) => write(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), ...more })) };
+}
+
+const REPOSITORY = {
+  pullRequest: {
+    number: 7, url: "https://github.com/o/r/pull/7", title: "header polish", state: "OPEN", isDraft: false, mergeStateStatus: "CLEAN",
+    headRefOid: "abc123", baseRefName: "main", createdAt: "2026-11-06T10:00:00Z", mergedAt: null, closedAt: null,
+    reviews: { nodes: [{ author: { login: "owner", __typename: "User" }, state: "CHANGES_REQUESTED", submittedAt: "2026-11-06T10:20:00Z", url: "https://github.com/o/r/pull/7#r1" }] },
+    commits: { nodes: [{ commit: {
+      statusCheckRollup: { contexts: { nodes: [
+        { __typename: "CheckRun", databaseId: 555, name: "rollcall", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-11-06T10:01:00Z", completedAt: "2026-11-06T10:09:00Z", detailsUrl: "https://github.com/o/r/actions/runs/9/job/555", checkSuite: { workflowRun: { workflow: { name: "Check" } } } },
+        { __typename: "CheckRun", databaseId: 556, name: "Scripts", status: "IN_PROGRESS", conclusion: null, startedAt: "2026-11-06T10:01:00Z", completedAt: null, detailsUrl: "https://github.com/o/r/actions/runs/9/job/556", checkSuite: { workflowRun: { workflow: { name: "Check" } } } },
+        { __typename: "StatusContext", context: "attest", state: "SUCCESS", targetUrl: "https://example.com/attest", createdAt: "2026-11-06T10:02:00Z" },
+      ] } },
+      deployments: { nodes: [{ environment: "Preview", createdAt: "2026-11-06T10:03:00Z", state: "ACTIVE", latestStatus: { state: "SUCCESS", environmentUrl: "https://preview.example.com", logUrl: "https://vercel.com/log", createdAt: "2026-11-06T10:05:00Z" } }] },
+    } }] },
+  },
+  defaultBranchRef: { name: "main", target: { oid: "def456", statusCheckRollup: { contexts: { nodes: [
+    { __typename: "CheckRun", databaseId: 1, name: "rollcall", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/o/r/actions/runs/8/job/1" },
+  ] } } } },
+};
+const THREADS = [
+  { id: "PRRT_1", isResolved: false, isOutdated: false, path: "src/a.js", line: 2, comments: { nodes: [
+    { author: { login: "coderabbitai", __typename: "Bot" }, body: "Consider a name", url: "https://github.com/o/r/pull/7#d1", createdAt: "2026-11-06T10:10:00Z" },
+    { author: { login: "worker", __typename: "User" }, body: "Renamed", url: "https://github.com/o/r/pull/7#d2", createdAt: "2026-11-06T10:15:00Z" },
+  ] } },
+];
+
+test("pr.timeline and check.log through gh: checks with times and ids, deployments, threads, one event list, the queue and main's state", (t) => {
+  const { sb, sup } = setup(t, { worktree: true });
+  assert.equal(act(sb, "pr.timeline", { task: "alpha:t1" }).error.code, "not-found", "no PR yet");
+  assert.equal(sup.cli(["task", "set", "t1", "--state", "pr-open", "--pr", "https://github.com/o/r/pull/7"]).code, 0);
+  const gh = fakeGh(sb, { repository: REPOSITORY, threads: THREADS, failedLog: "", wholeLog: "step 1\nboom\n" });
+  const r = act(sb, "pr.timeline", { task: "alpha:t1" }, gh);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const tl = r.result;
+  assert.deepEqual(tl.pr, { url: "https://github.com/o/r/pull/7", number: 7, title: "header polish", state: "OPEN", draft: false, mergeState: "CLEAN", headSha: "abc123", baseBranch: "main", createdAt: Date.parse("2026-11-06T10:00:00Z"), mergedAt: null });
+  assert.deepEqual(tl.checks.map((c) => [c.name, c.workflow, c.state, c.conclusion, c.id]), [["rollcall", "Check", "completed", "failure", 555], ["Scripts", "Check", "in_progress", null, 556], ["attest", null, "completed", "success", null]]);
+  assert.equal(tl.checks[0].completedAt - tl.checks[0].startedAt, 8 * 60_000);
+  assert.deepEqual(tl.deployments, [{ environment: "Preview", state: "success", url: "https://preview.example.com", logUrl: "https://vercel.com/log", at: Date.parse("2026-11-06T10:05:00Z") }]);
+  assert.deepEqual(tl.threads.map((x) => [x.id, x.file, x.line, x.author, x.bot, x.body, x.resolved, x.replies]), [["PRRT_1", "src/a.js", 2, "coderabbitai", true, "Consider a name", false, 1]]);
+  assert.deepEqual(tl.events.map((e) => e.kind), ["opened", "check", "deploy", "check", "thread", "review"]);
+  assert.equal(tl.queue, null);
+  assert.deepEqual(tl.main, { branch: "main", sha: "def456", state: "failing", failed: [{ name: "rollcall", link: "https://github.com/o/r/actions/runs/8/job/1" }] });
+
+  // Its place in the merge queue, and the lander's news among the events.
+  const key = record(sb).repo.key;
+  node(sb, `import * as store from "${SRC}store.mjs"; store.updateQueue(${JSON.stringify(key)}, (q) => { q.entries["5"] = { pr: 5, branch: "x", state: "waiting", at: 1 }; q.entries["7"] = { pr: 7, branch: "y", state: "waiting", at: 2 }; q.outcomes.push({ pr: 7, branch: "y", kind: "conflict", at: Date.parse("2026-11-06T10:30:00Z"), text: "conflicts with main" }); });`);
+  const queued = act(sb, "pr.timeline", { task: "alpha:t1" }, gh).result;
+  assert.deepEqual(queued.queue, { position: 2, length: 2, state: "waiting", line: null });
+  assert.deepEqual(queued.events.at(-1), { at: Date.parse("2026-11-06T10:30:00Z"), kind: "queue", text: "conflict: conflicts with main", url: null });
+
+  // The failed steps' log, falling back to the whole job's when gh has none.
+  const log = act(sb, "check.log", { task: "alpha:t1", id: 555 }, gh);
+  assert.equal(log.ok, true, JSON.stringify(log));
+  assert.deepEqual([log.result.name, log.result.log, log.result.truncated], ["rollcall", "step 1\nboom\n", false]);
+  assert.ok(gh.calls().some((a) => a.join(" ") === "run view --job 555 --log-failed"));
+  gh.set({ failedLog: "only the failed step\n" });
+  assert.equal(act(sb, "check.log", { task: "alpha:t1", name: "rollcall" }, gh).result.log, "only the failed step\n");
+  assert.equal(act(sb, "check.log", { task: "alpha:t1", name: "attest" }, gh).error.code, "refused", "a status has no run log");
+  assert.equal(act(sb, "check.log", { task: "alpha:t1", id: 999 }, gh).error.code, "not-found");
+  assert.equal(act(sb, "check.log", { task: "alpha:t1" }, gh).error.code, "bad-payload");
+
+  gh.set({ fail: "To get started with GitHub CLI, please run:  gh auth login" });
+  assert.equal(act(sb, "pr.timeline", { task: "alpha:t1" }, gh).error.code, "unavailable");
+  assert.equal(act(sb, "pr.timeline", { task: "alpha:t1" }, { env: { ROLLCALL_GH: join(sb.root, "no-such-gh") } }).error.code, "unavailable");
+});
+
+test("repo.items: open issues and PRs newest first, and origin's branches without the default one", (t) => {
+  const { sb } = setup(t);
+  git(sb.main, "push", "-q", "origin", "main:feat/other");
+  const gh = fakeGh(sb, {
+    issues: [{ number: 3, title: "old", url: "u3", author: { login: "a" }, labels: [{ name: "bug" }], updatedAt: "2026-11-01T00:00:00Z" }, { number: 4, title: "new", url: "u4", author: { login: "b" }, labels: [], updatedAt: "2026-11-05T00:00:00Z" }],
+    prs: [{ number: 9, title: "pr", url: "u9", headRefName: "feat/other", author: { login: "c" }, isDraft: true, updatedAt: "2026-11-04T00:00:00Z" }],
+  });
+  const r = act(sb, "repo.items", { repo: sb.main }, gh);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.result.repo.name, "origin");
+  assert.deepEqual(r.result.issues.map((i) => [i.number, i.author, i.labels]), [[4, "b", []], [3, "a", ["bug"]]]);
+  assert.deepEqual(r.result.prs.map((p) => [p.number, p.branch, p.draft]), [[9, "feat/other", true]]);
+  assert.deepEqual(r.result.branches.map((b) => b.name), ["feat/other"]);
+  assert.equal(typeof r.result.branches[0].at, "number");
+  assert.equal(act(sb, "repo.items", { repo: sb.root }, gh).error.code, "bad-payload", "not a repo");
+});
+
+test("task.run log: the tail of a run action's log, then only what is new from the offset it returned", (t) => {
+  const { sb } = setup(t, { worktree: true });
+  const wt = record(sb).worktree;
+  assert.equal(act(sb, "task.run", { task: "alpha:t1", verb: "log", name: "web" }).error.code, "not-found");
+  const dir = node(sb, `import { actionsDir } from "${SRC}checkout.mjs"; process.stdout.write(actionsDir(${JSON.stringify(wt)}));`);
+  write(join(dir, "web.log"), "x".repeat(70 * 1024));
+  const first = act(sb, "task.run", { task: "alpha:t1", verb: "log", name: "web" });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.result.log.length, 64 * 1024);
+  assert.equal(first.result.truncated, true);
+  assert.equal(first.result.offset, 70 * 1024);
+  writeFileSync(join(dir, "web.log"), "ready\n", { flag: "a" });
+  const next = act(sb, "task.run", { task: "alpha:t1", verb: "log", name: "web", offset: first.result.offset });
+  assert.deepEqual([next.result.log, next.result.truncated, next.result.size], ["ready\n", false, 70 * 1024 + 6]);
+  assert.equal(act(sb, "task.run", { task: "alpha:t1", verb: "log", name: "../x" }).error.code, "bad-payload");
+});
+
+test("snapshot: a task's tokens, and the usage offer when one plan nears its limit and the other has room", (t) => {
+  const { sb } = setup(t);
+  const view = () => snap(sb).tasks.find((x) => x.ref === "alpha:t1");
+  assert.equal(view().tokens, null);
+  write(join(sb.home, "_supervisors", "alpha", "context-t1.json"), JSON.stringify({ pct: 12, tokens: 24000, size: 200000, total: 90000 }));
+  assert.deepEqual(view().tokens, { context: 24000, size: 200000, total: 90000 });
+
+  assert.equal(snap(sb).usageOffer, null);
+  const now = Date.now();
+  write(join(sb.home, "usage-claude.json"), JSON.stringify({ fiveHour: { pct: 95, resetsAt: now + 3600_000 }, weekly: { pct: 40, resetsAt: now + 86400_000 }, at: now }));
+  write(join(sb.home, "usage-codex.json"), JSON.stringify({ primary: { pct: 10, resetsAt: now + 3600_000, windowMins: 300 }, secondary: null, plan: "plus", at: now }));
+  const offer = snap(sb).usageOffer;
+  assert.ok(offer, "an offer");
+  assert.deepEqual([offer.from, offer.to, offer.pct, offer.tasks], ["claude", "codex", 95, ["alpha:t1"]]);
+  assert.match(offer.text, /Claude/);
+  assert.match(offer.text, /Codex/);
 });
