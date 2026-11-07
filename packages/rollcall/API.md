@@ -2,7 +2,7 @@
 
 One versioned way in for every front end: the cockpit Mac and iOS apps (written in Swift, which run the `rollcall` CLI), scripts, and the terminal Falcon's own actions. It covers what a front end draws (a snapshot), its changes (a stream), every action the Falcon can take, and what a front end runs to show a session's real terminal. A front end shows each worker's real CLI in a terminal and draws its panels from this state; it never re-renders the chat.
 
-The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface) and `src/clients.mjs` (open front ends and the notices log).
+The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-reads.mjs` (the review and ship reads), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface) and `src/clients.mjs` (open front ends and the notices log).
 
 ```
 rollcall api version
@@ -58,6 +58,7 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `blockerLines` | string[] | The same, one plain line each, as the owner reads them |
 | `decisions` | array | What waits on the owner beyond any one task: `{ n, text, where, home, from, at }`, `from` a task ref or null |
 | `usage` | object | The usage meter, as `rollcall usage --json` prints it: `{ claude: { fiveHour, weekly, at } \| null, codex: { primary, secondary, plan, at } \| null }`, each window `{ pct, resetsAt }` (ms). A plan with no fresh reading is null |
+| `usageOffer` | object \| null | One plan near its limit while the other has room: `{ from, to, pct, resetsAt, window, room, tasks, text }`. `from` and `to` are harnesses (`claude`, `codex`); `pct`, `resetsAt` and `window` (`five-hour`, `weekly`...) are the full plan's fullest window; `room` is the other plan's percent; `tasks` are refs of the open tasks waiting on the full plan (held by its limit, not started, or parked or stopped while worked); `text` is the offer in one line. The same rule and numbers as the watcher's news. On the owner's yes, send `task.move` with `harness: to` for each task. Null when there is nothing to offer |
 | `clients` | array | Front ends following rollcall now: `{ client, pid, notifies, at }` |
 
 ### A supervisor
@@ -109,6 +110,7 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `pr` | object \| null | Its PR (below) |
 | `comments` | array | The owner's line comments on its diff, oldest first: `{ n, state, file, line, end, text, by, at, sentAt, reply, resolved }`. `state`: `pending` (not sent yet), `sent`, `answered` (the worker replied and left it open for the owner) or `resolved`. `file`, `line` and `end` are where it was written; `rollcall task comments <task> --json` says where each sits now. `reply` and `resolved` are `{ at, by, text }` (`resolved` also has `how`: `fixed` or `answered`) |
 | `turns` | `{ count, last }` \| null | Its worktree's turn snapshots: how many, and the last turn's number; `turn.diff` takes any `n` from 0 to `last`. Null before the first. A stream sees a new turn at its next beat (`ROLLCALL_API_BEAT_MS`), since snapshots are written outside the files it watches |
+| `tokens` | `{ context, size, total }` \| null | Its worker's context tokens now, the window's size, and on Codex the thread's total so far (each a number or null); null before its worker reported any |
 | `stage` | `{ name, at }` \| null | The ship step running now |
 | `wait` | object \| null | A wait it moved out of its worker (`task wait-for`): `{ on, check, why, every, at, label }`, `label` as its tab shows it |
 | `worker` | object \| null | Its current worker (below); null before one starts, or once its session ended |
@@ -152,7 +154,7 @@ Reading these takes no lock and starts no process, so a front end can poll them.
 
 ### Coming
 
-No plan in flight adds state now. A later one adds its fields here, as added fields (no version bump).
+No plan in flight adds state now. A later one adds its fields here, as added fields (no version bump). The review and ship reads (cockpit's plan 2) added `tokens` to a task and `usageOffer` to the snapshot.
 
 ## `rollcall api stream [--home <h>] [--client <name>] [--notifies]`
 
@@ -189,6 +191,7 @@ How it works: it wakes on a file change in the supervisors' homes, the machine's
 | `blockerLines.changed` | `blockerLines` | The same, as plain lines |
 | `tmux.changed` | `tmux` | tmux came or went |
 | `decisions.changed` | `decisions` | The whole new list |
+| `usageOffer.changed` | `usageOffer` | The whole new value (null once there is nothing to offer) |
 | `usage.changed` | `usage` | A plan's reading moved (the stream reads it on its beat) |
 | `clients.changed` | `clients` | A front end opened or closed a stream |
 | `notice` | `title`, `text`, `sound` | A notification for the owner |
@@ -250,13 +253,20 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `task.move` | `task`, and `to` (a supervisor) or `harness` (`claude` or `codex`) | `moved`, `already`, `task` (the new ref, for `to`), `harness` and `view` (for `harness`) | `rollcall task move <task> --to <supervisor>` or `--harness <h>` |
 | `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already` | `rollcall task decisions done <n> "<answer>"` |
 | `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
+| `review.comments` | `task` | `comments` (below) | `rollcall task comments <task> --json` |
 | `review.comment` | `task`, `file` (relative to its worktree, or absolute inside it), `line`, optional `end`, `text`, optional `send` (bool) | `comment` (its number), `sent`, `message`, `view` | `rollcall task comment <task> <file>:<line>[-<end>] "<text>"` |
 | `review.send` | `task` | `message`, `view` | `rollcall task comments <task> send` |
-| `turn.diff` | `task`, `n` | `from`, `to`, `files` (`{ status, path }`), `patch`, `truncated` | `rollcall turns diff <n> <task> --json` |
+| `turn.diff` | `task`, `n` | `from`, `to`, `files` (below), `patch`, `truncated` | `rollcall turns diff <n> <task> --json` |
+| `turns.list` | `task` | `turns`: `{ n, at, session, kind, files, restored }`, oldest first | `rollcall turns <task> --json` |
+| `turn.restore` | `task`, `n` | `restored`, `undo`, `files`, `message`, `view` | `rollcall turns restore <n> <task>` |
+| `task.diff` | `task`, optional `against` (`base`, `committed`, `uncommitted`) | `against`, `from`, `to`, `base`, `files`, `patch`, `truncated` | `git diff` in its worktree |
+| `pr.timeline` | `task` | `pr`, `checks`, `deployments`, `threads`, `events`, `queue`, `main`, `at` (below) | `gh` |
+| `check.log` | `task`, and `id` or `name` | `name`, `id`, `url`, `log`, `truncated` | `gh run view --job <id> --log-failed` |
+| `repo.items` | `repo` (a path in a repo) | `repo`, `issues`, `prs`, `branches` | `gh issue list`, `gh pr list` |
 | `task.archive` | `task`, optional `confirm: true` | without `confirm`: `archived: false`, `plan` (what goes: `worktree`, `kb`, `uncommitted`, `unpushed`, `actions`, `ports`, `spotlit`, `teardown`, and `lines` to show the owner), `confirmWith`; with it: `archived`, `already`, `message`, `view` | `rollcall task archive <task>`, then `--yes` |
 | `task.restore` | `task` | `restored`, `already`, `message` (says when its branch moved on origin), `view` | `rollcall task restore <task>` |
 | `task.spotlight` | `task`, `on` (true or false), optional `force: true` with `on: false` | `spotlit`, `message`, `view` | `rollcall task spotlight <task> [--off [--force]]` |
-| `task.run` | `task`, `verb` (`list`, `start`, `stop`, `restart`), `name` (a run action, or `all`) for all but `list` | `view` (its `runtime.actions` and `previews`) | `rollcall task run <task> <verb> <name>` |
+| `task.run` | `task`, `verb` (`list`, `start`, `stop`, `restart`, `log`), `name` (a run action, or `all`) for all but `list`; for `log`, optional `offset` | `view` (its `runtime.actions` and `previews`); for `log`: `name`, `log`, `offset`, `size`, `truncated`, `more` | `rollcall task run <task> <verb> <name>` |
 
 Notes on each:
 
@@ -267,7 +277,24 @@ Notes on each:
 - `task.stop` ends the worker; the task stays open and nothing resumes it unasked.
 - `task.close`, `task.move` and `decision.answer` answer `already: true` when it was done before, so a repeat from a second front end is harmless.
 - `review.comment` leaves a comment pending, as the owner's; `review.send` (or `send: true`) sends every pending one to the worker as one message, which it answers or resolves one by one (`comments` in the view shows how far). `review.send` with nothing pending refuses. With `send: true` the comment is saved even when the send fails: the result is then `sent: false` with the reason in `message`, so a retry does not add it twice.
-- `turn.diff`: what turn `n` changed against the turn before it; turn 0 is the baseline and changed nothing. `files` is always whole; `patch` stops at 1 MB (`truncated: true`), and `rollcall turns diff` prints all of it. It reads only, so a `requestId` keeps no copy of it. PR review threads stay in the ship loop (`rollcall pr threads`), not here.
+- `turn.diff`: what turn `n` changed against the turn before it; turn 0 is the baseline and changed nothing. `files` is always whole; `patch` stops at 1 MB (`truncated: true`), and `rollcall turns diff` prints all of it.
+- **A diff's files** (`turn.diff`, `task.diff`): `{ status, path, oldPath, added, removed }`. `status` is git's letter (`A`, `M`, `D`, `R`, `C`, `T`); renames are found (`git diff -M`), and `oldPath` is there for a rename or copy only. `added` and `removed` count lines, null for a binary file. The `patch` finds renames too.
+- `task.diff`: `base` (the default) runs from where its branch left the default branch (the merge base with `origin/<default>`, else the local default branch, else the task's `base`) to its worktree's files now: committed, uncommitted and untracked, ignored files left out. `committed` runs from there to HEAD; `uncommitted` from HEAD to its files now. `from` and `to` are SHAs, or `"worktree"`; `base` names the default branch. Reading the files now writes nothing the worker sees (the snapshot repo's own index, as a turn does). A task with no worktree (archived, no repo) is `refused`.
+- `turns.list`: `kind` is `baseline` (turn 0), `turn`, `before-restore` (the state a restore replaced) or `restored`; for those two, `restored` is the turn restored to, else null. `files` is `{ status, path }`.
+- `turn.restore` puts the worktree's files back to turn `n` (HEAD, branch and index stay). It is `refused` while the task's worker is mid-turn, and `not-found` for no such turn. `undo` is the turn that holds the state it replaced: `turn.restore` with `n: undo` puts it back. When nothing changed since the last turn, `undo` is that turn.
+- `review.comments`: the task's comments as in the snapshot, each with `now: { file, line, end, moved }` (where its lines sit now; `moved` when they moved) or `now: null` once they are gone, with `stale` saying why (else null), `delivered` (a sent comment reached its worker), `hunk` and `sentAt`.
+- `pr.timeline` reads GitHub now (one GraphQL call, and one for the threads). A task with no PR is `not-found` ("no PR"); no `gh`, or `gh` logged out, is `unavailable`.
+  - `pr`: `{ url, number, title, state, draft, mergeState, headSha, baseBranch, createdAt, mergedAt }`.
+  - `checks`: every check run and commit status on the head commit: `{ name, workflow, state, conclusion, startedAt, completedAt, link, id }`. `state` is `queued`, `in_progress` or `completed`; `conclusion` is GitHub's in lowercase (`success`, `failure`, `cancelled`, `skipped`, `neutral`, `timed_out`, `action_required`) or null. `id` is the GitHub Actions job id (its check run id), null for a commit status or a check from another app.
+  - `deployments`: the head commit's, newest status each: `{ environment, state, url, logUrl, at }`.
+  - `threads`: every review thread, resolved ones included: `{ id, file, line, author, bot, body, resolved, outdated, url, at, replies, comments }`; `comments` is the whole thread, `{ author, bot, body, url, at }`.
+  - `events`: one time-sorted list for a timeline, `{ at, kind, text, url }`, `kind` one of `opened`, `check` (a check finished), `deploy`, `review`, `thread`, `queue` (the lander's news for this PR), `merged`, `closed`.
+  - `queue`: `{ position, length, state, line }` while it is in its repo's merge queue (`position` from 1), else null.
+  - `main`: the default branch's head on GitHub, `{ branch, sha, state, failed }`, `state` `passing`, `pending`, `failing` or `none`; `failed` is `{ name, link }`. Main is red when `state` is `failing`.
+- `check.log`: the log of one check on the PR's head, by `id` from `pr.timeline` or by `name` (the latest of that name): its failed steps, else the whole job's log, the last 512 KB (`truncated: true` when cut). A check that is not an Actions job is `refused`, with its link in the message.
+- `repo.items`: open issues and PRs, up to 100 each, newest updated first (`issues`: `{ number, title, url, author, labels, updatedAt }`; `prs`: `{ number, title, url, branch, author, draft, updatedAt }`), and origin's branches, up to 100, newest commit first, the default branch left out (`{ name, at }`; it fetches origin first, and a failed fetch keeps what this machine had). For the new-task picker: `task.start` takes `issue`, `pr` or `branch`.
+- `task.run` with `verb: "log"`: a run action's log from `offset` (default: its last 64 KB) to its end, at most 256 KB a call; `offset` in the result is where the next call starts for only what is new, and `more` says over 256 KB were left. `truncated`: it started past what was asked (the default tail, or an `offset` past the end of a log that started again, which reads from its start).
+- The reads (`task.diff`, `turns.list`, `review.comments`, `pr.timeline`, `check.log`, `repo.items`, `turn.diff`) change nothing, so a `requestId` keeps no copy of them.
 
 - `task.archive` removes nothing until the owner has seen the plan: the first call returns it, and the front end shows `plan.lines` and sends `confirmWith` on the owner's yes. Archive, restore and spotlight are refused from an agent session, as `api do` is.
 

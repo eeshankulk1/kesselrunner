@@ -476,27 +476,39 @@ function followSpotlights(h) {
  * runs on Codex or Codex was read before. Returns whether it queued news.
  */
 function usageOffers(h, views, seen, now) {
-  const all = fullest(now);
-  const full = all.filter((w) => w.pct >= nearPct());
   // Codex is asked only while it matters: a task runs there, or Claude is near its limit and Codex may take tasks.
-  if (views.some((v) => isOpen(v.t) && harnessOf(v.t) === "codex") || full.some((w) => w.harness === "claude")) void refreshCodex(now);
-  if (!full.length) return false;
+  if (views.some((v) => isOpen(v.t) && harnessOf(v.t) === "codex") || fullest(now).some((w) => w.harness === "claude" && w.pct >= nearPct())) void refreshCodex(now);
   let queued = false;
-  for (const w of full) {
-    const other = w.harness === "claude" ? "codex" : "claude";
-    const room = all.find((x) => x.harness === other);
-    if (!room || room.pct >= nearPct()) continue; // no room known on the other plan: nothing to offer
-    for (const { t, w: worker } of views) {
-      if (!isOpen(t) || harnessOf(t) !== w.harness) continue;
-      const waits = !t.sessions?.length || trouble.isUsage(t.wait?.on) || (t.state === "working" && (worker?.parked || worker?.stopped));
+  for (const { window: w, other, room, tasks } of usageMoves(views, now)) {
+    for (const t of tasks) {
       const key = `usage:${t.id}:${w.harness}:${w.resetsAt ?? w.name}`;
-      if (!waits || seen[key]) continue;
+      if (seen[key]) continue;
       seen[key] = now;
       store.enqueueWake(h, { task: t.id, kind: "usage-near", harness: w.harness, other, window: w.name, pct: w.pct, resetsAt: w.resetsAt, room: room.pct });
       queued = true;
     }
   }
   return queued;
+}
+
+/**
+ * The moves worth offering now: for each plan near its limit while the other has room, the open tasks that wait on
+ * it (held by its limit, not started yet, or parked or stopped while worked). `views`: [{ t, w }] as view() gives
+ * them. Returns [{ window (a fullest() entry), other, room (the other plan's fullest window), tasks }], none empty.
+ * The watcher turns them into news; the front-end snapshot shows the first as its usage offer.
+ */
+export function usageMoves(views, now = Date.now()) {
+  const all = fullest(now);
+  const out = [];
+  for (const w of all.filter((x) => x.pct >= nearPct())) {
+    const other = w.harness === "claude" ? "codex" : "claude";
+    const room = all.find((x) => x.harness === other);
+    if (!room || room.pct >= nearPct()) continue; // no room known on the other plan: nothing to offer
+    const tasks = views.filter(({ t, w: worker }) => isOpen(t) && harnessOf(t) === w.harness
+      && (!t.sessions?.length || trouble.isUsage(t.wait?.on) || (t.state === "working" && (worker?.parked || worker?.stopped)))).map((v) => v.t);
+    if (tasks.length) out.push({ window: w, other, room, tasks });
+  }
+  return out;
 }
 
 /** A ship's stage past twice its usual time is one line for the owner, once per stage. Returns whether it said so. */

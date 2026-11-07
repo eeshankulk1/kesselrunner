@@ -72,7 +72,7 @@ export function changes(prev, next) {
   }
   for (const name of sup.keys()) if (!next.supervisors.some((s) => s.name === name)) out.push({ type: "supervisor.removed", name });
 
-  for (const k of ["tmux", "sessions", "queues", "blockers", "blockerLines", "decisions", "usage", "clients"]) {
+  for (const k of ["tmux", "sessions", "queues", "blockers", "blockerLines", "decisions", "usage", "usageOffer", "clients"]) {
     if (!same(prev[k], next[k])) out.push({ type: `${k}.changed`, [k]: next[k] });
   }
   return out;

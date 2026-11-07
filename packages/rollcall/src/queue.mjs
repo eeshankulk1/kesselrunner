@@ -46,8 +46,8 @@ const poll = () => Number(process.env.ROLLCALL_WAIT_POLL_MS) || 1000;
 // ---------------------------------------------------------------- GitHub (gh)
 
 /** gh in `cwd`: { ok, out, err }. ROLLCALL_GH names another binary (the tests' fake). */
-export function gh(cwd, args, { timeout = 60_000 } = {}) {
-  const r = spawnSync(process.env.ROLLCALL_GH || "gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout });
+export function gh(cwd, args, { timeout = 60_000, maxBuffer = 16 * 1024 * 1024 } = {}) {
+  const r = spawnSync(process.env.ROLLCALL_GH || "gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer });
   return { ok: r.status === 0, out: r.stdout ?? "", err: (r.stderr ?? "").trim() || (r.error ? String(r.error.message) : "") };
 }
 const ghJson = (cwd, args) => { const r = gh(cwd, args); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };

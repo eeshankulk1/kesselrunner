@@ -23,8 +23,8 @@ import { turnsSummary } from "./snapshot.mjs";
 import { allDecisions, visibleTasks } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import * as trouble from "./trouble.mjs";
-import { usageOf } from "./usage.mjs";
-import { view } from "./watch.mjs";
+import { tokensOf, usageOf, when } from "./usage.mjs";
+import { usageMoves, view } from "./watch.mjs";
 
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
 export const INTERFACE = 1;
@@ -86,9 +86,8 @@ function prView(t) {
   };
 }
 
-/** One task, whole enough for a front end's panels. */
-export function taskView(t, now = Date.now()) {
-  const v = view(t, now);
+/** One task, whole enough for a front end's panels. `v`: its view() when the caller has it already. */
+export function taskView(t, now = Date.now(), v = view(t, now)) {
   const w = v.w;
   const win = tmux.windowOf(t.home, t.id);
   return {
@@ -110,6 +109,8 @@ export function taskView(t, now = Date.now()) {
     // The owner's line comments on its diff, where they were written (`rollcall task comments <task> --json` says where each sits now).
     comments: readComments(t.home, t.id).items.map((c) => ({ n: c.n, state: c.state, file: c.file, line: c.line, end: c.end, text: c.text, by: c.by, at: c.at, sentAt: c.sentAt ?? null, reply: c.reply ?? null, resolved: c.resolved ?? null })),
     turns: t.worktree ? turnsSummary(t.worktree) : null,
+    // Its worker's context tokens now, the window's size, and on Codex the thread's total so far.
+    tokens: tokensOf(t),
     stage: t.stage ?? null,
     wait: t.wait ? { ...t.wait, label: trouble.waitLabel(t.wait, now) } : null,
     worker: workerView(w),
@@ -184,11 +185,12 @@ function queuesView() {
  */
 export function snapshot({ home = null, now = Date.now() } = {}) {
   const homes = store.listHomes().filter((h) => !home || h === home);
+  const views = homes.flatMap((h) => visibleTasks(h, { now })).map((t) => ({ t, v: view(t, now) }));
   return {
     interface: INTERFACE, rollcall: VERSION, at: now,
     tmux: { socket: tmux.SOCKET(), available: tmuxAvailable() },
     supervisors: homes.map((h) => supervisorView(h, now)),
-    tasks: homes.flatMap((h) => visibleTasks(h, { now })).map((t) => taskView(t, now)),
+    tasks: views.map(({ t, v }) => taskView(t, now, v)),
     sessions: sessionsView(now),
     queues: queuesView(),
     blockers: Object.values(trouble.openBlockers()).map((b) => ({ ...b })),
@@ -196,7 +198,27 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
     decisions: allDecisions().filter((d) => !home || d.home === home).map((d) => ({ ...d, from: d.from ? `${d.home}:${d.from}` : null })),
     // The usage meter: each plan's room (usage.mjs), as `rollcall usage --json` prints it.
     usage: usageOf(now),
+    usageOffer: usageOffer(views, now),
     clients: liveClients().map(({ client, pid, notifies, at }) => ({ client, pid, notifies, at })),
+  };
+}
+
+const PLAN = { claude: "Claude", codex: "Codex" };
+
+/**
+ * The watcher's offer as a front end shows it: one plan near its limit while the other has room, and the open tasks
+ * waiting on the full one that could move (task.move with harness: to). Null when there is nothing to offer.
+ */
+function usageOffer(views, now) {
+  const m = usageMoves(views.map(({ t, v }) => ({ t, w: v.w })), now)[0];
+  if (!m) return null;
+  const { window: w, other, room, tasks } = m;
+  const names = tasks.map((t) => nameOf(t.id));
+  const shown = names.length > 4 ? `${names.slice(0, 4).join(", ")} and ${names.length - 4} more` : names.join(", ");
+  return {
+    from: w.harness, to: other, pct: w.pct, resetsAt: w.resetsAt ?? null, window: w.name, room: room.pct,
+    tasks: tasks.map(refOf),
+    text: `${PLAN[w.harness]} is at ${w.pct}% of its ${w.name} limit${w.resetsAt ? ` until ${when(w.resetsAt, now)}` : ""}, and ${PLAN[other]} has room (${room.pct}%). Move ${tasks.length === 1 ? "the waiting task" : `${tasks.length} waiting tasks`} (${shown}) to ${PLAN[other]}?`,
   };
 }
 

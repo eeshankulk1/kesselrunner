@@ -12,7 +12,8 @@ import { parseRef, refOf, taskView } from "./api.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
 import { deliverWords, holderOf, label } from "./supervisor.mjs";
-import { turnDiff, worktreeOf } from "./snapshot.mjs";
+import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
+import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
 import { recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
@@ -282,11 +283,80 @@ export const ACTIONS = {
       const wt = t.worktree ? worktreeOf(t.worktree) : null;
       if (!wt) refuse("refused", `${label(t)} has no linked worktree with turns`);
       let d;
-      try { d = turnDiff(wt, p.n); } catch (e) { refuse(/^no turn /.test(e.message) ? "not-found" : "failed", e.message); }
+      try { d = turnDiff(wt, p.n, { rich: true }); } catch (e) { refuse(/^no turn /.test(e.message) ? "not-found" : "failed", e.message); }
       // Every file is named; the patch stops at 1 MB (the CLI's `rollcall turns diff` prints all of it).
       const cut = d.patch.length > PATCH_MAX;
       return { ...d, patch: cut ? d.patch.slice(0, PATCH_MAX) : d.patch, truncated: cut };
     },
+  },
+
+  // Review and ship reads (cockpit's review and ship panels, api-reads.mjs). Read-only and safe to repeat, so a
+  // requestId keeps no copy of them; those that ask GitHub call gh and answer `unavailable` without it.
+  "task.diff": {
+    cli: "git diff <merge-base with main | HEAD> [worktree] in its worktree",
+    repeatable: true,
+    run(p) {
+      const t = taskOf(p);
+      const against = str(p, "against", { required: false }) ?? "base";
+      if (!["base", "committed", "uncommitted"].includes(against)) refuse("bad-payload", "against is base, committed or uncommitted");
+      return taskDiff(t, against, refuse);
+    },
+  },
+
+  "turns.list": {
+    cli: "rollcall turns <task> --json",
+    repeatable: true,
+    run(p) { return { turns: turnsOf(taskOf(p), refuse) }; },
+  },
+
+  // Puts the worktree's files back to turn n, as `rollcall turns restore` does; refused while its worker is mid-turn.
+  "turn.restore": {
+    cli: "rollcall turns restore <n> <task>",
+    async run(p) {
+      const t = taskOf(p);
+      if (!Number.isInteger(p.n) || p.n < 0) refuse("bad-payload", "n is a turn number from 0");
+      if (!turnsOf(t, refuse).some((x) => x.n === p.n)) refuse("not-found", `no turn ${p.n} in ${label(t)}'s worktree`);
+      const out = [];
+      const ctx = { say: (s) => out.push(String(s)), fail: (m) => refuse("refused", String(m).replace(/^rollcall:\s*/, "")), flag, whoAmI: () => null };
+      const code = await turnsCommand(["restore", String(p.n), t.id, "--home", t.home, "--json"], ctx);
+      if (code) refuse("refused", out.join("\n") || `rollcall turns restore exited ${code}`);
+      const r = JSON.parse(out.join("\n"));
+      const message = r.files.length
+        ? `restored to turn ${p.n}: ${r.files.length} file${r.files.length === 1 ? "" : "s"} written or removed (HEAD, branch and index unchanged)`
+        : `the worktree already matched turn ${p.n}; nothing changed`;
+      return { restored: p.n, undo: r.before, files: r.files, message, view: fresh(t) };
+    },
+  },
+
+  "review.comments": {
+    cli: "rollcall task comments <task> --json",
+    repeatable: true,
+    run(p) { return { comments: commentsNow(taskOf(p)) }; },
+  },
+
+  "pr.timeline": {
+    cli: "gh: the PR, its checks, deployments, reviews and threads, and main's checks",
+    repeatable: true,
+    run(p) { return prTimeline(taskOf(p), refuse); },
+  },
+
+  "check.log": {
+    cli: "gh run view --job <id> --log-failed (else --log)",
+    repeatable: true,
+    run(p) {
+      const t = taskOf(p);
+      const id = p.id ?? null;
+      const name = str(p, "name", { required: false, max: 300 });
+      if (id !== null && (!Number.isInteger(id) || id < 1)) refuse("bad-payload", "id is a check's id from pr.timeline");
+      if (id === null && !name) refuse("bad-payload", "id or name is required");
+      return checkLog(t, { id, name }, refuse);
+    },
+  },
+
+  "repo.items": {
+    cli: "gh issue list + gh pr list + origin's branches",
+    repeatable: true,
+    run(p) { return repoItems(str(p, "repo", { max: 4096 }), refuse); },
   },
 
   // The worktree runtime (plan A). Archive shows what goes first, as the Falcon does: the owner says yes with confirm.
@@ -327,11 +397,18 @@ export const ACTIONS = {
   },
 
   "task.run": {
-    cli: "rollcall task run <task> [list | start|stop|restart <name|all>]",
+    cli: "rollcall task run <task> [list | start|stop|restart <name|all>]; log: its log file from an offset",
     async run(p) {
       const t = taskOf(p);
       const verb = str(p, "verb", { required: false }) ?? "list";
-      if (!["list", "start", "stop", "restart"].includes(verb)) refuse("bad-payload", "verb is list, start, stop or restart");
+      if (!["list", "start", "stop", "restart", "log"].includes(verb)) refuse("bad-payload", "verb is list, start, stop, restart or log");
+      if (verb === "log") {
+        const name = str(p, "name", { max: 32 });
+        if (!/^[A-Za-z0-9][\w.-]*$/.test(name)) refuse("bad-payload", `name is a run action's name: ${name}`);
+        const offset = p.offset ?? null;
+        if (offset !== null && (!Number.isInteger(offset) || offset < 0)) refuse("bad-payload", "offset is a byte count from 0");
+        return runLog(t, name, offset, refuse);
+      }
       if (verb !== "list") await taskLater(["run", t.id, "--home", t.home, verb, str(p, "name", { max: 32 })]);
       return { view: fresh(t) };
     },
@@ -346,8 +423,6 @@ export const ACTIONS = {
     },
   },
 };
-
-const PATCH_MAX = 1024 * 1024;
 
 /** Actions the plans in flight add; a front end that asks for one now hears `not-available`, not `unknown-action`. */
 export const COMING = {
