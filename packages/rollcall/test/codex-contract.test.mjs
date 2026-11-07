@@ -43,6 +43,13 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
   for (const p of ["questions", "threadId", "turnId"]) assert.ok(p in ask.properties, `request_user_input carries ${p}`);
   for (const p of ["id", "header", "question", "options"]) assert.ok(p in ask.definitions.ToolRequestUserInputQuestion.properties, `a question carries ${p}`);
   assert.ok("answers" in read("ToolRequestUserInputResponse.json").properties);
+  // Away mode answers approvals itself (codex/worker.mjs approvalAnswer): a decline the turn goes on after, and the
+  // permissions request's grant with its scope.
+  for (const [f, def] of [["CommandExecutionRequestApprovalResponse", "CommandExecutionApprovalDecision"], ["FileChangeRequestApprovalResponse", "FileChangeApprovalDecision"]]) {
+    const decisions = JSON.stringify(read(`${f}.json`).definitions[def]);
+    for (const d of ["accept", "decline"]) assert.match(decisions, new RegExp(`"${d}"`), `${f} takes ${d}`);
+  }
+  for (const p of ["permissions", "scope"]) assert.ok(p in read("PermissionsRequestApprovalResponse.json").properties, `a permissions answer carries ${p}`);
   const caps = read("v1/InitializeParams.json").definitions.InitializeCapabilities.properties;
   assert.ok("experimentalApi" in caps, "initialize still takes experimentalApi");
   assert.match(JSON.stringify(read("v2/HooksListResponse.json").definitions.HookTrustStatus), /untrusted/);
