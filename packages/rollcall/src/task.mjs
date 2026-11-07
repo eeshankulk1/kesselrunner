@@ -102,7 +102,8 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
                                          reply --open leaves it for the owner, and the supervisor hears
   rollcall task decisions [add "<decision>" [--where "<how the owner answers>"] [--from <task>] | done <n> ["<answer>"]]
                                          what waits on the owner beyond any one task, one list for every
-                                         supervisor: listed until answered
+                                         supervisor: listed until answered; done's answer goes to the
+                                         deciding task's worker as its next prompt
   rollcall task setup <id|here> [--rerun] [--wait]   its worktree's setup: how it went, or run it again
   rollcall task run <id|here> [list | start|stop|restart <name|all> | log <name>]   its run actions
   rollcall task ports <id|here>          its block of ports
@@ -978,16 +979,36 @@ function decisions(args, ctx) {
   }
   if (sub === "done") {
     const n = Number(String(rest.shift() ?? "").replace(/^d/i, ""));
-    const answer = store.oneLine(rest.join(" "));
-    const gone = edit((d) => { const i = d.items.findIndex((x) => x.n === n); return i < 0 ? null : d.items.splice(i, 1)[0]; });
-    if (!gone) ctx.fail(`no open decision d${n || "?"} (rollcall task decisions)`);
-    // The task it came from keeps the answer, so its next worker knows.
-    const from = gone.from && store.readTask(gone.home, gone.from);
-    if (from && answer) update(from, ctx, (t) => { t.notes.push({ at: now, by: author(t, g), text: store.clip(`decided: ${gone.text} - ${answer}`, 4000) }); });
-    ctx.say(`d${n}: answered${answer ? `: ${answer}` : ""}`);
+    const r = answerDecision(n, rest.join(" "), g, ctx);
+    if (!r) ctx.fail(`no open decision d${n || "?"} (rollcall task decisions)`);
+    const to = r.gone.from ? nameOf(r.gone.from) : null;
+    const sent = !to ? "" : r.delivered ? `; ${r.how === "held" ? "it waits to go into" : "it went to"} ${to}'s worker` : r.why ? `; not sent to ${to}'s worker: ${r.why}` : "";
+    ctx.say(`d${n}: answered${r.answer ? `: ${r.answer}` : ""}${sent}`);
     return 0;
   }
   ctx.fail(`task decisions: unknown command "${sub}" (rollcall task decisions --help)`);
+}
+
+/**
+ * The owner answers decision `n` (`rollcall task decisions done`, the `decision.answer` action): it leaves the list,
+ * the task it came from keeps the answer, and that task's worker hears it as its next prompt, which wakes it (the
+ * queue `task.tell` uses). Returns { gone, answer, delivered, how, why }, or null when no such decision is open.
+ */
+export function answerDecision(n, raw, g, ctx) {
+  const answer = store.oneLine(String(raw ?? ""));
+  const r = store.updateDecisions((d) => { const i = d.items.findIndex((x) => x.n === n); return i < 0 ? null : d.items.splice(i, 1)[0]; });
+  if (!r) ctx.fail("the decisions list is busy; try again");
+  const gone = r.out;
+  if (!gone) return null;
+  const from = gone.from && store.readTask(gone.home, gone.from);
+  if (!from) return { gone, answer, delivered: false, how: null, why: null };
+  // The task keeps the answer, so its next worker knows.
+  if (answer) update(from, ctx, (t) => { t.notes.push({ at: Date.now(), by: author(t, g), text: store.clip(`decided: ${gone.text} - ${answer}`, 4000) }); });
+  // Only a worker that exists hears it: a finished task's is left be, and one never started gets the note in its brief.
+  if (!isOpen(from) || !from.sessions?.length) return { gone, answer, delivered: false, how: null, why: isOpen(from) ? "it has no worker yet" : `it is ${from.state}` };
+  const text = answer ? `The owner answered decision d${n} ("${gone.text}"): ${answer}` : `The owner marked decision d${n} done: "${gone.text}".`;
+  const d = deliverWords(from, text, { record: () => {}, mode: holderOf(from.home)?.mode ?? null });
+  return { gone, answer, delivered: d.ok, how: d.how ?? null, why: d.why ?? null };
 }
 
 /**

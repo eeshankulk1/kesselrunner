@@ -10,6 +10,7 @@
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
 import { readFileSync } from "node:fs";
 import { asksText } from "./asked.mjs";
+import { awayState, heldView } from "./away.mjs";
 import { readComments } from "./comments.mjs";
 import { runtimeOf } from "./checkout.mjs";
 import { openQuestions, questionId } from "./answer.mjs";
@@ -200,6 +201,9 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
     usage: usageOf(now),
     usageOffer: usageOffer(views, now),
     clients: liveClients().map(({ client, pid, notifies, at }) => ({ client, pid, notifies, at })),
+    // Away mode (away.mjs): the machine's switch, and the permission requests it held for the owner.
+    away: awayState(),
+    held: heldView(now),
   };
 }
 

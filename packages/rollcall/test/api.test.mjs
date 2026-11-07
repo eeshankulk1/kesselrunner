@@ -71,7 +71,7 @@ test("api version names the interface, its verbs, every action and the ones comi
   assert.equal(v.interface, 1);
   assert.match(String(v.rollcall), /^\d+\.\d+\.\d+/);
   assert.deepEqual(v.verbs, ["version", "snapshot", "stream", "do", "attach"]);
-  assert.deepEqual(Object.keys(v.actions).sort(), ["blocker.clear", "check.log", "decision.answer", "pr.timeline", "question.answer", "repo.items", "review.comment", "review.comments", "review.send", "task.archive", "task.close", "task.diff", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff", "turn.restore", "turns.list"]);
+  assert.deepEqual(Object.keys(v.actions).sort(), ["away.set", "blocker.clear", "check.log", "decision.answer", "held.allowAll", "held.answer", "pr.timeline", "question.answer", "repo.items", "review.comment", "review.comments", "review.send", "task.archive", "task.close", "task.diff", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff", "turn.restore", "turns.list"]);
   for (const cli of Object.values(v.actions)) assert.equal(typeof cli, "string");
   assert.deepEqual(v.coming, {}, "plans A and C landed: nothing is still coming");
   const bad = owner(sb, ["api", "frobnicate"]);
@@ -83,7 +83,9 @@ test("api snapshot holds every top-level section and a task's panel fields", (t)
   const { sb } = setup(t, { worktree: true });
   sb.session(sb.main).start();
   const s = snap(sb);
-  assert.deepEqual(Object.keys(s).sort(), ["at", "blockerLines", "blockers", "clients", "decisions", "interface", "queues", "rollcall", "sessions", "supervisors", "tasks", "tmux", "usage", "usageOffer"].sort());
+  assert.deepEqual(Object.keys(s).sort(), ["at", "away", "blockerLines", "blockers", "clients", "decisions", "held", "interface", "queues", "rollcall", "sessions", "supervisors", "tasks", "tmux", "usage", "usageOffer"].sort());
+  assert.deepEqual(s.away, { on: false, since: null, by: null, last: null }, "away mode, off");
+  assert.deepEqual(s.held, []);
   assert.equal(s.interface, 1);
   assert.equal(typeof s.tmux.available, "boolean");
   assert.equal(s.tmux.socket, sb.env.ROLLCALL_TMUX_SOCKET);
@@ -430,7 +432,7 @@ test("decision.answer and blocker.clear from a front end", (t) => {
   assert.equal(d[0].from, "alpha:t1");
   assert.equal(act(sb, "decision.answer", { n: "x" }).error.code, "bad-payload");
   const r = act(sb, "decision.answer", { n: `d${d[0].n}`, answer: "yes, friday" });
-  assert.deepEqual(r.result, { answered: true });
+  assert.deepEqual(r.result, { answered: true, delivered: false, how: null }, "t1 has no worker to hear it");
   assert.deepEqual(snap(sb).decisions, []);
   assert.match(record(sb).notes.at(-1).text, /decided: ship on friday\? - yes, friday/);
   assert.deepEqual(act(sb, "decision.answer", { n: d[0].n, answer: "again" }).result, { answered: true, already: true });

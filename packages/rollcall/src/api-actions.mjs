@@ -8,13 +8,14 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { answerFromFrontEnd } from "./answer.mjs";
+import { allowAll, answerHeld, setAway } from "./away.mjs";
 import { parseRef, refOf, taskView } from "./api.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
 import { deliverWords, holderOf, label } from "./supervisor.mjs";
 import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
 import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
-import { recordWords, taskCommand } from "./task.mjs";
+import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
@@ -52,6 +53,9 @@ function task(argv) {
   if (code) refuse("refused", out.join("\n") || `rollcall task ${argv[0]} exited ${code}`);
   return out.join("\n");
 }
+
+/** The ctx a shared command's code takes from a front end: a refusal is an ApiError "refused". */
+const CTX = { say: () => {}, fail: (m) => refuse("refused", String(m).replace(/^rollcall:\s*/, "")), flag, whoAmI: () => null };
 
 /** `task(argv)` for a command that finishes later (the worktree runtime's, which load their code when run). */
 async function taskLater(argv) {
@@ -234,8 +238,52 @@ export const ACTIONS = {
       const n = Number(String(p.n ?? "").replace(/^d/i, ""));
       if (!Number.isInteger(n) || n < 1) refuse("bad-payload", "n is the decision's number");
       if (!store.readDecisions().items.some((d) => d.n === n)) return { answered: true, already: true };
-      task(["decisions", "done", String(n), str(p, "answer", { required: false, max: 2000 }) ?? ""]);
-      return { answered: true };
+      // The same code as `rollcall task decisions done`: the deciding task's worker hears the answer, which wakes it.
+      const r = answerDecision(n, str(p, "answer", { required: false, max: 2000 }) ?? "", null, CTX);
+      if (!r) return { answered: true, already: true };
+      return { answered: true, delivered: r.delivered, how: r.how };
+    },
+  },
+
+  // Away mode (away.mjs): the machine's switch, and the owner's answers to what it held.
+  "away.set": {
+    cli: "rollcall away on|off",
+    run(p, client) {
+      if (typeof p.on !== "boolean") refuse("bad-payload", "on is true (away) or false (back)");
+      const r = setAway(p.on, client);
+      if (!r) refuse("busy", "the away record stayed locked; try again");
+      return r;
+    },
+  },
+
+  "held.answer": {
+    cli: "rollcall away allow|deny <id> [\"<why>\"]",
+    run(p, client) {
+      const id = str(p, "id", { max: 100 });
+      if (typeof p.allow !== "boolean") refuse("bad-payload", "allow is true (approve) or false (deny)");
+      const why = str(p, "why", { required: false, max: 2000 });
+      const r = answerHeld(id, { allow: p.allow, why, by: client });
+      if (r.code === "not-found") refuse("not-found", `no held request ${id}`);
+      if (r.code === "busy") refuse("busy", "the held list stayed locked; try again");
+      const { home, id: tid } = parseRef(r.item.ref) ?? {};
+      const t = tid ? store.readTask(home, tid) : null;
+      const view = t ? fresh(t) : null;
+      // A repeat of the same answer is harmless; the other answer, given first elsewhere, is refused with it.
+      if (r.already) {
+        if (r.item.answer?.allow !== p.allow) refuse("already-answered", `held request ${id} was ${r.item.state} already, from ${r.item.answer?.by}`, { answer: r.item.answer });
+        return { answered: true, already: true, delivered: false, how: null, view };
+      }
+      return { answered: true, already: false, delivered: r.delivered, how: r.how, view };
+    },
+  },
+
+  "held.allowAll": {
+    cli: "rollcall away allow-all",
+    run(p, client) {
+      const home = p.home === undefined || p.home === null ? null : homeOf(p);
+      const r = allowAll({ home, by: client });
+      if (!r) refuse("busy", "the held list stayed locked; try again");
+      return r;
     },
   },
 
