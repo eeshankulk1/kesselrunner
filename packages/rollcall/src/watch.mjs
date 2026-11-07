@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asksText } from "./asked.mjs";
+import { isAway } from "./away.mjs";
 import { enqueue, keyQuietMs, receiptMs, settleDialog, settleTyped, typedWaiting, waiting } from "./delivery.mjs";
 import { lastEntry, parkSupervisor, supervisorDue } from "./park.mjs";
 import { sameProcess, spawnDetached, startOf } from "./proc.mjs";
@@ -251,22 +252,29 @@ export const drawTabs = (h, now = Date.now()) => tmux.setTabs(h, faces(h, now).t
 
 // ---------------------------------------------------------------- notifications
 
-/** One notification per wait once it passes its threshold, and a reminder every 10 minutes while it lasts. */
+/**
+ * One notification per wait once it passes its threshold, and a reminder every 10 minutes while it lasts. While the
+ * owner is away (away.mjs) nothing repeats: each wait gets its one notice, a question at once (a `question` notice a
+ * phone pushes), and held permission requests have theirs from the hook that held them.
+ */
 function alertOwner(h, views, now) {
   const notified = store.readHomeFile(h, "notified") ?? {};
   const live = {};
+  const away = isAway();
   for (const { t, w, wait } of views) {
     if (!wait) continue;
     const key = `${t.id}:${wait.kind}:${wait.since}`;
     const last = notified[key];
     live[key] = last ?? null;
-    if (last ? now - last < REMIND_EVERY : now - wait.since < NOTIFY_AFTER[wait.kind]) continue;
+    if (away ? last || (wait.kind !== "needs-you" && now - wait.since < NOTIFY_AFTER[wait.kind])
+      : last ? now - last < REMIND_EVERY : now - wait.since < NOTIFY_AFTER[wait.kind]) continue;
     live[key] = now;
     const long = duration(now - wait.since) || "under a minute";
+    const asked = clip((t.question ?? "a question").split("\n")[0], 120);
     const text = wait.kind === "prompt" ? `${label(t)} has waited ${long} on ${w?.asks ? asksText(w.asks) : "a prompt"} in its worker. In the supervisor: /attach ${t.id}`
-      : wait.kind === "needs-you" ? `${label(t)} has waited ${long} for you: ${clip((t.question ?? "a question").split("\n")[0], 120)}`
+      : wait.kind === "needs-you" ? (away ? `${label(t)} asks you: ${asked}` : `${label(t)} has waited ${long} for you: ${asked}`)
         : `${label(t)}: its worker stopped ${long} ago while the task was being worked; the supervisor is told.`;
-    notify(`${nameOf(t.id)} needs you (${h})`, text);
+    notify(`${nameOf(t.id)} needs you (${h})`, text, away && wait.kind === "needs-you" ? { tag: { kind: "question", ref: `${h}:${t.id}` } } : {});
   }
   store.writeHomeFile(h, "notified", Object.fromEntries(Object.entries(live).filter(([, v]) => v !== null)));
 }

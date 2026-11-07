@@ -184,6 +184,18 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   await until(() => !existsSync(dialogFlag(h, "t1")), "the dialog flag to come down");
   await until(() => status().some((e) => e.ev === "idle" && e.last === "done: APPROVE now"), "the approval turn's end");
 
+  // While the owner is away the approval is held: declined so the turn goes on, with the note as a steer (Codex's
+  // decline carries no reason), and on the held list. No dialog opens.
+  const away = await mod("away.mjs");
+  away.setAway(true, "test");
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "APPROVE later"), { ok: true });
+  await until(() => lines().some((l) => l.in?.result?.decision === "decline"), "the declined approval");
+  await until(() => lines().some((l) => l.in?.method === "turn/steer" && JSON.stringify(l.in.params.input).includes("held for them")), "the hold note, steered in");
+  assert.deepEqual(away.heldView().map((x) => [x.ref, x.harness, x.tool, x.summary, x.reason]), [[`${h}:t1`, "codex", "Bash", "rm -rf build", "clean the build"]]);
+  assert.equal(existsSync(dialogFlag(h, "t1")), false);
+  await until(() => status().some((e) => e.ev === "idle" && e.last === "done: APPROVE later"), "the held turn's end");
+  away.setAway(false, "test");
+
   // A question goes to the owner's picker: the task turns needs-you, and the worker hears where it went.
   assert.deepEqual(codex.type(store.readTask(h, "t1"), "ASK please"), { ok: true });
   await until(() => store.readTask(h, "t1").state === "needs-you", "needs-you");

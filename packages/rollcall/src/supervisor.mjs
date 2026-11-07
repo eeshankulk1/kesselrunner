@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe } from "./asked.mjs";
+import { isAway, permissionDecision } from "./away.mjs";
 import { dialogFlag, drop, enqueue, flush, keyQuietMs, launching, noteTyped, received, waiting } from "./delivery.mjs";
 import { defaultBranch, fetchSync, gitSync, locate } from "./git.mjs";
 import { sameProcess, spawnDetached } from "./proc.mjs";
@@ -776,6 +777,16 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       store.pokeWatcher(h);
       return null;
     case "dialog": {
+      // A permission request first meets away mode (away.mjs): one the owner approved goes through on its grant, and
+      // while the owner is away it is held and refused with a note, so no dialog opens and the worker carries on.
+      if (p.hook_event_name === "PermissionRequest" && p.tool_name) {
+        const d = permissionDecision(t, { tool: p.tool_name, input: p.tool_input ?? {}, harness: p.harness ?? "claude" });
+        if (d?.allow) {
+          store.appendStatus(h, id, { ev: "granted", tool: p.tool_name });
+          return JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } });
+        }
+        if (d?.deny) return JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: d.deny } } });
+      }
       // The flag says what the dialog asks, for the supervisor to tell the owner; its time is when it opened. The
       // transcript's path lets the watcher see a dialog closed with no hook (settleDialog). A dialog that opens while
       // the flag is up goes on its list, so the flag stays until that call ends too.
@@ -795,8 +806,10 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // worker's conversation (the prompt-suggestion pass after each turn, whose tool calls it denies anyway),
       // carries an agent_id: taken for the worker's, it turned the task needs-you over a question no one asked.
       if (p.agent_id) return null;
-      // While the owner watches this window, the question opens right here.
-      if (tmux.viewed(h, id)) return null;
+      // While the owner watches this window, the question opens right here, unless they are away: then it goes on the
+      // task's record, where they find it when they are back.
+      const away = isAway();
+      if (!away && tmux.viewed(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);
@@ -804,6 +817,12 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       const deny = (permissionDecisionReason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason } });
       if (res.finished) return deny(`${P} This question did not go to the owner: task ${id} is ${res.finished}, and a finished task asks nothing. Put it in a reply instead (\`rollcall task note ${id} "reply: <it>"\`): the supervisor gives it to the owner.`);
       if (res.long) return deny(`${P} This question did not go to the owner: ${res.long}. Shorten it and ask again; detail that will not fit goes in a report (\`rollcall task output ${id} --file <f>\`).`);
+      if (away) {
+        return deny(
+          `${P} The owner is away: this question waits on task ${id}'s record (needs-you now), and their answer comes back typed as your next prompt. ` +
+          "Meanwhile carry on with any part of the task that does not depend on the answer, then end your turn. Ask nothing else meanwhile.",
+        );
+      }
       return deny(
         `${P} This question went to the owner's picker in the supervisor (task ${id} is needs-you now). ` +
         "Their pick comes back typed as your next prompt. End your turn now, and ask nothing else meanwhile.",
