@@ -186,7 +186,7 @@ export function ensureWatcher(h) {
 /**
  * What a worker's status log says about it, folded in one place: the hooks and rollcall only ever add events, and
  * this alone reads them. { turn (the last busy, idle or launch event), last (the same, or its exit), launch (the
- * last launch event), started (a session came up since it), up (when its Claude Code last started), held ("parked" or
+ * last launch event), started (a session came up or took a turn since it), up (when its Claude Code last started), held ("parked" or
  * "stopped" when rollcall stopped it and nothing started it since) }. Other events change nothing here.
  */
 export function running(log) {
@@ -194,7 +194,8 @@ export function running(log) {
   for (const e of log) {
     if (e.ev === "launch") Object.assign(r, { turn: e, last: e, launch: e, started: false, up: e.at, held: null });
     else if (e.ev === "session") Object.assign(r, { started: true, up: e.at, held: null });
-    else if (e.ev === "busy" || e.ev === "idle") Object.assign(r, { turn: e, last: e });
+    // A turn comes from the session's own hooks: it is up, though its start left no record (that hook can fail).
+    else if (e.ev === "busy" || e.ev === "idle") Object.assign(r, { turn: e, last: e, started: true });
     else if (e.ev === "exit") r.last = e;
     else if (e.ev === "parked" || e.ev === "stopped") r.held = e.ev;
   }

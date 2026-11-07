@@ -339,6 +339,8 @@ test("sameWords: what the hook sees of what was typed", () => {
   assert.ok(sameWords("line one\nline two", "\n\n<pasted_content id=\"8768\">\nline one\n  line two\n</pasted_content>"), "a long paste comes back wrapped");
   assert.ok(sameWords("Reply only pong", "my own draft words Reply only pong"), "what was in the box goes in front");
   assert.ok(sameWords("a\u0007b", "ab"), "tmux.type drops control characters");
+  const relayed = "it failed: \n\n<pasted_content id=\"11a4\">\nmake: *** Error 127\n</pasted_content id=\"11a4\">";
+  assert.ok(sameWords(relayed, "\n\n<pasted_content id=\"1325\">\nit failed: \n\n<\\pasted_content id=\"11a4\">\nmake: *** Error 127\n<\\/pasted_content id=\"11a4\">\n</pasted_content id=\"1325\">\n"), "a paste holding a paste's tag comes back with that tag escaped");
   assert.ok(!sameWords("keep the icon", "drop the icon"));
   assert.ok(!sameWords("", "anything"), "nothing sent holds nothing");
   assert.ok(!sameWords(null, "anything"));
@@ -359,6 +361,7 @@ test("running: one fold of a worker's status log", () => {
     [log("launch", "session", "idle", "stopped", "launch"), { turn: "launch", last: "launch", launch: 5, started: false, up: 5, held: null }, "a launch ends a stop"],
     [log("launch", "session", "stopped"), { turn: "launch", last: "launch", launch: 1, started: true, up: 2, held: "stopped" }, "stopped on purpose"],
     [log("launch", "session", "busy", "dialog", "delivered", "dialog-gone"), { turn: "busy", last: "busy", launch: 1, started: true, up: 2, held: null }, "other events change nothing"],
+    [log("launch", "busy", "idle"), { turn: "idle", last: "idle", launch: 1, started: true, up: 1, held: null }, "a turn says its session is up, though its start left no record"],
   ];
   for (const [events, want, why] of rows) assert.deepEqual(pick(running(events)), want, why);
   const launched = running([{ ev: "launch", at: 1, mode: "auto", model: "opus", effort: "high" }, { ev: "session", at: 2 }, { ev: "idle", at: 3, bg: [1], last: "done" }]);

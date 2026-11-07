@@ -2,7 +2,8 @@
 // so everything for a worker (the owner's words, a pick, a doorbell) goes through one queue per task
 // (`outbox-<id>.json` in its home) and leaves it only when the worker's own prompt-submit hook records it. That
 // hook fires as Enter lands, even in the middle of a turn. An item with no receipt after receiptMs goes out again,
-// TRIES times at most, then the owner hears once, and it goes out again once the worker moves. Its prompt in the
+// TRIES times at most, then the owner hears once, and it goes out again once the worker moves, up to SENDS times in
+// all: a worker that moves is often moving on the very prompt whose receipt was missed. Its prompt in the
 // transcript is a receipt too, for a hook that failed. A launch's first prompt is on the queue as well, never typed:
 // its receipt is how rollcall knows that prompt for its own.
 //
@@ -28,6 +29,9 @@ export const receiptMs = () => ms("ROLLCALL_RECEIPT_MS", 60_000);
 /** What must hold before rollcall types into a window, so it never lands in what the owner is typing. */
 export const keyQuietMs = () => ms("ROLLCALL_KEY_QUIET_MS", 15_000);
 const TRIES = 3;
+// However often the worker moves, an item goes out this many times at most and then leaves the queue: its words are
+// on the task's record already, and an item that arrives but is never recognised would otherwise go in on every turn.
+const SENDS = 2 * TRIES;
 // How long a turn's end gives a prompt queued just before it to reach the transcript.
 const SETTLE_GRACE_MS = 5_000;
 // A dialog's tool call can reach the transcript a moment after the hook that flags it.
@@ -103,7 +107,7 @@ export const canTake = (t, w, now = Date.now()) => !!w?.alive && w.started && wo
 
 /**
  * Types what is due on the task's queue as one prompt, when worker `w` can take it. Returns { typed: how many
- * items went, err: why typing failed, lost: items that just ran out of tries }.
+ * items went, err: why typing failed, lost: items that just ran out of tries (`gone` on one that left the queue) }.
  */
 export function flush(t, w, now = Date.now()) {
   const { home: h, id } = t;
@@ -115,20 +119,26 @@ export function flush(t, w, now = Date.now()) {
   const overdue = items.filter((x) => x.typedAt && now - x.typedAt >= receiptMs());
   const arrived = overdue.filter((x) => promptAuthor(file, x.text, x.typedAt)).map((x) => x.id);
   const { due, lost } = edit(h, OUTBOX(id), (all) => {
-    const left = all.filter((x) => !arrived.includes(x.id));
     const out = { due: [], lost: [] };
-    for (const x of left) {
-      if (x.kind === "launch" || (x.typedAt && now - x.typedAt < receiptMs())) continue;
+    const left = all.filter((x) => !arrived.includes(x.id)).filter((x) => {
+      if (x.kind === "launch" || (x.typedAt && now - x.typedAt < receiptMs())) return true;
+      const sends = x.sends ?? x.tries;
+      if (sends >= SENDS) {
+        out.lost.push({ ...x, gone: true });
+        return false;
+      }
       // A worker that moved since the last try is no longer what stopped it.
       if (x.typedAt && (w.since ?? 0) > x.typedAt) x.tries = 0;
       if (x.tries >= TRIES) {
         if (!x.noticed) { x.noticed = true; out.lost.push(x); }
-        continue;
+        return true;
       }
       x.typedAt = now;
       x.tries += 1;
+      x.sends = sends + 1;
       out.due.push(x);
-    }
+      return true;
+    });
     return { items: left, out };
   }) ?? { due: [], lost: [] };
   if (!due.length) return { ...quiet, lost };
@@ -136,7 +146,7 @@ export function flush(t, w, now = Date.now()) {
   const r = workerAdapter(t).type(t, due.map((x) => x.text).join("\n\n"), { before: () => !dialogUp(h, id) });
   if (r.ok) return { typed: due.length, err: null, lost };
   const ids = due.map((x) => x.id);
-  edit(h, OUTBOX(id), (all) => ({ items: all.map((x) => (ids.includes(x.id) ? { ...x, typedAt: null, tries: x.tries - 1 } : x)) }));
+  edit(h, OUTBOX(id), (all) => ({ items: all.map((x) => (ids.includes(x.id) ? { ...x, typedAt: null, tries: x.tries - 1, sends: x.sends - 1 } : x)) }));
   return { typed: 0, err: r.err || "tmux refused", lost };
 }
 
