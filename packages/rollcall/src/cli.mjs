@@ -121,6 +121,8 @@ export async function main(argv) {
       case "_codex-send": return await (await import("./codex/send.mjs")).codexSend(rest);
       case "claude-worker": return await (await import("./claude/worker.mjs")).claudeWorker(rest);
       case "_claude-send": return await (await import("./claude/send.mjs")).claudeSend(rest);
+      case "host": return await (await import("./host/server.mjs")).hostCommand(rest);
+      case "_host-call": return await (await import("./host/client.mjs")).hostCall(rest);
       case "usage": return await usage(rest);
       case "park": return parkCommand(rest);
       case "back": return back(rest);

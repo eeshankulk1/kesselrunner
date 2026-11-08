@@ -1,0 +1,270 @@
+// Done when: `rollcall host` runs task agents as its children (here test/fixtures/fake-claude.mjs and fake-codex.mjs)
+// and its socket drives them: start, words sent and queued, a request answered from two clients with the first
+// winning, interrupt, an idle agent parking and a message waking it, one history across a session change, earlier
+// sessions backfilled from their transcripts, a restart keeping requests and history (an answer to a request whose
+// process is gone goes in as the owner's words), the push subscription's lines, and the stream worker's control socket
+// (claude/live.mjs) reaching a hosted agent unchanged.
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { request } from "../src/claude/send.mjs";
+import { connect, socketFor } from "../src/host/client.mjs";
+import { BIN, FIXTURES, sandbox, until } from "./helpers.mjs";
+
+const FAKE = join(FIXTURES, "fake-claude.mjs");
+chmodSync(FAKE, 0o755);
+
+const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
+const lines = (f) => { try { return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+
+/** A sandbox with home alpha and task t1 (worktree: the repo), a fake Claude launch file, and a host to start. */
+function setup(t, { env = {} } = {}) {
+  const sb = sandbox(t);
+  const h = "alpha";
+  const dir = join(sb.home, "_supervisors", h, "workers", "t1");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(sb.home, "_supervisors", h, "tasks"), { recursive: true });
+  const taskFile = join(sb.home, "_supervisors", h, "tasks", "t1.json");
+  const task = (patch = {}) => writeFileSync(taskFile, JSON.stringify({ id: "t1", home: h, title: "Host test", state: "working", worktree: sb.main, repo: { main: sb.main, name: "repo", key: "repo" }, sessions: [], ...patch }));
+  task();
+  const settings = join(sb.root, "settings.json");
+  writeFileSync(settings, "{}");
+  const claudeDir = join(sb.root, "claude-config");
+  const log = join(sb.root, "fake.jsonl");
+  const launch = (patch = {}) => {
+    const cfg = { home: h, task: "t1", session: randomUUID(), resume: false, settings, cwd: sb.main, bin: FAKE, prompt: null, mode: null, model: null, effort: null, addDir: [], name: null, view: "chat", ...patch };
+    writeFileSync(join(dir, "claude-launch.json"), JSON.stringify(cfg));
+    return cfg;
+  };
+  const hostEnv = { ...sb.env, FAKE_CLAUDE_LOG: log, CLAUDE_CONFIG_DIR: claudeDir, ...env };
+  const procs = [];
+  const sock = socketFor(sb.home);
+  const x = {
+    sb, h, dir, log, sock, claudeDir, task, launch,
+    agent: () => readJson(join(dir, "agent.json")),
+    compat: () => readJson(join(dir, "claude.json")),
+    history: () => lines(join(dir, "history.jsonl")),
+    fake: () => lines(log),
+    /** What the host wrote to the fakes' stdin. */
+    inputs: () => lines(log).filter((l) => l.in).map((l) => l.in),
+    /** Starts `rollcall host` and waits until its socket answers. */
+    async startHost() {
+      const out = openSync(join(sb.root, `host-${procs.length}.log`), "w");
+      const p = spawn(process.execPath, [BIN, "host"], { env: hostEnv, stdio: ["ignore", out, out] });
+      closeSync(out);
+      p.exited = new Promise((r) => p.on("exit", (code) => r(code)));
+      procs.push(p);
+      await until(async () => { try { const c = await connect({ sock }); c.close(); return true; } catch { return false; } });
+      return p;
+    },
+    async client(onEvent = null) {
+      const c = await connect({ sock, onEvent });
+      t.after(() => c.close());
+      return c;
+    },
+  };
+  t.after(async () => {
+    for (const p of procs) if (p.exitCode === null) { p.kill("SIGTERM"); await Promise.race([p.exited, new Promise((r) => setTimeout(r, 3000).unref())]); }
+    for (const p of procs) { try { p.kill("SIGKILL"); } catch {} }
+    for (const l of lines(log)) if (l.argv) { try { process.kill(l.pid, "SIGKILL"); } catch {} }
+  });
+  return x;
+}
+
+const ref = "alpha:t1";
+
+test("host: start, say, the history and the push lines", async (t) => {
+  const x = setup(t);
+  x.launch();
+  await x.startHost();
+  const events = [];
+  const sub = await x.client((e) => events.push(e));
+  const s = await sub.call("subscribe", { refs: [ref] });
+  assert.equal(s.ok, true);
+  const c = await x.client();
+  const r = await c.call("start", { ref });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.agent.state, "idle");
+  assert.equal(r.agent.send, "start");
+  const said = await c.call("say", { ref, text: "hello there" });
+  assert.equal(said.how, "sent");
+  await until(() => x.agent()?.state === "idle" && x.history().some((e) => e.ev === "item" && e.item.kind === "turn" && e.item.phase === "end"));
+  const page = await c.call("history", { ref });
+  assert.equal(page.ok, true);
+  const kinds = page.items.map((i) => i.kind);
+  assert.deepEqual(kinds, ["turn", "user", "assistant", "turn"]);
+  assert.equal(page.items[1].text, "hello there");
+  assert.equal(page.items[1].id, said.uuid, "the words keep the id they were sent with");
+  assert.equal(page.items[2].text, "done: hello there");
+  assert.equal(page.items[3].tokens.output, 42);
+  // The push connection saw the same, live: state changes, the queued words, streamed text, the items.
+  const evs = events.map((e) => e.ev);
+  for (const ev of ["state", "session", "item", "text"]) assert.ok(evs.includes(ev), `a ${ev} event: ${evs.join(",")}`);
+  assert.ok(events.some((e) => e.ev === "item" && e.item.queued && e.item.id === said.uuid));
+  assert.equal(events.filter((e) => e.ev === "text").map((e) => e.append).join(""), "done: hello there");
+  assert.ok(events.every((e) => e.ref === ref && e.v === 1 && Number.isFinite(e.seq)));
+  // The compat record points the stream worker's seam at the host.
+  const rec = x.compat();
+  assert.equal(rec.view, "chat");
+  assert.equal(rec.hosted, true);
+  const viaSeam = await request(rec.sock, { op: "say", text: "through the seam", from: "rollcall" });
+  assert.equal(viaSeam.ok, true);
+  await until(() => x.inputs().some((m) => m.type === "user" && m.message?.content === "through the seam"));
+});
+
+test("host: words while a turn runs join it; interrupt stops the turn", async (t) => {
+  const x = setup(t);
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  assert.equal((await c.call("say", { ref, text: "SLOW work" })).how, "sent");
+  await until(() => x.fake().some((l) => l.replayed));
+  const q = await c.call("say", { ref, text: "and also this" });
+  assert.equal(q.how, "queued");
+  assert.equal((await c.call("state", { ref })).agent.send, "join");
+  const i = await c.call("interrupt", { ref });
+  assert.equal(i.interrupted, true);
+  await until(() => x.agent()?.state === "idle");
+  const items = (await c.call("history", { ref })).items;
+  const taken = items.find((it) => it.id === q.uuid);
+  assert.equal(taken?.kind, "user", "the queued words were taken into the turn");
+  assert.equal(taken.queued, false);
+  assert.equal(items.filter((it) => it.kind === "turn" && it.phase === "start").length, 1, "one turn, not two");
+  assert.ok(items.find((it) => it.kind === "turn" && it.phase === "end")?.error, "an interrupted turn ends with an error");
+});
+
+test("host: a request answered from two clients: the first wins, the other hears already-answered", async (t) => {
+  const x = setup(t);
+  x.launch();
+  await x.startHost();
+  const events = [];
+  const a = await x.client((e) => events.push(e));
+  await a.call("subscribe", {});
+  const b = await x.client();
+  await a.call("start", { ref });
+  await a.call("say", { ref, text: "TOOL please" });
+  await until(() => events.some((e) => e.ev === "request"));
+  const req = events.find((e) => e.ev === "request").request;
+  assert.match(req.id, /^rq-/);
+  assert.equal(req.kind, "permission");
+  assert.equal(req.tool, "Bash");
+  assert.equal(x.compat().prompt?.id, req.id, "the compat record shows the open request as its prompt");
+  const [r1, r2] = await Promise.all([a.call("answer", { request: req.id, allow: true, by: "mac" }), b.call("answer", { request: req.id, allow: false, by: "phone" })]);
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, false);
+  assert.equal(r2.error.code, "already-answered");
+  await until(() => x.agent()?.state === "idle");
+  const items = (await a.call("history", { ref })).items;
+  assert.match(items.find((it) => it.kind === "assistant")?.text ?? "", /^allowed/);
+  assert.ok(events.some((e) => e.ev === "closed" && e.id === req.id && e.by === "mac"));
+  assert.equal(x.compat().prompt, null);
+  // The seam's answer op on a closed request is `already`, as the stream worker's was.
+  const again = await request(x.compat().sock, { op: "answer", prompt: req.id, allow: true });
+  assert.deepEqual(again, { ok: true, already: true });
+});
+
+test("host: an idle agent parks; a message wakes it on its session", async (t) => {
+  const x = setup(t, { env: { ROLLCALL_HOST_PARK_MS: "400" } });
+  const cfg = x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "first" });
+  await until(() => x.agent()?.state === "parked", { timeout: 15_000 });
+  assert.equal(x.agent().pid, null);
+  assert.equal(x.compat()?.hosted, true, "a parked agent keeps its record: a say wakes it");
+  const st = await c.call("state", { ref });
+  assert.equal(st.agent.send, "wake");
+  const w = await c.call("say", { ref, text: "second" });
+  assert.equal(w.how, "resumed");
+  await until(() => x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 2);
+  const argvs = x.fake().filter((l) => l.argv).map((l) => l.argv);
+  assert.equal(argvs.length, 2);
+  assert.equal(argvs[1][argvs[1].indexOf("--resume") + 1], cfg.session);
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["first", "second"]);
+});
+
+test("host: one history across a session change, with earlier sessions backfilled", async (t) => {
+  const x = setup(t);
+  // An earlier session that ran in tmux: its transcript is all there is.
+  const old = randomUUID();
+  const tdir = join(x.claudeDir, "projects", x.sb.main.replace(/[^a-zA-Z0-9]/g, "-"));
+  mkdirSync(tdir, { recursive: true });
+  const ts = (n) => new Date(Date.now() - 60_000 + n * 1000).toISOString();
+  writeFileSync(join(tdir, `${old}.jsonl`), [
+    { type: "user", uuid: "u-old", timestamp: ts(0), sessionId: old, message: { role: "user", content: "old words" } },
+    { type: "assistant", uuid: "a-old", timestamp: ts(1), sessionId: old, message: { id: "msg_old", role: "assistant", content: [{ type: "text", text: "old reply" }] } },
+    { type: "system", subtype: "stop_hook_summary", uuid: "s-old", timestamp: ts(2), sessionId: old },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  x.task({ sessions: [{ id: old, at: Date.now() - 60_000, endedAt: Date.now() - 30_000, tmux: true }] });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  // A read before any start backfills.
+  const first = await c.call("history", { ref });
+  assert.deepEqual(first.items.map((i) => i.text).filter(Boolean), ["old words", "old reply"]);
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "new words" });
+  await until(() => x.agent()?.state === "idle" && x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 2);
+  // A handoff: a new session in the same task. The history carries on.
+  await c.call("stop", { ref });
+  await until(() => x.agent()?.state === "stopped");
+  x.launch();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "after the handoff" });
+  await until(() => x.agent()?.state === "idle" && x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 3);
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["old words", "new words", "after the handoff"]);
+  const sessions = x.history().filter((e) => e.ev === "session");
+  assert.deepEqual(sessions.map((e) => e.how), ["backfill", "new", "new"]);
+  // Pages: a stable cursor.
+  const small = await c.call("history", { ref, limit: 2 });
+  assert.equal(small.more, true);
+  const before = await c.call("history", { ref, limit: 100, before: small.cursor });
+  assert.equal(before.items.at(-1).id, page.items[page.items.length - 3].id);
+});
+
+test("host: a restart keeps history and requests; an answer to a request whose process is gone goes in as words", async (t) => {
+  const x = setup(t);
+  const cfg = x.launch();
+  const h1 = await x.startHost();
+  let c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "ASK me" });
+  await until(() => x.history().some((e) => e.ev === "request"));
+  const req = x.history().find((e) => e.ev === "request").request;
+  assert.equal(req.kind, "question");
+  h1.kill("SIGKILL");
+  await h1.exited;
+  await x.startHost();
+  c = await x.client();
+  const st = (await c.call("state", { ref })).agent;
+  assert.equal(st.state, "parked");
+  assert.deepEqual(st.requests.map((r) => r.id), [req.id], "the request survived the restart");
+  const page = await c.call("history", { ref });
+  assert.ok(page.items.some((i) => i.text === "ASK me"));
+  assert.ok(page.items.some((i) => i.kind === "system" && /host restarted/.test(i.text)));
+  const r = await c.call("answer", { request: req.id, answers: { "Ship it?": "Yes" } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.how, "words");
+  await until(() => x.inputs().some((m) => m.type === "user" && /Ship it\? Yes/.test(m.message?.content ?? "")));
+  const argvs = x.fake().filter((l) => l.argv).map((l) => l.argv);
+  assert.equal(argvs.at(-1)[argvs.at(-1).indexOf("--resume") + 1], cfg.session);
+  const again = await c.call("answer", { request: req.id, answers: { "Ship it?": "No" } });
+  assert.equal(again.error?.code, "already-answered");
+});
+
+test("host: only one runs per store", async (t) => {
+  const x = setup(t);
+  await x.startHost();
+  const second = spawn(process.execPath, [BIN, "host"], { env: { ...x.sb.env }, stdio: "ignore" });
+  const code = await new Promise((r) => second.on("exit", r));
+  assert.equal(code, 0);
+  const c = await x.client();
+  assert.equal((await c.call("hello")).ok, true);
+});
