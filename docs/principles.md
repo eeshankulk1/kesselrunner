@@ -20,7 +20,7 @@ A suite that gives the same answer every run belongs in CI, not in a session's c
 
 ## The merge queue lands green PRs
 
-Sessions do not race each other to main or merge main in ahead of time. A PR joins the queue once it is open, pushed and green. The lander, a script and never an agent, lands ready PRs in the order they became ready, several at a time where it can, each batch tested as the tree that lands. Each session hears only its own news: landed, a conflict, a failed check.
+Sessions do not race each other to main or merge main in ahead of time. A PR joins the queue once it is open, pushed and green. The lander, a script and never an agent, lands ready PRs in the order they became ready. A PR green on its own head that merges cleanly lands as it is; the rest go several at a time in trains, each tested as the tree that lands. Each session hears only its own news: landed, a conflict, a failed check.
 
 ## Memory is automatic
 

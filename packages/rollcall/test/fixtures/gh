@@ -9,9 +9,11 @@
 //            lag?: ms (GitHub behind itself: pr view shows each PR as it stood that long ago, a new PR is not there yet,
 //                 and a merge is refused until the head it names has shown), failView?: text (pr view fails with it),
 //            annotations?: { <job id>: [{ message }] }, reruns: { <run id>: n }, calls: [argv...],
-//            failGraphql?: text (api graphql fails with it) }
+//            failGraphql?: text (api graphql fails with it), upToDate?: true (branch protection: a PR must hold its base),
+//            failMerge?: text (the next pr merge fails with it, once) }
 //   A PR's review threads: pr.threads = [{ id, isResolved, isOutdated, path, line, comments: [{ author: { login, __typename }, body, url, createdAt }] }];
 //   api graphql answers the reviewThreads query and the addPullRequestReviewThreadReply / resolveReviewThread mutations.
+// A check runs forever (pending: true, or pendingIfFiles: every file exists at the PR's head).
 // A check fails when every file in failIfFiles exists at the PR's head, or failIfGrep matches there.
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -48,13 +50,15 @@ function checks(pr, sha = head(pr)) {
     if (c.late && Date.now() - s.seen[sha] < c.late) return [];
     const run = 100 + i;
     const link = `${URL}/actions/runs/${run}/job/1`;
-    if (c.pending) return { __typename: "CheckRun", name: c.name, status: "IN_PROGRESS", conclusion: "", detailsUrl: link };
+    if (c.pending || (Array.isArray(c.pendingIfFiles) && c.pendingIfFiles.every((f) => gitOk("cat-file", "-e", `${sha}:${f}`)))) return { __typename: "CheckRun", name: c.name, status: "IN_PROGRESS", conclusion: "", detailsUrl: link };
     const byFiles = Array.isArray(c.failIfFiles) && c.failIfFiles.every((f) => gitOk("cat-file", "-e", `${sha}:${f}`));
     const byGrep = c.failIfGrep && gitOk("grep", "-q", "-E", c.failIfGrep, sha, "--", ...(c.paths ?? []));
     return { __typename: "CheckRun", name: c.name, status: "COMPLETED", conclusion: byFiles || byGrep ? "FAILURE" : "SUCCESS", detailsUrl: link };
   });
 }
 
+/** Branch protection that wants the branch up to date (s.upToDate): an open PR whose head lacks its base is behind. */
+const behind = (pr, sha = head(pr)) => !!s.upToDate && pr.state === "OPEN" && !gitOk("merge-base", "--is-ancestor", `refs/heads/${pr.baseRefName}`, sha);
 const blocked = (pr, sha = head(pr)) => (s.ci ?? []).some((c) => c.required && !checks(pr, sha).some((x) => x.name === c.name && x.conclusion === "SUCCESS"));
 
 /** Every field as it stands now, kept each time it changes: what a view shows is the last one `lag` old. */
@@ -63,7 +67,7 @@ function current(pr) {
   const all = {
     number: pr.number, state: pr.state, isDraft: !!pr.isDraft, headRefName: pr.headRefName, headRefOid: sha, baseRefName: pr.baseRefName,
     url: `${URL}/pull/${pr.number}`, title: pr.title, body: pr.body ?? "", statusCheckRollup: pr.state === "OPEN" ? checks(pr, sha) : [],
-    mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergeStateStatus: blocked(pr, sha) ? "BLOCKED" : "CLEAN",
+    mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergeStateStatus: blocked(pr, sha) ? "BLOCKED" : behind(pr, sha) ? "BEHIND" : "CLEAN",
   };
   const seen = (s.history[pr.number] ??= []);
   if (JSON.stringify(seen.at(-1)?.all) !== JSON.stringify(all)) seen.push({ at: Date.now(), all });
@@ -92,13 +96,14 @@ if (group === "pr" && cmd === "view") {
   s.prs.push(pr);
   process.stdout.write(`${URL}/pull/${pr.number}\n`);
 } else if (group === "pr" && cmd === "merge") {
+  if (s.failMerge) { const text = s.failMerge; delete s.failMerge; die(text); }
   const pr = find(ref);
   if (!pr || pr.state !== "OPEN") die("pull request is not open");
   const sha = head(pr);
   const want = opt("--match-head-commit");
   if (want && want !== sha) die("head branch was modified");
   if (s.lag && view(pr, "headRefOid").headRefOid !== sha) die("GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)");
-  if (blocked(pr)) die(`X Pull request t/repo#${pr.number} is not mergeable: the base branch policy prohibits the merge.`);
+  if (blocked(pr) || behind(pr)) die(`X Pull request t/repo#${pr.number} is not mergeable: the base branch policy prohibits the merge.`);
   const baseRef = `refs/heads/${pr.baseRefName}`;
   const base = git("rev-parse", baseRef);
   const mt = spawnSync("git", ["-C", ORIGIN, "merge-tree", "--write-tree", base, sha], { encoding: "utf8" });

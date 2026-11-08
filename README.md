@@ -57,7 +57,7 @@ you ──▶ the Falcon (supervisor) ──┬──▶ worker: worktree + tmux
 - **The Falcon, the supervisor.** The one session you type into. It turns each ask into a task, puts a crew member on it, brings the crew's questions to its own picker, and never edits code itself. More ships wait in the hangar: a second supervisor is the Venator, then the Ghost, each with its own crew.
 - **The crew.** Each worker is an ordinary Claude Code session in its own git worktree and tmux tab, so tasks never share a checkout. Click a tab to watch one, or type `@leia <words>` to talk to it.
 - **The ship chain.** `/pr-create` checks, reviews and documents the change, opens the PR and watches CI, with helper agents for review, tests and docs.
-- **[rollcall](packages/rollcall/README.md).** Keeps every session aware of the others, holds the task records, and runs the merge queue: a script that lands green PRs in the order they became ready, tested as the tree that lands.
+- **[rollcall](packages/rollcall/README.md).** Keeps every session aware of the others, holds the task records, and runs the merge queue: a script that lands green PRs in the order they became ready, as they are when they merge cleanly and otherwise in trains tested as the tree that lands.
 - **[docsic](https://github.com/eeshankulk1/docsic).** Project memory. Where each project stands and what past sessions learned reach every new session without you asking.
 
 Your own instructions, settings, skills and guards live in an [overlay](docs/overlay.md), a folder of yours that sync layers on top and never touches.
