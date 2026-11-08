@@ -795,8 +795,9 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // worker's conversation (the prompt-suggestion pass after each turn, whose tool calls it denies anyway),
       // carries an agent_id: taken for the worker's, it turned the task needs-you over a question no one asked.
       if (p.agent_id) return null;
-      // While the owner watches this window, the question opens right here.
-      if (tmux.viewed(h, id)) return null;
+      // While the owner watches this window, the question opens right here. A terminal that only shows it (the
+      // Cockpit app keeps one on each task) is not the owner watching.
+      if (tmux.watched(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);

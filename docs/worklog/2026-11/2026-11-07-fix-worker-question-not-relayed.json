@@ -1,0 +1,1 @@
+{"date": "2026-11-07", "project": "kesselrunner", "summary": "A worker's question now goes to the supervisor's picker unless a focused terminal shows its window, and the dialog news names the question.", "pr": 9, "why": "The Cockpit app keeps a terminal on every task it opened, so rollcall took a task as watched and left t19's question unseen in its window."}
