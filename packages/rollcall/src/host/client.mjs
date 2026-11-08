@@ -121,3 +121,32 @@ export async function hostCall() {
 export function agentRecord(h, id) {
   return readJson(join(store.workerDir(h, id ?? h), "agent.json"));
 }
+
+/**
+ * `rollcall open <ref>`: the terminal escape hatch. The real CLI on the agent's own session (`claude --resume`, `codex
+ * resume`), in this terminal. The host ends its process first and shows the agent as `terminal` while this runs; when
+ * the CLI exits, the host reads what the session added into the history, and words held meanwhile wake the agent.
+ */
+export async function openCommand([ref] = [], { say = (s) => process.stderr.write(`${s}\n`) } = {}) {
+  if (!ref || ref.startsWith("-")) { say("usage: rollcall open <supervisor>[:<task>]"); return 2; }
+  let c;
+  try { c = await ensureHost(); } catch (e) { say(`rollcall: ${e.message}`); return 1; }
+  try {
+    const r = await c.call("terminal", { ref });
+    if (!r.ok) { say(`rollcall: ${r.error?.message ?? "the host did not open it"}`); return 1; }
+    const env = { ...process.env };
+    for (const k of [...(r.unset ?? []), "ROLLCALL_TASK"]) delete env[k];
+    // Ctrl-C belongs to the CLI: this process only waits for it.
+    const quiet = () => {};
+    process.on("SIGINT", quiet);
+    const code = await new Promise((resolve) => {
+      const child = spawn(r.argv[0], r.argv.slice(1), { cwd: r.cwd ?? undefined, stdio: "inherit", env });
+      child.on("error", (e) => { say(`rollcall: ${e.message}`); resolve(1); });
+      child.on("exit", (n, sig) => resolve(n ?? (sig ? 1 : 0)));
+    });
+    process.off("SIGINT", quiet);
+    const done = await c.call("terminal-done", { ref });
+    if (done.ok && done.added) say(`rollcall: ${done.added} item${done.added === 1 ? "" : "s"} from the terminal joined ${ref}'s chat`);
+    return code;
+  } finally { c.close(); }
+}

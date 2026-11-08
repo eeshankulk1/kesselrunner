@@ -17,7 +17,8 @@
 // parent is gone.
 //
 // $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv }, { in } (every stdin line), { replayed }, { sigterm }.
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 
@@ -30,6 +31,19 @@ log({ argv: args });
 
 if (!args.includes("-p")) {
   process.stdout.write("fake claude: the real CLI\n");
+  // $FAKE_CLAUDE_TERMINAL_TURN: one turn in the terminal ("<words>"), written to the session's transcript, then exit 0.
+  if (process.env.FAKE_CLAUDE_TERMINAL_TURN) {
+    const session = argAfter("--resume") ?? argAfter("--session-id");
+    const dir = join(process.env.CLAUDE_CONFIG_DIR, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"));
+    mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    const words = process.env.FAKE_CLAUDE_TERMINAL_TURN;
+    appendFileSync(join(dir, `${session}.jsonl`), [
+      { type: "user", uuid: `tu-${now}`, timestamp: new Date(now).toISOString(), sessionId: session, message: { role: "user", content: words } },
+      { type: "assistant", uuid: `ta-${now}`, timestamp: new Date(now + 1).toISOString(), sessionId: session, message: { id: `msg_t${now}`, role: "assistant", content: [{ type: "text", text: `terminal: ${words}` }] } },
+    ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+    setTimeout(() => process.exit(0), Number(process.env.FAKE_CLAUDE_TERMINAL_MS) || 300);
+  }
   process.on("SIGTERM", () => { log({ sigterm: true }); process.exit(0); });
   // Its worker gone (killed in a test's cleanup), it goes too: nothing else would stop it.
   const parent = process.ppid;

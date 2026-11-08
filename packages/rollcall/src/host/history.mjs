@@ -92,6 +92,28 @@ export class History {
   }
 }
 
+/** Every item of one session, folded from its Claude transcript or Codex journal, ids as the history keeps them. */
+async function sessionItems({ home, id, dir, session, cwd, harness }) {
+  const conv = await import("../conversation.mjs");
+  const { journalFile } = await import("../harness/codex.mjs");
+  const transcript = harness === "codex" ? journalFile(home, id, session) : conv.transcriptFor(session, cwd);
+  // `dir` gives a turn its time and tokens (turns.jsonl); "none.json" keeps the stream worker's record out of it.
+  const target = { ok: true, ref: `${home}:${id}`, home, id, harness, dir, session, cwd, transcript, record: "none.json" };
+  const pages = [];
+  let before = null;
+  for (let i = 0; i < 1000; i++) {
+    const p = conv.readPage(target, { before, limit: 5000 });
+    if (!p.ok) break;
+    pages.unshift(p.items);
+    if (!p.more) break;
+    before = p.cursor;
+  }
+  const prefix = harness === "codex" ? `${session.slice(0, 8)}:` : "";
+  // What a stream worker's live file adds is not the transcript's: never logged.
+  return pages.flat().filter((x) => !x.streaming && !x.queued)
+    .map((x) => (prefix ? { ...x, id: `${prefix}${x.id}`, ...(x.parent ? { parent: `${prefix}${x.parent}` } : {}) } : x));
+}
+
 /**
  * Writes every earlier session of task `t` the history does not name yet, folded from its Claude transcript or Codex
  * journal (conversation.mjs, the same reader `api conversation` used), as a `session` event (`how: "backfill"`) and its
@@ -99,8 +121,6 @@ export class History {
  */
 export async function backfill(hist, t, { skip = null } = {}) {
   if (!t?.sessions?.length) return 0;
-  const conv = await import("../conversation.mjs");
-  const { journalFile } = await import("../harness/codex.mjs");
   const { sessionHarness } = await import("../harness/index.mjs");
   const dir = store.workerDir(t.home, t.id);
   const cwd = t.worktree ?? t.repo?.main ?? null;
@@ -108,27 +128,23 @@ export async function backfill(hist, t, { skip = null } = {}) {
   for (const s of t.sessions) {
     if (!s?.id || s.id === skip || hist.hasSession(s.id)) continue;
     const harness = sessionHarness(s);
-    const transcript = harness === "codex" ? journalFile(t.home, t.id, s.id) : conv.transcriptFor(s.id, cwd);
-    // `dir` gives a turn its time and tokens (turns.jsonl); "none.json" keeps the stream worker's record out of it.
-    const target = { ok: true, ref: `${t.home}:${t.id}`, home: t.home, id: t.id, harness, dir, session: s.id, cwd, transcript, record: "none.json" };
-    const pages = [];
-    let before = null;
-    for (let i = 0; i < 1000; i++) {
-      const p = conv.readPage(target, { before, limit: 5000 });
-      if (!p.ok) break;
-      pages.unshift(p.items);
-      if (!p.more) break;
-      before = p.cursor;
-    }
+    const items = await sessionItems({ home: t.home, id: t.id, dir, session: s.id, cwd, harness });
     hist.append({ ev: "session", session: s.id, harness, how: "backfill", started: s.at ?? null });
-    const prefix = harness === "codex" ? `${s.id.slice(0, 8)}:` : "";
-    for (const x of pages.flat()) {
-      // What a stream worker's live file adds is not the transcript's: never logged.
-      if (x.streaming || x.queued) continue;
-      const item = prefix ? { ...x, id: `${prefix}${x.id}`, ...(x.parent ? { parent: `${prefix}${x.parent}` } : {}) } : x;
-      hist.append({ ev: "item", session: s.id, item });
-      n++;
-    }
+    for (const item of items) { hist.append({ ev: "item", session: s.id, item }); n++; }
   }
   return n;
+}
+
+/**
+ * What session `session` added outside the host (the terminal escape hatch ran the real CLI on it): the items its
+ * transcript holds that the history does not, appended in order. Returns them.
+ */
+export async function catchUp(hist, where) {
+  const added = [];
+  for (const item of await sessionItems(where)) {
+    if (hist.index.has(item.id)) continue;
+    hist.append({ ev: "item", session: where.session, item });
+    added.push(item);
+  }
+  return added;
 }

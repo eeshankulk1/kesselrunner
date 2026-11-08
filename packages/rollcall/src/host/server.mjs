@@ -4,12 +4,12 @@
 // front ends call and subscribe. Each agent also gets the control socket and record the stream worker had
 // (claude/live.mjs), so delivery, `task tell`, answers and away mode reach it unchanged.
 import { randomBytes, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexRecordFile, launchFile, readJson, recordFile, writeJson } from "../claude/live.mjs";
-import { PLAN_MODES, SET_MODES, promptOf } from "../claude/stream.mjs";
+import { PLAN_MODES, SET_MODES, commandOf, promptOf } from "../claude/stream.mjs";
 import { dialogFlag } from "../delivery.mjs";
 import { pidAlive } from "../proc.mjs";
 import * as store from "../store.mjs";
@@ -17,14 +17,17 @@ import { recordClaude } from "../usage.mjs";
 import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
 import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
+import { loadFinder, relaysOf } from "../claude/worker.mjs";
 import { startCodexAgent } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
-import { History, backfill, historyFile } from "./history.mjs";
+import { History, backfill, catchUp, historyFile } from "./history.mjs";
+import { BIN, P } from "../session.mjs";
+import { spawn } from "node:child_process";
 
 export const INTERFACE = 1;
 const VERSION = "0.1.0";
-export const STATES = ["running", "idle", "parked", "stopped"];
-const SEND = { running: "join", idle: "start", parked: "wake", stopped: "wake" };
+export const STATES = ["running", "idle", "parked", "stopped", "terminal"];
+const SEND = { running: "join", idle: "start", parked: "wake", stopped: "wake", terminal: "hold" };
 const msEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 /** An idle agent parks after this long: Claude Code's own background agents stop after about an hour. */
 export const parkMs = () => msEnv("ROLLCALL_HOST_PARK_MS", 3600_000);
@@ -37,8 +40,8 @@ const NAME = { claude: "Claude Code", codex: "Codex" };
 /** The launch file the harness adapter wrote for an agent (claude-launch.json, codex-launch.json). */
 const launchOf = (h, id, harness) => (harness === "codex" ? codexLaunchFile(h, id) : launchFile(h, id));
 const mtime = (f) => { try { return statSync(f).mtimeMs; } catch { return -1; } };
-/** Which harness a start without one means: the newer launch file. */
-const newerLaunch = (h, id) => (mtime(codexLaunchFile(h, id)) > mtime(launchFile(h, id)) ? "codex" : "claude");
+/** Which harness a start without one means: the newer launch file. A supervisor is always Claude Code. */
+const newerLaunch = (h, id) => (id && mtime(codexLaunchFile(h, id)) > mtime(launchFile(h, id)) ? "codex" : "claude");
 
 let logPath = null;
 export function log(line) {
@@ -71,13 +74,18 @@ export function wordsFor(req, a) {
   return a.allow === true ? `I approve ${what} (you asked before this session restarted). Go ahead with it.` : `I declined ${what}${a.why ? `: ${a.why}` : "."}`;
 }
 
+/**
+ * One agent: a task's worker (`id` its task), or a supervisor's own session (`id` null, ref the bare home, its files in
+ * the home's own worker folder, as the stream worker keeps them).
+ */
 class Agent {
   constructor(h, id) {
-    this.h = h; this.id = id; this.ref = `${h}:${id}`;
-    this.dir = store.workerDir(h, id);
+    this.h = h; this.id = id ?? null; this.ref = id ? `${h}:${id}` : h;
+    this.wid = id ?? h; // the worker folder's name
+    this.dir = store.workerDir(h, this.wid);
     this.file = join(this.dir, "agent.json");
     const rec = readJson(this.file);
-    this.rec = rec ?? { ref: this.ref, home: h, task: id, harness: "claude", state: null, session: null, since: Date.now(), turnAt: null, parkedAt: null, model: null, mode: null };
+    this.rec = rec ?? { ref: this.ref, home: h, task: this.id, harness: "claude", state: null, session: null, since: Date.now(), turnAt: null, parkedAt: null, model: null, mode: null };
     this.proc = null;
     this.pending = new Map(); // request id -> { rid, input, prompt }
     this.queued = []; // words sent, not taken yet: { uuid, text, at, from, attachments }
@@ -96,7 +104,7 @@ class Agent {
   state() {
     const s = this.rec.state ?? "stopped";
     return {
-      ref: this.ref, home: this.h, task: this.id, harness: this.rec.harness, state: s, send: SEND[s], session: this.rec.session,
+      ref: this.ref, home: this.h, task: this.id, supervisor: !this.id, harness: this.rec.harness, state: s, send: SEND[s], session: this.rec.session,
       since: this.rec.since, turnAt: this.rec.turnAt, parkedAt: this.rec.parkedAt, model: this.rec.model, mode: this.rec.mode,
       pid: this.proc?.pid ?? null, requests: [...this.hist.open.values()], queued: this.queued.map(({ uuid, text, at, from }) => ({ uuid, text, at, from })),
     };
@@ -162,8 +170,8 @@ class Agent {
   }
 
   /** Writes earlier sessions into the history once, before anything else is appended (`skip`: a session starting fresh). */
-  async backfill(skip = null) {
-    const t = store.readTask(this.h, this.id);
+  async backfill(skip = null, also = null) {
+    const t = this.id ? store.readTask(this.h, this.id) : await supervisorTask(this.h, also);
     if (t) await backfill(this.hist, t, { skip });
   }
 
@@ -175,6 +183,7 @@ class Agent {
 
   /** Starts the agent's process on its launch file: a new session, or its last one resumed. */
   async start({ prompt = null, restart = false, harness = null } = {}) {
+    if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal: it carries on here when the terminal closes`);
     harness = HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
     if (this.proc && restart) {
       // supervisor.mjs launch wrote a launch file: the same session running takes its first prompt as words; another
@@ -202,7 +211,9 @@ class Agent {
     await this.listen();
     // Codex resumes the thread its launch names; Claude Code the session its launch says exists.
     const resume = harness === "codex" ? !!cfg.thread : !!cfg.resume;
-    if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(resume ? null : cfg.session);
+    if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(resume ? null : cfg.session, resume ? cfg.session : null);
+    // A supervisor's question that names a task relays that task's question (claude/worker.mjs relaysOf).
+    if (!this.id) await loadFinder();
     this.rec.harness = harness;
     this.rec.session = cfg.session;
     this.rec.model = cfg.model ?? null;
@@ -259,6 +270,14 @@ class Agent {
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
+    if (this.rec.state === "terminal") {
+      // Open in a terminal: the words wait, and go in when the terminal closes (closeTerminal).
+      const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
+      this.queued.push(q);
+      broadcast(this.ref, "item", { item: { id: q.uuid, at: q.at, kind: "user", text, images: [], from: q.from, queued: true } });
+      this.persist();
+      return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
+    }
     let how;
     if (!this.proc) {
       const r = await this.start();
@@ -270,6 +289,7 @@ class Agent {
   }
 
   async interrupt() {
+    if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal: stop its turn there`);
     if (!this.proc || this.rec.state !== "running") return { ok: true, interrupted: false };
     await this.proc.interrupt().catch(() => null);
     return { ok: true, interrupted: true };
@@ -303,7 +323,7 @@ class Agent {
     this.pending.delete(id);
     this.hist.append({ ev: "closed", id, how, by: by ?? null, answer });
     broadcast(this.ref, "closed", { id, how, by: by ?? null });
-    if (!this.hist.open.size) rmSync(dialogFlag(this.h, this.id), { force: true });
+    if (!this.hist.open.size) rmSync(dialogFlag(this.h, this.wid), { force: true });
   }
 
   /** The first answer wins; a request whose process is gone is answered as the owner's words on a resumed session. */
@@ -315,6 +335,17 @@ class Agent {
     if (!req) return err("not-found", `no request ${id}`);
     if (req.kind === "question" && !(a.answers && typeof a.answers === "object") && a.allow !== false) return err("bad-payload", "a question takes answers");
     if (a.mode != null && !PLAN_MODES.has(a.mode)) return err("bad-payload", `mode is one of ${[...PLAN_MODES].join(", ")}`);
+    // A supervisor's question that relays a task's question is that task's request: the answer goes to the task as a
+    // front end's does (answer.mjs, first answer wins), and closing its picker answers this one (closeFalconPicker).
+    if (req.relays?.ref && a.allow !== false && a.answers && typeof a.answers === "object") {
+      const r = await relayAnswer(req, a, by);
+      if (r.ok || r.error?.code === "already-answered") {
+        if (!r.ok) return err("already-answered", r.error.message);
+        if (this.hist.open.has(id)) await this.answer({ request: id, allow: false, why: `${P} The owner answered this from ${by ?? "a front end"}, and the answer reached the worker already. Do not ask it again.` }, by);
+        return { ok: true, answered: true, how: "relayed", delivered: r.how ?? null };
+      }
+      // The task asks nothing now (or something newer): the pick is the supervisor's own, as in its picker.
+    }
     const answer = { allow: a.allow ?? null, why: a.why ?? null, always: a.always ?? null, mode: a.mode ?? null, answers: a.answers ?? null };
     const p = this.pending.get(id);
     if (p && this.proc) {
@@ -347,6 +378,7 @@ class Agent {
   }
 
   park() {
+    if (this.rec.state === "terminal") return false;
     if (!this.proc) {
       if (this.rec.state === "running" || this.rec.state === "idle") this.setState("parked");
       return true;
@@ -362,6 +394,76 @@ class Agent {
     if (!this.proc) { this.setState("stopped"); return true; }
     void this.endProcess("stop");
     return true;
+  }
+
+  /**
+   * The terminal escape hatch: the real CLI on this agent's own session, which the caller runs (`rollcall open`). The
+   * host ends its process first (two processes never share a session), shows `terminal` until closeTerminal, holds
+   * words sent meanwhile, and never parks it. `c` is the caller's connection: when it closes, so does the terminal.
+   */
+  async openTerminal(c = null) {
+    if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal already`);
+    if (this.rec.state === "running") return err("refused", `${this.ref} is in a turn: wait for it to end, or interrupt it, then open it`);
+    const harness = this.rec.state ? this.rec.harness : newerLaunch(this.h, this.id);
+    const cfg = readJson(launchOf(this.h, this.id, harness));
+    if (!cfg?.session || !cfg.bin) return err("not-found", `${this.ref} has no ${NAME[harness]} launch file`);
+    if (harness === "codex" && !(this.rec.thread ?? cfg.thread)) return err("refused", `${this.ref} has no Codex thread yet: start it first`);
+    if (this.proc) await this.endProcess("terminal");
+    if (this.rec.state === "running") return err("refused", `${this.ref} started a turn: try again when it ends`);
+    const started = harness === "claude" ? !!cfg.resume : true;
+    if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(started ? null : cfg.session, started ? cfg.session : null);
+    let args;
+    if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : [])];
+    else {
+      // As the stream worker's terminal view ran it: a session that never ran starts with its name and first prompt.
+      let first = "";
+      if (!started && cfg.prompt) { try { first = readFileSync(cfg.prompt, "utf8"); } catch {} }
+      args = [
+        ...(started ? ["--resume", cfg.session] : ["--session-id", cfg.session]),
+        ...(cfg.addDir?.length ? ["--add-dir", ...cfg.addDir] : []),
+        ...(cfg.settings ? ["--settings", cfg.settings] : []),
+        ...(cfg.mode ? ["--permission-mode", cfg.mode] : []),
+        ...(cfg.model ? ["--model", cfg.model] : []),
+        ...(cfg.effort ? ["--effort", cfg.effort] : []),
+        ...(!started && cfg.name ? ["-n", cfg.name] : []),
+        ...(first.trim() ? [first.startsWith("-") ? ` ${first}` : first] : []),
+      ];
+      writeJson(launchOf(this.h, this.id, harness), { ...cfg, resume: true, prompt: null });
+    }
+    const [cmd, argv] = commandOf(cfg.bin, args, join(this.dir, "host-env.sh"));
+    this.rec.harness = harness;
+    this.rec.session = cfg.session;
+    if (this.hist.sessions.at(-1)?.session !== cfg.session) {
+      this.hist.append({ ev: "session", session: cfg.session, harness, how: started ? "resume" : "new", terminal: true });
+      broadcast(this.ref, "session", { session: cfg.session, how: started ? "resume" : "new" });
+    }
+    this.terminal = { at: Date.now(), cwd: cfg.cwd ?? null };
+    this.rec.terminalAt = this.terminal.at;
+    this.setState("terminal");
+    log(`${this.ref}: open in a terminal on session ${cfg.session}`);
+    if (c) c.once("close", () => { void this.closeTerminal(); });
+    return { ok: true, argv: [cmd, ...argv], cwd: cfg.cwd && existsSync(cfg.cwd) ? cfg.cwd : null, unset: CHILD_UNSET, agent: this.state() };
+  }
+
+  /** The terminal closed: what its session added joins the history, and words held meanwhile wake the agent. */
+  async closeTerminal() {
+    if (!this.terminal) return { ok: true, closed: false };
+    const was = this.terminal;
+    this.terminal = null;
+    this.rec.terminalAt = null;
+    let added = [];
+    if (this.rec.harness === "claude") {
+      try { added = await catchUp(this.hist, { home: this.h, id: this.wid, dir: this.dir, session: this.rec.session, cwd: was.cwd, harness: "claude" }); } catch (e) { log(`${this.ref}: the terminal's turns were not read: ${e.message}`); }
+      for (const item of added) broadcast(this.ref, "item", { item });
+    } else this.item({ id: `host-terminal:${hex(6)}`, at: Date.now(), kind: "system", text: "Codex ran in a terminal. What it did there is in its thread, and Codex reads it on its next turn." });
+    log(`${this.ref}: the terminal closed (${added.length} items from it)`);
+    if (this.rec.state !== "terminal") { this.persist(); return { ok: true, closed: true, added: added.length, agent: this.state() }; }
+    this.setState("parked");
+    if (this.queued.length) {
+      const r = await this.start();
+      if (!r.ok) log(`${this.ref}: held words did not go in: ${r.error?.message}`);
+    }
+    return { ok: true, closed: true, added: added.length, agent: this.state() };
   }
 
   onEvent(e) {
@@ -411,7 +513,8 @@ class Agent {
       case "request": {
         const id = `rq-${hex(6)}`;
         const input = e.input ?? (e.req.input && typeof e.req.input === "object" ? e.req.input : {});
-        const p = e.prompt ? { ...e.prompt, id } : promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null });
+        const relays = this.id ? null : relaysOf(this.h, input);
+        const p = e.prompt ? { ...e.prompt, id } : promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null, relays });
         const request = { ...p, ref: this.ref, session: this.rec.session };
         this.pending.set(id, { rid: e.rid, input, prompt: p });
         this.hist.append({ ev: "request", request });
@@ -431,10 +534,10 @@ class Agent {
         this.ending = null;
         this.pending.clear(); // open requests stay open in the history: answered later, they go in as words
         this.streaming.clear();
-        rmSync(dialogFlag(this.h, this.id), { force: true });
+        rmSync(dialogFlag(this.h, this.wid), { force: true });
         log(`${this.ref}: process ended (${how ?? `exit ${e.code}`})`);
         for (const w of this.exitWaiters.splice(0)) w();
-        if (how === "handoff") return; // a new process starts at once
+        if (how === "handoff" || how === "terminal") return; // a new process starts at once, or the terminal takes over
         if (how === "stop") { this.setState("stopped"); return; }
         if (how !== "park" && e.code !== 0) {
           this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `${NAME[this.rec.harness] ?? "The agent"} stopped (exit ${e.code}). A message brings it back.${e.err ? `\n${e.err}` : ""}` });
@@ -447,30 +550,66 @@ class Agent {
   }
 }
 
+/** What an agent's process must not inherit: a Claude Code session's own markers, and rollcall's session. */
+export const CHILD_UNSET = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "ROLLCALL_SESSION"];
 function childEnv() {
   const env = { ...process.env };
-  for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "ROLLCALL_SESSION"]) delete env[k];
+  for (const k of CHILD_UNSET) delete env[k];
   return env;
+}
+
+/**
+ * Answers the task question a supervisor's question relays, as a front end does (the question.answer action). Run as
+ * its own process, never in the host's: it reaches agents through their control sockets, which this process serves.
+ */
+function relayAnswer(req, a, by) {
+  const qs = Array.isArray(req.questions) ? req.questions : [];
+  const single = qs.length === 1 && typeof a.answers[qs[0].question] === "string" ? a.answers[qs[0].question] : null;
+  const payload = { task: req.relays.ref, question: req.relays.question, answers: a.answers, ...(single ? { answer: single } : {}), client: by ?? "the chat" };
+  const env = childEnv();
+  delete env.ROLLCALL_TASK;
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, "api", "do", "question.answer", JSON.stringify(payload)], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("error", (e) => resolve(err("failed", e.message)));
+    child.on("exit", () => {
+      try { const r = JSON.parse(out); resolve(r.ok ? { ok: true, how: r.result?.how ?? null } : r); } catch { resolve(err("failed", out.trim() || "the answer did not go")); }
+    });
+  });
 }
 
 function recordContext(a, c) {
   const now = Date.now();
+  if (!a.id) { store.writeHomeFile(a.h, "context", { pct: c.pct, session: a.rec.session, at: now }); return; }
   store.writeHomeFile(a.h, `context-${a.id}`, { pct: c.pct, at: now, session: a.rec.session, tokens: c.tokens, size: c.size });
   import("../supervisor.mjs").then(({ markCap }) => { const t = store.readTask(a.h, a.id); if (t) markCap(t, a.rec.session, c.pct); }).catch(() => {});
 }
 
+/** `home:task` (a task's worker) or a bare `home` (its supervisor). */
 function parseRef(ref) {
-  const m = /^([a-z][a-z0-9-]{0,23}):([A-Za-z0-9._-]+)$/.exec(String(ref ?? ""));
-  return m ? { h: m[1], id: m[2] } : null;
+  const m = /^([a-z][a-z0-9-]{0,23})(?::([A-Za-z0-9._-]+))?$/.exec(String(ref ?? ""));
+  return m ? { h: m[1], id: m[2] ?? null } : null;
+}
+
+/**
+ * What a supervisor's history backfills from, shaped as a task: its home's worker folder, and its last session (the one
+ * falcon or its lock names, as `falcon continue` would resume) plus `also`, read from their transcripts.
+ */
+async function supervisorTask(h, also = null) {
+  const { lastSession } = await import("../window.mjs");
+  const last = lastSession(h);
+  const ids = [...new Set([last?.id, also].filter(Boolean))];
+  return { id: h, home: h, worktree: last?.cwd ?? readJson(launchFile(h, null))?.cwd ?? null, sessions: ids.map((id) => ({ id, harness: "claude" })) };
 }
 
 /** The agent for `ref`, made on first use (nothing starts). */
 function agentFor(ref) {
   const r = parseRef(ref);
   if (!r) return null;
-  let a = agents.get(`${r.h}:${r.id}`);
+  let a = agents.get(r.id ? `${r.h}:${r.id}` : r.h);
   if (!a) {
-    if (!store.listHomes().includes(r.h) || !store.readTask(r.h, r.id)) return null;
+    if (!store.listHomes().includes(r.h) || (r.id && !store.readTask(r.h, r.id))) return null;
     a = new Agent(r.h, r.id);
     agents.set(a.ref, a);
   }
@@ -485,8 +624,14 @@ async function restore() {
     for (const id of ids) {
       const rec = readJson(join(store.homeDir(h), "workers", id, "agent.json"));
       if (!rec?.state) continue;
-      const a = new Agent(h, id);
+      const a = new Agent(h, id === h ? null : id);
       agents.set(a.ref, a);
+      if (rec.state === "terminal") {
+        // The command that ran the terminal held its connection to the host that died: nothing tells this one it closed.
+        a.item({ id: `host-restart:${hex(6)}`, at: Date.now(), kind: "system", text: "The host restarted while this agent was open in a terminal. A message brings it back here." });
+        a.rec.state = "parked";
+        a.rec.parkedAt = Date.now();
+      }
       if (rec.state === "running" || rec.state === "idle") {
         // A Codex agent's app server outlives a host killed outright: it goes, by the pid and socket on the record.
         if (rec.harness === "codex") { killServer(rec.pid, rec.serverSock); if (rec.serverSock) rmSync(rec.serverSock, { force: true }); }
@@ -541,6 +686,11 @@ async function handle(req, c) {
       case "say": return await need().say(req);
       case "interrupt": return await need().interrupt();
       case "set": return await need().set(req);
+      // The terminal escape hatch. `open` is a front end's: the argv that runs it (`rollcall open <ref>`), as `api
+      // attach` gives tmux's. `terminal` is that command's own call, held for as long as the terminal runs.
+      case "open": { const a = need(); return { ok: true, argv: [process.execPath, BIN, "open", a.ref], ref: a.ref, agent: a.state() }; }
+      case "terminal": return await need().openTerminal(c);
+      case "terminal-done": return await need().closeTerminal();
       case "park": { const a = need(); return { ok: true, parked: a.park() }; }
       case "stop": { const a = need(); return { ok: true, stopped: a.stop() }; }
       case "answer": {
