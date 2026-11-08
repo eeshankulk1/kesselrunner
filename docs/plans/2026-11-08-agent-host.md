@@ -18,9 +18,9 @@ protocol directly (no Agent SDK package: rollcall stays dependency-free). Codex 
    the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`. Built: all of it, for Claude Code and Codex
    workers. Each harness has one copy of its protocol code, which the tmux workers run too.
 2. Supervisors in the host, and the supervisor's tools (start, tell, wait, interrupt, read the chat) instead of typing
-   into tmux.
+   into tmux. Built (see Supervisors and The supervisor's tools).
 3. The terminal escape hatch: "open in terminal" runs the real CLI on the agent's session; the host shows it busy until
-   the terminal closes.
+   the terminal closes. Built with slice 2 (see The terminal escape hatch).
 4. The terminal Falcon's new form (an open owner question).
 5. Removing the old paths (the chat/terminal switch, the pane view, `capture-pane`, key timing, `stream.live.json`,
    the per-chat follow processes) and the gate. cockpit moves onto the host.
@@ -96,6 +96,7 @@ One state per agent, owned by the host:
 | `idle` | the process is up, no turn | `start`: a turn starts |
 | `parked` | no process; the session is saved | `wake`: resume the session, then deliver |
 | `stopped` | stopped on purpose (`stop`, `task.stop`) | `wake` for the owner's words; rollcall's own deliveries are refused |
+| `terminal` | open in a terminal (the escape hatch); the host holds no process | `hold`: the words wait until the terminal closes |
 
 `requests` (the open ones) and `queued` (words sent while running, not taken yet) ride with it. An `idle` agent parks
 after `ROLLCALL_HOST_PARK_MS` of quiet (default an hour, as Claude Code's own background agents), never with a
@@ -161,6 +162,9 @@ Newline-delimited JSON both ways. A call is `{ "id": <any>, "op": "...", ... }`;
 | `stop` | `ref` | `stopped` |
 | `history` | `ref`, optional `before`, `limit` | a page: `items`, `cursor`, `more`, `requests`, `agent` |
 | `subscribe` | optional `refs` (all when absent) | `subscribed`; then events on the same connection |
+| `open` | `ref` | `argv`: `rollcall open <ref>`, for a front end's own terminal |
+| `terminal` | `ref` | `argv`, `cwd`, `unset`, `agent`; the escape hatch begins (held by its connection) |
+| `terminal-done` | `ref` | `closed`, `added`, `agent` |
 | `shutdown` | | `ok`, then the host exits |
 
 Events on a subscribed connection: `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }` with `ev`:
@@ -188,13 +192,83 @@ The host keeps that seam for each hosted agent:
 - `api conversation <ref>` reads a hosted task's history (from the host when it runs, else from the file), and
   `--follow` subscribes, printing the same `page`, `item`, `text`, `prompt` lines as before.
 
+## Supervisors
+
+- A supervisor's own session is an agent like a task's worker: ref the bare home (`falcon`), files in the home's own
+  worker folder (`workers/<home>/`: `claude-launch.json`, `agent.json`, `history.jsonl`, `claude.json`), Claude Code
+  only. Its history is its own. Backfill reads its last session (the one its lock or `falcon.json` names) and the one a
+  launch resumes, from their transcripts.
+- `window.mjs supervisorHosted(h)`: the gate is on, or the host ran it before. Then `startWindow` writes the same launch
+  file the stream worker reads and asks the host to `start` it (`restart`, so a handoff's new session replaces the
+  running one), and `parkWindow` asks the host to `park`. `park.mjs supervisorDue` leaves it to the host's own timer.
+- The watcher (`watch.mjs hostedNow`) reads where it stands from `agent.json`, not a window: `running` is busy (a
+  picker when a request is open), `idle` and `parked` are idle, `terminal` is the terminal. News goes in through the
+  host's `say` (`from: "rollcall"`), which wakes a parked supervisor on its session. A handover skips the key checks.
+- The owner's words to a hosted supervisor write `app-line`, as the chat-view supervisor's composer did, so the prompt
+  hook hears them as the owner's.
+- **Relayed questions.** A supervisor's question whose every question names one task that asks now carries
+  `relays: { ref, question }` (`claude/worker.mjs relaysOf`). It is that task's request, answered once:
+  - On the supervisor's request (`answer` with `answers`), the host runs `question.answer` for the task in a child
+    process (never in its own: delivery reaches agents through control sockets the host serves, and a synchronous call
+    there would wait on itself). That delivers to the worker and marks the task answered; closing the Falcon's picker
+    (`answer.mjs closeFalconPicker`) then answers the supervisor's request through its seam with "answered elsewhere".
+    The answer reads `how: "relayed"`. A task that asks nothing now leaves the pick to the supervisor, as its picker did.
+  - On the task (`question.answer` from a front end), `closeFalconPicker` finds the supervisor's chat-view record and
+    closes its request the same way.
+  - A second answer from either side hears `already-answered` (the task's lock, then the request's).
+
+## The supervisor's tools
+
+The supervisor drives a hosted worker through the host only. Existing commands, unchanged for tmux workers:
+`start.mjs` (`supervisor.mjs launch`: the host's `start`), `task tell` (inbox plus the doorbell through the seam, or
+`say` when the host is down), `start.mjs --interrupt` (`api-actions task.interrupt`: the host's `interrupt`), `--stop`
+and `--resume` (no window check for a hosted task). New verbs (`src/task-agent.mjs`):
+
+- `task chat <id> [--before <cursor>] [--limit <n>] [--json]`: a page of the worker's chat (the host's `history`; for a
+  tmux worker, its transcript), one line per item.
+- `task interrupt <id>`: its turn stops.
+- `task wait <id> [--timeout <minutes>]`: subscribes and returns when its turn ends or it opens a request (hosted only:
+  a tmux worker's news comes by itself).
+
+No path that serves a hosted agent runs `capture-pane`, `send-keys` or key timing. The Claude harness's `type`,
+`interrupt` and `takesTyping` go to the host even when its record is gone; the watcher's prompt, close and parking
+checks skip `tmux.watched`, `viewed` and `lastUsed` for hosted workers; `supervise` does not probe tmux under the gate.
+Still on tmux under the gate, and none of them reaches a hosted agent: the watcher's own tab bar (`setTabs`,
+`windows`), `/attach` and `api attach` (no window: they say so), `falcon`'s check for a running tmux, and the
+gate-off paths.
+
+## The terminal escape hatch
+
+`rollcall open <ref>` (`host/client.mjs openCommand`) runs the real CLI on the agent's own session in the caller's
+terminal. Front ends that run their own terminal ask the socket's `open` for the argv, which is that same command.
+
+- It calls `terminal` and holds the connection for as long as the CLI runs. The host refuses while a turn runs, ends
+  its own process for the agent (two processes never share a session), and answers the argv: `claude --resume
+  <session>` with the launch's `--add-dir`, `--settings`, mode, model and effort, under the login shell with
+  `host-env.sh` when the task has one (a session that never ran gets `--session-id`, `-n` and its first prompt, as the
+  stream worker's terminal view did); or `codex resume <thread>`. The agent is `terminal` (`send: "hold"`).
+- Meanwhile: `say` holds the words (`how: "held"`, shown queued) and they go in when the terminal closes; `interrupt`
+  and `start` are refused with the reason; `park` does nothing; the idle timer does not run.
+- On exit (`terminal-done`, or the connection closing): the host reads the session's transcript and appends the items
+  the history lacks (`history.mjs catchUp`), the agent is `parked`, and held words start it. A Codex agent's terminal
+  turns stay in its thread (`codex resume` writes no journal): the history gets a note, and Codex reads them on its
+  next turn. Folding them into the history is left for later.
+- A host restart while an agent is `terminal` parks it, with a note: the command that held it died with the old host.
+
+## The terminal Falcon (pending the owner's answer)
+
+What `falcon` opens once supervisors run in the host is an open owner question (slice 4). Until it is settled, under
+the gate `falcon` opens the escape hatch on the supervisor's session: a new supervisor writes its launch and runs
+`rollcall open <home>` (the real CLI starts `/supervisor <home>`); an existing one opens on its session (refused while
+it is in a terminal elsewhere). This is a placeholder, not the Falcon's new form. With the gate off, falcon is unchanged.
+
 ## The gate
 
 `ROLLCALL_HOST=1` (in settings `env`) starts new task workers, Claude and Codex, in the host (`harness/codex.mjs
 writeLaunch` takes `hosted`, so a hosted Codex launch is always the chat view). Off by default, so the
 owner's live crew keeps running as it does until the later slices land. A session started in the host records
-`hosted: true` on the task's session, so a resume goes back to the host whatever the setting says then. Supervisors
-stay in tmux in this slice.
+`hosted: true` on the task's session, so a resume goes back to the host whatever the setting says then. A supervisor
+the host ran once stays there too (its `agent.json`).
 
 ## Tests
 
