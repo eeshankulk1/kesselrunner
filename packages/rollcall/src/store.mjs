@@ -402,6 +402,23 @@ export function updateDecisions(fn) {
     return out;
   });
 }
+/** A machine-wide record of rollcall's (`_machine/<name>.json`: away mode, held requests, grants), or null. */
+export const readMachineFile = (name) => readJson(join(machineDir(), `${name}.json`));
+/**
+ * Runs `fn(value)` on machine record `name` under its own lock; `fn` returns { value, out }, and `value` is written
+ * (null removes the file). Returns { out }, or null when the lock stays busy.
+ */
+export function updateMachineFile(name, fn) {
+  mkdirSync(machineDir(), { recursive: true });
+  return withDirLock(join(machineDir(), `.${name}.lock`), () => {
+    const { value, out } = fn(readMachineFile(name));
+    const p = join(machineDir(), `${name}.json`);
+    if (value === null || value === undefined) rmSync(p, { force: true });
+    else writeJson(p, value);
+    return out;
+  });
+}
+
 /** The file the owner opens to see the delete list. */
 export const cleanListPath = () => cleanPath("txt");
 /** { items, shown (when the owner was shown it, 0 for never) }. */

@@ -240,6 +240,12 @@ const RELAY = /\btask\s+relay\b/;
 // The front-end interface's actions (api.mjs) act as the owner: their words reach a worker as the owner's own. A
 // front end is no agent session, so an agent's shell never runs them (api-cli.mjs refuses them there too).
 const API_DO = /\bapi[\s'\"\\]+do\b/;
+// Away mode (away.mjs) is the owner's switch, and an answer to what it held grants a permission: the owner runs them
+// in their own terminal or with `!` in the Falcon, which pass no hook; an agent's shell never does. Nor does it touch
+// the records behind them. A guard rail for an agent that means well, not a wall: the CLI refuses a worker too.
+const AWAY_ANSWER = /\baway[\s'\"\\]+(allow|deny|allow-all)\b/;
+const AWAY_SWITCH = /\baway[\s'\"\\]+(on|off)\b/;
+const AWAY_RECORD = /_machine\b[^\s;|&]*[\\/](grants|held|away)\.json\b/;
 
 function saidDenial(cmd) {
   if (SAID_FILE.test(cmd) && HOME_PATH.test(cmd)) {
@@ -247,6 +253,15 @@ function saidDenial(cmd) {
   }
   if (API_DO.test(cmd) && /\brollcall\b/.test(cmd)) {
     return `${P} Blocked: \`rollcall api do\` is the front-end interface, which acts as the owner, for the apps the owner uses. An agent session uses the \`${cli()} task\` commands, which run the same code.`;
+  }
+  if (AWAY_ANSWER.test(cmd) && /\brollcall\b/.test(cmd)) {
+    return `${P} Blocked: answering what away mode held grants a permission, and that is the owner's alone (their terminal, or \`!\` in the Falcon). Leave it to them; mention what you need in your report.`;
+  }
+  if (AWAY_SWITCH.test(cmd) && /\brollcall\b/.test(cmd) && taskEnv()) {
+    return `${P} Blocked: away mode is the owner's switch; a worker does not turn it on or off.`;
+  }
+  if (AWAY_RECORD.test(cmd)) {
+    return `${P} Blocked: rollcall's away-mode records (held, grants, away) are its own. Read them with \`${cli()} away status\`; answering what it held is the owner's.`;
   }
   if (RELAY.test(cmd) && taskEnv()) {
     return `${P} Blocked: \`task relay\` is the supervisor's, and types the owner's words into a worker. Put what you need from the owner in a question or your report (\`${cli()} task output\`).`;
@@ -258,7 +273,8 @@ function saidDenial(cmd) {
  * Bash is never blocked, except git commands that would change the files,
  * branch or index of a checkout another live session owns (checkout, reset,
  * stash, commit...), deletions that reach a live session's Claude temp
- * folder (temp.mjs), the two ways around `task relay`, and `rollcall api do` (saidDenial).
+ * folder (temp.mjs), the two ways around `task relay`, the front-end interface's actions, and away mode's answers and
+ * records (saidDenial).
  * Read-only git and `git worktree add` always pass.
  */
 function bashGuard(p, now) {

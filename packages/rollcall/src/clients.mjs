@@ -46,10 +46,12 @@ export const notifyingClient = () => liveClients().find((c) => c.notifies) ?? nu
  * A notice for the owner (trouble.notify's): it goes on the log the streams read. Returns the front end that shows
  * it, or null when rollcall shows it itself. Never throws: a notice must not stop the watcher.
  */
-export function noteNotice({ title, text, sound = false }, now = Date.now()) {
+export function noteNotice({ title, text, sound = false, kind, ref, held }, now = Date.now()) {
   try {
     mkdirSync(machine(), { recursive: true });
-    appendFileSync(noticesPath(), `${JSON.stringify({ at: now, title, text, sound: !!sound })}\n`);
+    // A notice about one item says which (away mode's held prompts and questions): a phone push acts on it.
+    const item = kind ? { kind, ref: ref ?? null, ...(held ? { held } : {}) } : {};
+    appendFileSync(noticesPath(), `${JSON.stringify({ at: now, title, text, sound: !!sound, ...item })}\n`);
     // Kept short: past twice the limit, the newest half stays.
     if (statSync(noticesPath()).size > NOTICES_KEEP * 2 * 400) {
       const lines = readFileSync(noticesPath(), "utf8").trim().split("\n");

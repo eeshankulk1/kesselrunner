@@ -1,5 +1,5 @@
 // The CLI agents (and people) run: status, claim, done, send, wait, queue, pr, results, allow-shared, allow-main,
-// gc, clean, blockers, task, turns, supervise, inbox and attach.
+// gc, clean, blockers, away, task, turns, supervise, inbox and attach.
 // It finds its own session by walking up its process ancestry to a harness pid
 // the hooks recorded, so no session id is passed around.
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,7 @@ import {
   msgLine, peersOf, settle, short, who, whereOf,
 } from "./session.mjs";
 import * as store from "./store.mjs";
+import { allowAll, answerHeld, awayState, heldView, setAway } from "./away.mjs";
 import { ensureWatcher, holderOf, homeOf, idOf, label, pickName, releaseHome, takeHome, taskEnv, workerState } from "./supervisor.mjs";
 import { isOpen } from "./state.mjs";
 import { closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs";
@@ -55,6 +56,13 @@ ${RESULTS_USAGE}
   rollcall remind "<text>" --in <30m|2h|1d>   a line for the owner later, for a step only they can take; bare: what is set
   rollcall blockers [clear <kind>]       what stops work on this Mac or account now (usage, billing, disk, power,
                                          memory), told to the owner once; clear: it is fixed, so what waits goes on
+  rollcall away [on | off | status]      away mode, for the whole Mac: while on, a worker's permission prompt is
+                                         held (refused with a note, so it carries on) and its questions wait on its
+                                         task; off lists what was held and what got done. The owner's own: refused
+                                         inside a worker
+  rollcall away allow|deny <id> ["<why>"] | allow-all
+                                         answer what was held: the worker hears it as its next prompt, and an
+                                         approved request goes through once. Refused in an agent session
   rollcall park [--dry-run]              stop the sessions nothing needs, to free memory: a worker idle 15m whose
                                          task waits on a PR or the owner, and a falcon supervisor quiet 1h between
                                          turns (Enter in its tab resumes either; a supervisor's tasks' news brings
@@ -106,6 +114,7 @@ export async function main(argv) {
       case "gc": return await gc(rest);
       case "clean": return await clean(rest);
       case "blockers": return blockers(rest);
+      case "away": return away(rest);
       case "remind": return remind(rest);
       case "_pick-pictures": return await pickPictures(rest);
       case "codex-worker": return await (await import("./codex/worker.mjs")).codexWorker(rest);
@@ -660,6 +669,57 @@ function remind(args) {
   ensureWatcher(h);
   say(`rollcall: the owner hears this ${new Date(at).toLocaleString()}: ${store.clip(text, 120)}`);
   return 0;
+}
+
+/** `rollcall away`: away mode's switch (away.mjs), and the owner's answers to what it held. */
+function away(args) {
+  const [sub = "status", ...rest] = args;
+  if (taskEnv()) fail("away mode is the owner's: a worker does not turn it on or off, or answer what it held");
+  const now = Date.now();
+  const heldLines = () => heldView(now).filter((x) => x.state === "held")
+    .map((x) => `  ${x.id}  ${x.ref}: ${x.tool}: ${store.clip(x.summary, 140)}${x.reason ? ` (${store.clip(x.reason, 80)})` : ""}, ${new Date(x.at).toLocaleTimeString()}`);
+  if (sub === "on" || sub === "off") {
+    if (rest.length) return usageError(`away ${sub}: unknown argument "${rest[0]}"`);
+    const r = setAway(sub === "on", "the terminal", now);
+    if (!r) fail("the away record is busy; try again");
+    if (sub === "on") {
+      say(r.already ? `rollcall: away mode was on already, since ${new Date(r.away.since).toLocaleString()}` : "rollcall: away mode on. Workers' permission prompts are held and their questions wait on their tasks, so they carry on without you. `rollcall away off` when you are back.");
+      return 0;
+    }
+    if (r.already) { say("rollcall: away mode was off already"); return 0; }
+    const done = r.away.last?.done ?? [];
+    say(`rollcall: away mode off. ${done.length ? `Done meanwhile: ${done.map((d) => `${d.ref} ${d.state}${d.pr ? ` (${d.pr})` : ""}`).join(", ")}.` : "No task finished meanwhile."}`);
+    const held = heldLines();
+    if (held.length) say(`Held for you (rollcall away allow|deny <id>, or allow-all):\n${held.join("\n")}`);
+    return 0;
+  }
+  if (sub === "status") {
+    const a = awayState();
+    say(a.on ? `rollcall: away mode on since ${new Date(a.since).toLocaleString()} (by ${a.by ?? "?"})` : "rollcall: away mode off");
+    const held = heldLines();
+    say(held.length ? `Held for you (rollcall away allow|deny <id>, or allow-all):\n${held.join("\n")}` : "Nothing is held.");
+    return 0;
+  }
+  // An answer grants a permission: only the owner gives one. A worker is refused above; an agent's own shell is
+  // refused by the Bash guard (hooks.mjs saidDenial), which the owner's `!` in the Falcon never passes. Process
+  // ancestry cannot tell the two apart: `!` runs under the agent session's own process.
+  if (sub === "allow" || sub === "deny") {
+    const [id, ...why] = rest;
+    if (!id) return usageError(`usage: rollcall away ${sub} <id>${sub === "deny" ? ' ["<why>"]' : ""}`);
+    const r = answerHeld(id, { allow: sub === "allow", why: store.oneLine(why.join(" ")) || null, by: "the terminal", now });
+    if (r.code === "not-found") fail(`no held request ${id} (rollcall away status)`);
+    if (r.code === "busy") fail("the held list is busy; try again");
+    if (r.already) { say(`rollcall: ${id} was ${r.item.state} already, from ${r.item.answer?.by}`); return 0; }
+    say(`rollcall: ${id} ${r.item.state}; ${r.delivered ? `${r.item.ref}'s worker ${r.how === "held" ? "hears it once it can take words" : "has it now"}` : `not sent to its worker${r.why ? `: ${r.why}` : ""}`}`);
+    return 0;
+  }
+  if (sub === "allow-all") {
+    const r = allowAll({ by: "the terminal", now });
+    if (!r) fail("the held list is busy; try again");
+    say(r.count ? `rollcall: approved ${r.count}: ${r.approved.join(", ")}` : "rollcall: nothing is held");
+    return 0;
+  }
+  return usageError(`away: unknown command "${sub}"`);
 }
 
 /** `rollcall blockers`: what stops work now. `clear <kind>`: the owner says it is fixed, so what waits on it goes on. */

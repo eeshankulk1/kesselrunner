@@ -2,7 +2,7 @@
 
 One versioned way in for every front end: the cockpit Mac and iOS apps (written in Swift, which run the `rollcall` CLI), scripts, and the terminal Falcon's own actions. It covers what a front end draws (a snapshot), its changes (a stream), every action the Falcon can take, and what a front end runs to show a session's real terminal. A front end shows each worker's real CLI in a terminal and draws its panels from this state; it never re-renders the chat.
 
-The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-reads.mjs` (the review and ship reads), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface) and `src/clients.mjs` (open front ends and the notices log).
+The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-reads.mjs` (the review and ship reads), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface), `src/away.mjs` (away mode and what it holds) and `src/clients.mjs` (open front ends and the notices log).
 
 ```
 rollcall api version
@@ -60,6 +60,8 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `usage` | object | The usage meter, as `rollcall usage --json` prints it: `{ claude: { fiveHour, weekly, at } \| null, codex: { primary, secondary, plan, at } \| null }`, each window `{ pct, resetsAt }` (ms). A plan with no fresh reading is null |
 | `usageOffer` | object \| null | One plan near its limit while the other has room: `{ from, to, pct, resetsAt, window, room, tasks, text }`. `from` and `to` are harnesses (`claude`, `codex`); `pct`, `resetsAt` and `window` (`five-hour`, `weekly`...) are the full plan's fullest window; `room` is the other plan's percent; `tasks` are refs of the open tasks waiting on the full plan (held by its limit, not started, or parked or stopped while worked); `text` is the offer in one line. The same rule and numbers as the watcher's news. On the owner's yes, send `task.move` with `harness: to` for each task. Null when there is nothing to offer |
 | `clients` | array | Front ends following rollcall now: `{ client, pid, notifies, at }` |
+| `away` | object | Away mode, machine-wide (below): `{ on, since, by, last }` |
+| `held` | array | Permission requests away mode held, machine-wide, oldest first: each one still held, and those answered in the last hour (below) |
 
 ### A supervisor
 
@@ -143,6 +145,26 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 
 **A queue.** `{ repo: { key, name }, entries, train, lander, outcomes }`. Each entry is `{ pr, branch, task, session, state, why, readyAt, files, stuck }`, oldest first. `train` is `{ n, prs, stage, pr, suite, startedAt }` or null. `lander` is `{ pid, since }` or null. `outcomes` holds the last 10 results as the lander wrote them.
 
+### Away mode
+
+The owner turns it on when they step away (`away.set`, `rollcall away on`). While it is on, nothing a task worker does waits on them: a permission prompt is held instead of shown, and a question waits on its task. Only task workers are held; the owner's own sessions and supervisors never are. `away` and `held` are machine-wide: `--home` does not filter them.
+
+**`away`.** `{ on, since, by, last }`. `on`: away mode is on now. `since`: when it was turned on (null while off). `by`: the client that turned it on (`cockpit`, `cockpit-phone`, `the terminal`), null while off. `last`: the most recent finished spell, kept until the next one starts, else null: `{ since, until, done }`, where `done` lists the tasks that reached `landed` or `closed` between `since` and `until`, oldest first: `{ ref, title, state, at, pr }` (`pr` the PR's URL or null). A front end shows what got done from it even after those tasks left the snapshot's one-hour window.
+
+**A held item.** `{ id, ref, home, at, harness, tool, input, summary, reason, state, answer, truncated }`.
+- `id`: stable (`h-<ms>-<hex>`), what `held.answer` names. `ref`: the task; `home`: its supervisor. `at`: when it was held.
+- `harness`: `claude` or `codex`. `tool`: the tool as the harness named it (`Bash`, `Edit`, `WebFetch`, `mcp__x__y`; Codex's command and file approvals read as `Bash` and `Edit`, its permission requests as `permissions`).
+- `input`: the tool's input as the agent sent it, long strings cut at 2,000 characters; one still over 8 KB keeps `{ gist, description, trimmed: true }`. Codex's command approvals add `cwd` (and `argv`, `network` when Codex sends them), its file approvals `files` and a `changes` hash, its permission requests the `permissions` asked for.
+- `truncated`: true when `input` had to be cut, so the owner cannot see all of what would run. Approving it grants nothing ahead (below); a front end says so before the owner approves.
+- `summary`: one plain line a person reads: the command, `Edit src/a.ts` (relative to the task's worktree), or the tool and what it names. `reason`: the agent's stated reason (Bash's `description`, Codex's reason), else null.
+- `state`: `held` (waiting on the owner), `approved` or `denied`. `answer`: null while held, else `{ at, by, allow, why, all }`; `all` is true when `held.allowAll` approved it.
+
+The same request asked again while it is still held is the same item. Questions are not copied here: a question asked while away lives on its task (`question`, `needsOwner.kind: "needs-you"`) as any question does. A front end builds "While you were away" from `held` items still `held`, plus open tasks whose `needsOwner` is set, grouped by task, oldest first, and `away.last.done` for what got done.
+
+**What the worker hears.** A held permission prompt is refused with a note: held for the owner, do not try another way round it, carry on with the work that does not need it, and mention it in the final report. A question while away goes to the task even when a terminal shows the worker, and the worker hears to carry on with what does not depend on the answer, then end its turn. An answer reaches the worker as its next prompt, through the queue `task.tell` uses, which wakes an idle worker and resumes a stopped one: "The owner approved your held request: `<summary>`. Run it now." or "The owner denied your held request: `<summary>`. Their words: `<why>`". An approval also leaves a one-time grant for that task, tool and input (every field of the input but the agent's `description`, so a command's sandbox or background flag counts): the worker's next matching request goes through without a prompt. A grant is used once and lasts a day, or until away mode is turned off, whichever comes first. A `truncated` item, and one whose input names nothing to match (a Codex file change that lists no files), gets no grant: the approval reaches the worker as words, adding that the request asks again (shown to the owner, or held again while they are away). A held item whose task finished is answered on the record only.
+
+**Notices while away.** Each held prompt and each question raises one `notice` (see the stream) and no reminders: the 10-minute reminders stop while away. Turning away mode off writes `last` and stops holding; items already held stay held until answered.
+
 ### The worktree runtime (plan A)
 
 Each task view also has:
@@ -154,7 +176,7 @@ Reading these takes no lock and starts no process, so a front end can poll them.
 
 ### Coming
 
-No plan in flight adds state now. A later one adds its fields here, as added fields (no version bump). The review and ship reads (cockpit's plan 2) added `tokens` to a task and `usageOffer` to the snapshot.
+No plan in flight adds state now. A later one adds its fields here, as added fields (no version bump). The review and ship reads (cockpit's plan 2) added `tokens` to a task and `usageOffer` to the snapshot; away mode added `away` and `held`, their stream events, three actions, `delivered` and `how` on `decision.answer`, and the notices' `kind`, `ref` and `held`, all within interface 1.
 
 ## `rollcall api stream [--home <h>] [--client <name>] [--notifies]`
 
@@ -194,11 +216,15 @@ How it works: it wakes on a file change in the supervisors' homes, the machine's
 | `usageOffer.changed` | `usageOffer` | The whole new value (null once there is nothing to offer) |
 | `usage.changed` | `usage` | A plan's reading moved (the stream reads it on its beat) |
 | `clients.changed` | `clients` | A front end opened or closed a stream |
-| `notice` | `title`, `text`, `sound` | A notification for the owner |
+| `away.changed` | `away` | Away mode's whole new value |
+| `held.changed` | `held` | The whole new held list |
+| `notice` | `title`, `text`, `sound`, and for one item `kind`, `ref`, `held` | A notification for the owner |
 | `heartbeat` | | Nothing else was written for 15 s (`ROLLCALL_API_HEARTBEAT_MS`) |
 | `error` | `message` | Building a snapshot failed; the stream goes on |
 
 **`news` and `notice`.** `news` is a line under the Falcon's prompt (the supervisor's `feed`): show it in a feed. `notice` is a notification for the owner (what rollcall shows with macOS's `osascript` otherwise): a front end that alerts the owner alerts on `notice` only. Every `news` line also comes as a `notice`; some notices (a blocker) have no `news` line. A stream sends only notices from after it started.
+
+**Notices about one item.** While away, each held permission prompt and each question raises exactly one notice, with `kind` (`held` or `question`), `ref` (the task) and, for a held prompt, `held` (its id), so a front end that pushes to a phone can offer Approve and Deny on it. Other notices carry none of the three.
 
 **PR checks.** While a stream runs, it reads each `pr-open` or `queued` task's PR with `gh` about every 60 s (`ROLLCALL_API_PR_MS`) and keeps the result beside the task (`api-pr-<id>.json`), which the next snapshot shows as `pr.state` and `pr.checks`. Nothing else reads checks for the interface.
 
@@ -228,16 +254,16 @@ Exit 0 on `ok: true`, 1 on a refusal, 2 when the payload is not JSON or the acti
 | Code | Means |
 |---|---|
 | `bad-payload` | A field is missing, of the wrong type or over its limit; the message names it |
-| `not-found` | No such supervisor or task (or, for `turn.diff`, no such turn) |
+| `not-found` | No such supervisor or task (or, for `turn.diff`, no such turn; for `held.answer`, no such held item) |
 | `refused` | The command it runs refused, with that command's words (a `task.tell` to a finished task that never had a worker, say), or an agent session called `do` |
 | `unavailable` | Something it needs is not installed: tmux, or kesselrunner's launcher (`ROLLCALL_START_FILE`) |
 | `failed` | The launcher failed starting, stopping or resuming a worker, or something went wrong inside rollcall; the message says what |
 | `not-available` | An action from `coming`: it lands with its plan |
 | `unknown-action` | No such action; the message lists them |
-| `already-answered` | The question this answer names was answered first elsewhere; `answered` has that answer |
+| `already-answered` | The question this answer names was answered first elsewhere; `answered` has that answer. For `held.answer`: the item was given the other answer first; `answer` has it |
 | `stale-question` | The task asks something newer now; `current` is its question id |
 | `no-question` | The task has no open question |
-| `busy` | The task store stayed locked; try again |
+| `busy` | The task store (or the away, held or decisions record) stayed locked; try again |
 
 Most results carry `view`: the task's view after the action, as in the snapshot.
 
@@ -251,7 +277,10 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `task.resume` | `task`, optional `why` (up to 300) | `resumed`, `trustPrompt`, `message`, `view` | `start.mjs <task> --resume "<why>"` |
 | `task.close` | `task`, optional `why` (up to 300) | `closed`, `already`, `view` | `rollcall task close <task> "<why>"` |
 | `task.move` | `task`, and `to` (a supervisor) or `harness` (`claude` or `codex`) | `moved`, `already`, `task` (the new ref, for `to`), `harness` and `view` (for `harness`) | `rollcall task move <task> --to <supervisor>` or `--harness <h>` |
-| `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already` | `rollcall task decisions done <n> "<answer>"` |
+| `decision.answer` | `n` (a number, or `d3`), optional `answer` (up to 2,000) | `answered`, `already`, `delivered`, `how` | `rollcall task decisions done <n> "<answer>"` |
+| `away.set` | `on` (bool) | `away` (the new value), `already` | `rollcall away on\|off` |
+| `held.answer` | `id`, `allow` (bool), optional `why` (up to 2,000) | `answered`, `already`, `delivered`, `how`, `view` (the task's view, or null) | `rollcall away allow\|deny <id> ["<why>"]` |
+| `held.allowAll` | optional `home` (only that supervisor's) | `approved` (ids), `count` | `rollcall away allow-all` |
 | `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
 | `review.comments` | `task` | `comments` (below) | `rollcall task comments <task> --json` |
 | `review.comment` | `task`, `file` (relative to its worktree, or absolute inside it), `line`, optional `end`, `text`, optional `send` (bool) | `comment` (its number), `sent`, `message`, `view` | `rollcall task comment <task> <file>:<line>[-<end>] "<text>"` |
@@ -276,6 +305,10 @@ Notes on each:
 - `task.interrupt` stops the worker's turn; it keeps running. `interrupted: false` with a `why` when no worker runs.
 - `task.stop` ends the worker; the task stays open and nothing resumes it unasked.
 - `task.close`, `task.move` and `decision.answer` answer `already: true` when it was done before, so a repeat from a second front end is harmless.
+- `decision.answer`, like `rollcall task decisions done`, puts the answer on the deciding task's record and, when that task is open and has had a worker, delivers it to the worker as its next prompt, which wakes it: `delivered` and `how` as for `task.tell` (`typed`, `held`, `resumed`). A decision from no task, from a finished task, or from one whose worker never started gets `delivered: false, how: null`.
+- `away.set` with the value it has already answers `already: true` and changes nothing. Turning it off writes `away.last`.
+- `held.answer`: the first answer wins. The same answer again answers `already: true` and delivers nothing; the other answer, after one was given, is refused `already-answered` with the existing `answer`. An approval leaves a grant for the worker's next matching request (see Away mode). `delivered` and `how` are as for `task.tell`; a held item whose task finished is answered on the record only (`delivered: false`). It works whether away mode is on or off.
+- `held.allowAll` approves every item still `held` (of one supervisor, with `home`): a grant each, and one message per task listing what was approved. It never answers a question.
 - `review.comment` leaves a comment pending, as the owner's; `review.send` (or `send: true`) sends every pending one to the worker as one message, which it answers or resolves one by one (`comments` in the view shows how far). `review.send` with nothing pending refuses. With `send: true` the comment is saved even when the send fails: the result is then `sent: false` with the reason in `message`, so a retry does not add it twice.
 - `turn.diff`: what turn `n` changed against the turn before it; turn 0 is the baseline and changed nothing. `files` is always whole; `patch` stops at 1 MB (`truncated: true`), and `rollcall turns diff` prints all of it.
 - **A diff's files** (`turn.diff`, `task.diff`): `{ status, path, oldPath, added, removed }`. `status` is git's letter (`A`, `M`, `D`, `R`, `C`, `T`); renames are found (`git diff -M`), and `oldPath` is there for a rename or copy only. `added` and `removed` count lines, null for a binary file. The `patch` finds renames too.
@@ -296,7 +329,7 @@ Notes on each:
 - `task.run` with `verb: "log"`: a run action's log from `offset` (default: its last 64 KB) to its end, at most 256 KB a call; `offset` in the result is where the next call starts for only what is new, and `more` says over 256 KB were left. `truncated`: it started past what was asked (the default tail, or an `offset` past the end of a log that started again, which reads from its start).
 - The reads (`task.diff`, `turns.list`, `review.comments`, `pr.timeline`, `check.log`, `repo.items`, `turn.diff`) change nothing, so a `requestId` keeps no copy of them.
 
-- `task.archive` removes nothing until the owner has seen the plan: the first call returns it, and the front end shows `plan.lines` and sends `confirmWith` on the owner's yes. Archive, restore and spotlight are refused from an agent session, as `api do` is.
+- `task.archive` removes nothing until the owner has seen the plan: the first call returns it, and the front end shows `plan.lines` and sends `confirmWith` on the owner's yes. Archive, restore and spotlight are refused from an agent session, as `api do` is. So are `away.set`, `held.answer` and `held.allowAll`.
 
 ## `rollcall api attach <home>[:<task>] [--client <name>] [--resume]`
 
@@ -332,6 +365,7 @@ What a front end runs to show a session's real terminal: a tmux client on rollca
 ## Contract tests
 
 - `test/api.test.mjs` (this package): the contract a front end relies on: the version, the snapshot, the stream and its notices, the actions and their refusals, repeats, the first answer winning, who may call `do`, and attach. It runs with `npm test` here.
+- `test/away.test.mjs` (this package): away mode: a held permission request and its note, one notice per held item and question, no reminders, the switch and `last`, `held.answer` and its grant, `held.allowAll`, a decision's answer reaching its worker, and the stream's `away.changed` and `held.changed`. `test/harness.test.mjs` holds a Codex approval while away.
 - `test/supervisor.test.mjs` (kesselrunner's root): a scripted front-end client beside the terminal Falcon on a real tmux server, end to end: it starts a task, sees its question, answers it, tells the worker, attaches to its terminal and watches its PR land, while the Falcon shows the same task, answer and news.
 
 Both run in CI on every PR that touches rollcall (`.github/workflows/check.yml`: the `rollcall` and `Supervisor` jobs).

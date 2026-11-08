@@ -8,7 +8,8 @@
 // of the same name would, so a Codex worker's task record moves exactly as a Claude worker's does.
 //   item/started userMessage   -> prompt-submit (receipts, busy, the context notes, a question still open)
 //   turn/completed             -> stop (idle, last words, the cap's block) or stop-failure (a usage limit)
-//   approval server requests   -> dialog; serverRequest/resolved -> clear
+//   approval server requests   -> dialog (as PermissionRequest: approved on a grant, or held while the owner is away);
+//                                 serverRequest/resolved -> clear
 //   item/tool/requestUserInput -> ask (the owner's picker in the supervisor), answered with the hook's reason
 //   thread/tokenUsage/updated  -> the context use the status line records for Claude Code, and the cap flag
 //   account/rateLimits/updated -> the usage meter
@@ -21,7 +22,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { capFlag, markCap, workerHook } from "../supervisor.mjs";
@@ -37,19 +38,51 @@ export const clientId = (prefix) => `${prefix}${randomBytes(6).toString("hex")}`
 /** The text of a userMessage item: its text parts, joined. */
 export const textOf = (item) => (item?.content ?? []).filter((c) => c?.type === "text").map((c) => c.text ?? "").join("\n").trim();
 
-/** Codex's server requests that open a dialog the owner answers, as the hook payload Claude Code's PermissionRequest would carry. */
+/** An object without its null, undefined and empty-string fields. */
+const present = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== ""));
+
+/**
+ * Codex's server requests that open a dialog the owner answers, as the hook payload Claude Code's PermissionRequest
+ * would carry. The input names everything that makes one request differ from another (the command's argv and folder,
+ * every file a patch changes and a hash of the changes, the permissions asked for): away mode's grant matches on it.
+ */
 export function dialogPayload(method, p) {
   if (method === "item/commandExecution/requestApproval" || method === "execCommandApproval") {
-    const command = Array.isArray(p?.command) ? p.command.join(" ") : p?.command ?? "";
-    return { tool_name: "Bash", tool_input: { command, description: p?.reason ?? undefined }, notification_type: "permission_prompt", message: p?.reason ?? null };
+    const argv = Array.isArray(p?.command) ? p.command : null;
+    const command = argv ? argv.join(" ") : p?.command ?? "";
+    const tool_input = present({ command, argv: argv && argv.length > 1 ? argv : null, cwd: p?.cwd, network: p?.networkApprovalContext, description: p?.reason });
+    return { tool_name: "Bash", tool_input, notification_type: "permission_prompt", message: p?.reason ?? null };
   }
   if (method === "item/fileChange/requestApproval" || method === "applyPatchApproval") {
-    return { tool_name: "Edit", tool_input: { file_path: p?.grantRoot ?? Object.keys(p?.fileChanges ?? {})[0] ?? "" }, notification_type: "permission_prompt", message: p?.reason ?? null };
+    const changes = p?.fileChanges && typeof p.fileChanges === "object" ? p.fileChanges : {};
+    const files = Object.keys(changes).sort();
+    const hash = files.length ? createHash("sha256").update(JSON.stringify(files.map((f) => [f, changes[f]]))).digest("hex").slice(0, 16) : null;
+    const tool_input = present({ file_path: p?.grantRoot ?? files[0], files: files.length > 1 ? files : null, changes: hash, description: p?.reason });
+    return { tool_name: "Edit", tool_input, notification_type: "permission_prompt", message: p?.reason ?? null };
   }
-  if (method === "item/permissions/requestApproval") return { tool_name: null, notification_type: "permission_prompt", message: p?.reason ?? "Codex asks for more permissions" };
+  if (method === "item/permissions/requestApproval") {
+    const tool_input = present({ permissions: p?.permissions, cwd: p?.cwd, description: p?.reason });
+    return { tool_name: null, tool_input, notification_type: "permission_prompt", message: p?.reason ?? "Codex asks for more permissions" };
+  }
   if (method === "mcpServer/elicitation/request") return { tool_name: null, notification_type: "elicitation_dialog", message: `${p?.serverName ?? "an MCP server"} asks for input` };
   return null;
 }
+
+/** The server requests that ask the owner's permission for an action (not an MCP server's question). */
+export const APPROVALS = new Set(["item/commandExecution/requestApproval", "execCommandApproval", "item/fileChange/requestApproval", "applyPatchApproval", "item/permissions/requestApproval"]);
+
+/**
+ * The answer to approval request `method` that rollcall decided (away.mjs): allowed, or declined so the turn goes on
+ * (`cancel` / `abort` would stop it). The older requests carry the reason with the denial; the newer ones take none.
+ */
+export function approvalAnswer(method, p, allow, reason = null) {
+  if (method === "execCommandApproval" || method === "applyPatchApproval") return { decision: allow ? "approved" : { denied: { rejection: reason ?? "the owner declined it" } } };
+  if (method === "item/permissions/requestApproval") return allow ? { permissions: p?.permissions ?? {}, scope: "turn" } : { permissions: {}, scope: "turn" };
+  return { decision: allow ? "accept" : "decline" };
+}
+
+/** A PermissionRequest decision from the hook's JSON answer: { behavior, message }, or null. */
+export const decisionIn = (out) => { try { return JSON.parse(out)?.hookSpecificOutput?.decision ?? null; } catch { return null; } };
 
 /** A request_user_input call's questions as AskUserQuestion's: { question, header, options, multiSelect }. Free-text questions keep no options. */
 export function questionsOf(p) {
@@ -224,7 +257,16 @@ export async function codexWorker([h, id]) {
       return;
     }
     const d = dialogPayload(m.method, m.params);
-    if (d) { pending.set(m.id, "dialog"); hook("dialog", d); }
+    if (!d) return;
+    // A permission request goes as Claude Code's PermissionRequest hook would: approved on the owner's grant, or held
+    // while the owner is away (away.mjs). Codex's decline lets the turn go on but carries no reason, so the note goes
+    // in as a steer. With no decision the hook raised the dialog flag, as for any dialog.
+    const permission = APPROVALS.has(m.method);
+    const out = hook("dialog", permission ? { ...d, tool_name: d.tool_name ?? "permissions", tool_input: d.tool_input ?? {}, hook_event_name: "PermissionRequest", harness: "codex" } : d);
+    const decided = decisionIn(out);
+    if (!decided) { pending.set(m.id, "dialog"); return; }
+    conn.respond(m.id, approvalAnswer(m.method, m.params, decided.behavior === "allow", decided.message));
+    if (decided.behavior !== "allow" && decided.message) void inject(decided.message);
   };
 
   try {

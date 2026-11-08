@@ -54,7 +54,15 @@ test("models and modes map per harness: a Claude model means nothing on Codex, a
 
 test("Codex's protocol in the shapes Claude Code's hooks carry: dialogs, questions, answers, limits, context", async () => {
   const w = await mod("codex/worker.mjs");
-  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: ["git", "push"], reason: "push" }), { tool_name: "Bash", tool_input: { command: "git push", description: "push" }, notification_type: "permission_prompt", message: "push" });
+  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: ["git", "push"], reason: "push" }), { tool_name: "Bash", tool_input: { command: "git push", argv: ["git", "push"], description: "push" }, notification_type: "permission_prompt", message: "push" });
+  // Away mode's grant matches on the input, so it names what makes one request differ from another.
+  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: "ls", cwd: "/w" }).tool_input, { command: "ls", cwd: "/w" });
+  assert.notDeepEqual(w.dialogPayload("execCommandApproval", { command: ["a b"] }).tool_input, w.dialogPayload("execCommandApproval", { command: ["a", "b"] }).tool_input, "argv with a space is not the same command");
+  const patch = (fileChanges) => w.dialogPayload("applyPatchApproval", { fileChanges }).tool_input;
+  assert.notDeepEqual(patch({ "a.ts": { add: "x" } }), patch({ "a.ts": { add: "y" } }), "the same file with other changes is another request");
+  assert.deepEqual(patch({ "b.ts": {}, "a.ts": {} }).files, ["a.ts", "b.ts"]);
+  assert.deepEqual(w.dialogPayload("item/fileChange/requestApproval", { reason: "edit" }).tool_input, { description: "edit" }, "a v2 file change names no files");
+  assert.deepEqual(w.dialogPayload("item/permissions/requestApproval", { permissions: { network: { enabled: true } }, cwd: "/w", reason: "net" }).tool_input, { permissions: { network: { enabled: true } }, cwd: "/w", description: "net" });
   assert.equal(w.dialogPayload("mcpServer/elicitation/request", { serverName: "github" }).notification_type, "elicitation_dialog");
   assert.equal(w.dialogPayload("item/tool/call", {}), null, "a dynamic tool call opens nothing for the owner");
   const p = { questions: [{ id: "q1", header: "Ship", question: "Ship it?", options: [{ label: "Yes", description: "go" }] }, { id: "q2", header: "Why", question: "Why?" }] };
@@ -183,6 +191,18 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   assert.equal(JSON.parse(readFileSync(dialogFlag(h, "t1"), "utf8")).what, "rm -rf build");
   await until(() => !existsSync(dialogFlag(h, "t1")), "the dialog flag to come down");
   await until(() => status().some((e) => e.ev === "idle" && e.last === "done: APPROVE now"), "the approval turn's end");
+
+  // While the owner is away the approval is held: declined so the turn goes on, with the note as a steer (Codex's
+  // decline carries no reason), and on the held list. No dialog opens.
+  const away = await mod("away.mjs");
+  away.setAway(true, "test");
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "APPROVE later"), { ok: true });
+  await until(() => lines().some((l) => l.in?.result?.decision === "decline"), "the declined approval");
+  await until(() => lines().some((l) => l.in?.method === "turn/steer" && JSON.stringify(l.in.params.input).includes("held for them")), "the hold note, steered in");
+  assert.deepEqual(away.heldView().map((x) => [x.ref, x.harness, x.tool, x.summary, x.reason]), [[`${h}:t1`, "codex", "Bash", "rm -rf build", "clean the build"]]);
+  assert.equal(existsSync(dialogFlag(h, "t1")), false);
+  await until(() => status().some((e) => e.ev === "idle" && e.last === "done: APPROVE later"), "the held turn's end");
+  away.setAway(false, "test");
 
   // A question goes to the owner's picker: the task turns needs-you, and the worker hears where it went.
   assert.deepEqual(codex.type(store.readTask(h, "t1"), "ASK please"), { ok: true });

@@ -42,11 +42,12 @@ export const WAITABLE = ["disk", "power", "billing"];
 export const NAMES = { usage: "the usage limit", "usage-codex": "Codex's usage limit", billing: "GitHub billing", disk: "disk space", power: "power", memory: "memory" };
 
 const appleString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-export function notify(title, text, { sound = true } = {}) {
+/** `tag`: what a front end acts on beside the words, for a notice about one item (`{ kind, ref, held }`, away.mjs). */
+export function notify(title, text, { sound = true, tag = null } = {}) {
   // A front end that shows the owner's notifications (clients.mjs) gets this one through its stream instead.
-  if (noteNotice({ title, text, sound })) return;
+  if (noteNotice({ title, text, sound, ...(tag ?? {}) })) return;
   const log = process.env.ROLLCALL_NOTIFY_LOG;
-  if (log) { appendFileSync(log, `${JSON.stringify({ title, text })}\n`); return; }
+  if (log) { appendFileSync(log, `${JSON.stringify({ title, text, ...(tag ?? {}) })}\n`); return; }
   spawnSync("osascript", ["-e", `display notification ${appleString(text)} with title ${appleString(title)}${sound ? ' sound name "Glass"' : ""}`], { stdio: "ignore", timeout: 5000 });
 }
 

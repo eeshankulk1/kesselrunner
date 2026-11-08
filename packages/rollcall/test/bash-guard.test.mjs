@@ -122,6 +122,23 @@ test("nothing writes the owner's line for task relay but rollcall, and a worker 
   assert.equal(a.bashPre("rollcall task output t1 -", {}, w).stdout, "", "other task commands pass");
 });
 
+test("away mode's answers and records are the owner's: an agent's shell never answers, and a worker never flips it", (t) => {
+  const sb = sandbox(t);
+  const a = sb.session();
+  a.start();
+  const w = { ROLLCALL_TASK: "alpha:t1" };
+  for (const cmd of ["rollcall away allow h-1-abc", "rollcall away deny h-1-abc 'no'", "rollcall away allow-all", "env -u ROLLCALL_TASK ROLLCALL_SESSION=x rollcall away allow-all"]) {
+    assert.match(reason(a.bashPre(cmd)), /answering what away mode held grants a permission/, cmd);
+  }
+  assert.match(reason(a.bashPre("rollcall away on", {}, w)), /away mode is the owner's switch/);
+  assert.equal(a.bashPre("rollcall away on").stdout, "", "a supervisor turns it on, on the owner's word");
+  assert.equal(a.bashPre("rollcall away status", {}, w).stdout, "", "anyone reads it");
+  for (const cmd of ["cat ~/.rollcall/_machine/grants.json", `echo '[]' > "$ROLLCALL_HOME/_machine/held.json"`]) {
+    assert.match(reason(a.bashPre(cmd)), /away-mode records/, cmd);
+  }
+  assert.equal(a.bashPre("grep -n grants.json src/away.mjs").stdout, "", "reading rollcall's source passes");
+});
+
 test("the guard follows the command to its checkout, and honours allow-shared and ROLLCALL_DISABLE", (t) => {
   const sb = sandbox(t);
   const wt = sb.worktree("mine");
