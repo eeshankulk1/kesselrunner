@@ -114,12 +114,13 @@ export function connect(sock, on, { timeoutMs = 10_000 } = {}) {
 
 /**
  * One call to a short-lived app server on stdio (`codex app-server`): starts it, initializes, asks `method`, and stops
- * it. For reads that need no worker (the account's rate limits). Resolves to the result.
+ * it. For reads that need no worker (the account's rate limits, a thread's turns). `args` runs it another way (under
+ * the login shell, commandOf). Resolves to the result.
  */
-export function once(bin, method, params, { timeoutMs = 15_000, env = process.env } = {}) {
+export function once(bin, method, params, { timeoutMs = 15_000, env = process.env, args = ["app-server"] } = {}) {
   return new Promise((resolve, reject) => {
     let p;
-    try { p = spawn(bin, ["app-server"], { stdio: ["pipe", "pipe", "ignore"], env }); } catch (e) { reject(e); return; }
+    try { p = spawn(bin, args, { stdio: ["pipe", "pipe", "ignore"], env }); } catch (e) { reject(e); return; }
     let buf = "";
     const stop = () => { try { p.kill(); } catch {} };
     const timer = setTimeout(() => { stop(); reject(new Error(`${method}: no answer in ${timeoutMs} ms`)); }, timeoutMs);

@@ -135,16 +135,21 @@ export async function backfill(hist, t, { skip = null } = {}) {
   return n;
 }
 
-/**
- * What session `session` added outside the host (the terminal escape hatch ran the real CLI on it): the items its
- * transcript holds that the history does not, appended in order. Returns them.
- */
-export async function catchUp(hist, where) {
+/** Appends the items of session `session` the history does not hold yet, in order. Returns them. */
+export function addNew(hist, session, items) {
   const added = [];
-  for (const item of await sessionItems(where)) {
-    if (hist.index.has(item.id)) continue;
-    hist.append({ ev: "item", session: where.session, item });
+  for (const item of items) {
+    if (!item?.id || hist.index.has(item.id)) continue;
+    hist.append({ ev: "item", session, item });
     added.push(item);
   }
   return added;
+}
+
+/**
+ * What Claude session `session` added outside the host (the terminal escape hatch ran the real CLI on it): the items
+ * its transcript holds that the history does not, appended in order. Returns them.
+ */
+export async function catchUp(hist, where) {
+  return addNew(hist, where.session, await sessionItems(where));
 }
