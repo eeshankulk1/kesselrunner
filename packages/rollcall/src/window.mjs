@@ -10,6 +10,7 @@ import { BIN, P, currentSession } from "./session.mjs";
 import * as store from "./store.mjs";
 import { noBrowser, statusLine } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
+import { VIEWS, defaultView, launchFile, readJson, streamOn, writeJson } from "./claude/live.mjs";
 
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
@@ -136,17 +137,32 @@ export function writeWindow(h, back, { prompt = null } = {}) {
     store.writeHomeFile(h, "sent", { text: prompt, at: Date.now() });
     first = ` "$(cat ${q(promptFile)})"`;
   }
-  const claude = q(process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude");
+  const bin = process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude";
+  const claude = q(bin);
   const t = (args) => `tmux -L ${q(tmux.SOCKET())} ${args}`;
+  // The supervisor runs under the stream worker (claude/worker.mjs) as a task's worker does: in the chat view a front
+  // end reads and answers it, and its window shows a plain text view with Enter for the real CLI.
+  let run = back.resume
+    ? `${claude} --resume ${q(back.session)} --settings ${q(settings)}${first}`
+    : `${claude} --session-id ${q(back.session)} --settings ${q(settings)} -n ${q(h)} ${q(`/supervisor ${h}`)}`;
+  if (streamOn()) {
+    const text = back.resume ? prompt : `/supervisor ${h}`;
+    if (text && !back.resume) writeFileSync(promptFile, text);
+    const was = back.resume ? readJson(launchFile(h, null)) : null;
+    writeJson(launchFile(h, null), {
+      home: h, task: null, session: back.session, resume: !!back.resume, settings, cwd: back.cwd, bin,
+      prompt: text ? promptFile : null, mode: null, model: null, effort: null, addDir: [], name: h,
+      view: VIEWS.includes(was?.view) ? was.view : defaultView(),
+    });
+    run = `${q(process.execPath)} ${q(BIN)} claude-worker ${q(h)}`;
+  }
   const lines = [
     `# falcon: supervisor ${h}'s tmux window sources this file.`,
     "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_PROJECT_DIR CLAUDE_ENV_FILE ROLLCALL_SESSION ROLLCALL_TASK",
     ...envExports(),
     `cd ${q(back.cwd)} || exit 1`,
     "started=$(date +%s)",
-    back.resume
-      ? `${claude} --resume ${q(back.session)} --settings ${q(settings)}${first}`
-      : `${claude} --session-id ${q(back.session)} --settings ${q(settings)} -n ${q(h)} ${q(`/supervisor ${h}`)}`,
+    run,
     "code=$?",
     `if [ "$code" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 15 ]; then printf '\\n[falcon] Claude Code stopped (exit %s). Press Enter to close this tab.\\n' "$code"; read -r _; fi`,
     // Only the terminals on this window: one showing a worker stays where it is.

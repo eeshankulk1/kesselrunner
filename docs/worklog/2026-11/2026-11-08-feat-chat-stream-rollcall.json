@@ -1,0 +1,1 @@
+{"date": "2026-11-08", "project": "kesselrunner", "summary": "rollcall runs Claude workers and the Falcon in a chat view (Claude Code stream mode) beside the real CLI, with a conversation read, prompt answers, model changes and a switch for front ends such as cockpit.", "pr": 12, "why": "Cockpit shows each session as a real chat, with the terminal one switch away."}

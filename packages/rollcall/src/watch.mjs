@@ -39,6 +39,10 @@ import * as tmux from "./tmux.mjs";
 import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
 import { comeBack, contextOf, markBack, startWindow, supervisorMark } from "./window.mjs";
+import { inChat, send as sendToWorker } from "./claude/live.mjs";
+
+/** rollcall's news into a chat-view supervisor's stream: { ok, err }. */
+const sayToSupervisor = (h, text) => { const r = sendToWorker(h, null, { op: "say", text, from: "rollcall" }); return r.ok ? { ok: true } : { ok: false, err: r.err }; };
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 // A task waits on the owner this long before the first notification, then reminds every 10 minutes.
@@ -954,6 +958,8 @@ const lost = { misses: 0, at: 0 };
  * second old, and a key pressed in that second counts.
  */
 function clearToType(h, now) {
+  // In the chat view nothing is typed into its window: the news goes into its stream, queued behind a running turn.
+  if (inChat(h, null)) return true;
   tmux.forget(h);
   return now - tmux.lastUsed(h, h) >= keyQuietMs() && !tmux.draft(h, h);
 }
@@ -1020,7 +1026,7 @@ function deliver(h, s, news, now) {
   if (lost.misses >= MAX_MISSES && (store.readHomeFile(h, "turn")?.at ?? 0) <= lost.at) return;
   const taken = takeNews(h, s.holder.id, news, now);
   if (!taken) return;
-  const r = tmux.type(h, h, taken.text);
+  const r = inChat(h, null) ? sayToSupervisor(h, taken.text) : tmux.type(h, h, taken.text);
   if (r.ok) { markReported(h, taken.shown); return; }
   store.requeueWakes(h, taken.names.map((n) => `d-${n.slice(2)}`));
   store.writeHomeFile(h, "delivery", null);

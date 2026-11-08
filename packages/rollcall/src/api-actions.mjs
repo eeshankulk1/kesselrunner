@@ -18,7 +18,10 @@ import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDi
 import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
-import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
+import { NAMES as HARNESS_NAMES, harnessName, harnessOf, workerAdapter } from "./harness/index.mjs";
+import { modelOk } from "./harness/claude.mjs";
+import { SET_MODES } from "./claude/worker.mjs";
+import * as live from "./claude/live.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
 const START_FILE = process.env.ROLLCALL_START_FILE || fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
@@ -101,6 +104,36 @@ const homeOf = (p) => {
 };
 const fresh = (t) => taskView(store.readTask(t.home, t.id) ?? t);
 
+/** What a payload's `task` names: a task (`falcon:t3`), or with a bare home (`falcon`) the supervisor itself. */
+function targetOf(p) {
+  const ref = str(p, "task");
+  if (!ref.includes(":") && store.HOME_NAME.test(ref) && store.listHomes().includes(ref)) return { h: ref, id: null, t: null };
+  const t = taskOf(p);
+  return { h: t.home, id: t.id, t };
+}
+/** The target's view after an action: the task's, or the supervisor's own. */
+const viewAfter = (x) => (x.t ? fresh(x.t) : null);
+
+/** Files a front end attached: absolute paths that exist, ten at most. */
+function attachmentsOf(p) {
+  if (p.attachments === undefined || p.attachments === null) return [];
+  if (!Array.isArray(p.attachments) || p.attachments.some((a) => typeof a !== "string" || !a.startsWith("/"))) refuse("bad-payload", "attachments are absolute paths");
+  // The path goes into the worker's text as "[Attached: a, b]": a newline or a ", /" would forge a second file or line.
+  if (p.attachments.some((a) => /[\x00-\x1f\x7f]|, \//.test(a))) refuse("bad-payload", "an attachment path has a control character or \", /\"");
+  if (p.attachments.length > 10) refuse("bad-payload", "attachments: ten at most");
+  const missing = p.attachments.filter((a) => !existsSync(a));
+  if (missing.length) refuse("bad-payload", `no such file: ${missing.join(", ")}`);
+  return p.attachments;
+}
+
+/** The chat view's worker for an action that needs its stream: refused, with the way to the chat, when it runs in the terminal. */
+function chatWorker(x, what) {
+  const rec = live.record(x.h, x.id);
+  if (!rec) refuse("refused", `${x.t ? label(x.t) : `supervisor ${x.h}`} has no worker running in the chat view: ${what} needs it`);
+  if (rec.view !== "chat") refuse("refused", `${x.t ? label(x.t) : `supervisor ${x.h}`} runs in the terminal view: switch it to the chat (task.switch) to ${what} here, or do it in its terminal`);
+  return rec;
+}
+
 // ---------------------------------------------------------------- the actions
 
 /**
@@ -145,9 +178,20 @@ export const ACTIONS = {
   "task.tell": {
     cli: "@<task> <text> in the Falcon",
     run(p, client) {
-      const t = taskOf(p);
-      const text = str(p, "text").trim();
-      if (!text) refuse("bad-payload", "text is required");
+      const x = targetOf(p);
+      const said = str(p, "text").trim();
+      if (!said) refuse("bad-payload", "text is required");
+      const text = live.withAttachments(said, attachmentsOf(p));
+      // The owner's line to the supervisor itself (its chat's composer): into its stream, as a line they typed.
+      if (!x.t) {
+        chatWorker(x, "send it words");
+        store.writeHomeFile(x.h, "app-line", { text: said, at: Date.now(), client });
+        const { body, attachments } = live.attachmentsIn(text);
+        const r = live.send(x.h, null, { op: "say", text: body, attachments, from: "owner" });
+        if (!r.ok) refuse("failed", r.err ?? "the supervisor did not take the words");
+        return { delivered: true, how: r.how, why: null, view: null };
+      }
+      const t = x.t;
       if (!isOpen(t) && !t.sessions?.length) refuse("refused", `${label(t)} is ${t.state} and never had a worker`);
       const r = deliverWords(t, text, {
         record: (x) => recordWords(t, x, "app", (rec) => { rec.words.at(-1).client = client; }),
@@ -168,14 +212,76 @@ export const ACTIONS = {
     },
   },
 
-  // Esc in the worker's window: its turn stops, as the owner's Esc would.
+  // Esc in the worker's window (or the stream's interrupt in the chat): its turn stops, as the owner's Esc would.
   "task.interrupt": {
     cli: "start.mjs <task> --interrupt",
     run(p) {
-      const t = taskOf(p);
-      const w = tmux.windowOf(t.home, t.id);
+      const x = targetOf(p);
+      const w = tmux.windowOf(x.h, x.id ?? x.h);
       if (!w?.alive) return { interrupted: false, why: "its worker is not running" };
-      return { interrupted: tmux.interrupt(t.home, t.id) };
+      if (!x.t) return { interrupted: live.inChat(x.h, null) ? live.send(x.h, null, { op: "interrupt" }).ok === true : tmux.interrupt(x.h, x.h) };
+      return { interrupted: workerAdapter(x.t).interrupt(x.t) };
+    },
+  },
+
+  // An answer to the live moment open in a chat-view worker: a permission prompt, a plan to approve, a question.
+  "prompt.answer": {
+    cli: "the prompt in the worker's window",
+    run(p, client) {
+      const x = targetOf(p);
+      const id = str(p, "prompt", { max: 200 });
+      chatWorker(x, "answer its prompt");
+      for (const k of ["allow", "always"]) if (p[k] !== undefined && typeof p[k] !== "boolean") refuse("bad-payload", `${k} is true or false`);
+      if (p.answers !== undefined && (typeof p.answers !== "object" || p.answers === null || Array.isArray(p.answers))) refuse("bad-payload", "answers maps each question to its answer");
+      if (p.mode !== undefined && !["acceptEdits", "default"].includes(p.mode)) refuse("bad-payload", "mode is acceptEdits or default");
+      const why = str(p, "why", { required: false, max: 2000 });
+      const r = live.send(x.h, x.id, { op: "answer", prompt: id, allow: typeof p.allow === "boolean" ? p.allow : null, why, always: p.always === true, mode: p.mode ?? null, answers: p.answers ?? null, by: client });
+      if (r.code === "not-found") refuse("not-found", `no prompt ${id} in that worker`);
+      if (r.code === "bad-payload") refuse("bad-payload", r.err);
+      if (!r.ok) refuse("failed", r.err ?? "the worker did not take the answer");
+      return { answered: !!r.answered, already: !!r.already, view: viewAfter(x) };
+    },
+  },
+
+  // The model or permission mode of a chat-view worker, changed in its running session (as /model or Shift-Tab would).
+  "worker.set": {
+    cli: "/model or Shift-Tab in the worker's window",
+    run(p) {
+      const x = targetOf(p);
+      const model = str(p, "model", { required: false, max: 100 });
+      const mode = str(p, "mode", { required: false, max: 40 });
+      if (!model && !mode) refuse("bad-payload", "model or mode is required");
+      if (model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
+      if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
+      chatWorker(x, "change its model or mode");
+      const r = live.send(x.h, x.id, { op: "set", model, mode });
+      if (!r.ok) refuse("failed", r.err ?? "the worker refused");
+      return { set: r.set ?? {}, view: viewAfter(x) };
+    },
+  },
+
+  // Moves a worker between the chat (stream mode) and the real CLI, at its next quiet point, keeping its session.
+  "task.switch": {
+    cli: "Enter in the worker's chat view; task.switch back",
+    run(p) {
+      const x = targetOf(p);
+      const to = str(p, "to", { max: 20 });
+      if (!live.VIEWS.includes(to)) refuse("bad-payload", `to is ${live.VIEWS.join(" or ")}`);
+      if (x.t && harnessOf(x.t) === "codex") refuse("not-available", "a Codex worker's chat view comes with its conversation read; its terminal shows it now");
+      const rec = live.record(x.h, x.id);
+      if (!rec) {
+        // Nothing runs it under the stream worker: a worker started before the chat view, or none running now. The
+        // view is kept for its next start.
+        if (tmux.windowOf(x.h, x.id ?? x.h)?.alive && to === "chat") refuse("refused", "its worker runs the plain CLI, started before the chat view: stop it and resume it (task.stop, task.resume) to bring it back in the chat");
+        const f = live.launchFile(x.h, x.id);
+        const was = live.readJson(f);
+        if (was?.view === to) return { switched: false, pending: false, already: true, view: viewAfter(x) };
+        live.writeJson(f, { ...(was ?? {}), view: to });
+        return { switched: false, pending: true, already: false, view: viewAfter(x) };
+      }
+      const r = live.send(x.h, x.id, { op: "switch", to });
+      if (!r.ok) refuse("failed", r.err ?? "the worker refused");
+      return { switched: !!r.switched, pending: !!r.pending, already: !!r.already, view: viewAfter(x) };
     },
   },
 

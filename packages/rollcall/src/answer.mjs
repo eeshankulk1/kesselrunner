@@ -9,6 +9,7 @@ import * as store from "./store.mjs";
 import { deliverWords, holderOf, label, nameOf, taskOfQuestion } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
 import { ownerSaid } from "./task.mjs";
+import { record as liveRecord, send as sendToWorker } from "./claude/live.mjs";
 
 /**
  * A pick as its worker reads it: its question's header, then the answer. Words of the owner's own under
@@ -123,6 +124,23 @@ export function answerFromFrontEnd(h, id, { qid, answers = null, answer = null, 
  * whether it closed one.
  */
 export function closeFalconPicker(h, by) {
+  // A chat-view supervisor asks in its prompt, not a picker on a screen: that prompt is answered as declined, with why.
+  const rec = liveRecord(h, null);
+  if (rec?.view === "chat") {
+    const p = rec.prompt;
+    if (p?.kind !== "question" || !p.questions?.length) return false;
+    const tasks = new Set();
+    for (const x of p.questions) {
+      const id = taskOfQuestion(x);
+      const t = id && store.readTask(h, id);
+      if (!t || !answeredElsewhere(t, x.question)) return false;
+      tasks.add(t.id);
+    }
+    const r = sendToWorker(h, null, { op: "answer", prompt: p.id, allow: false, why: `${P} The owner answered this from ${by}, and the answer reached the worker already. Do not ask it again.`, by });
+    if (!r.ok) return false;
+    for (const id of tasks) store.enqueueWake(h, { task: id, kind: "answered-elsewhere", by });
+    return true;
+  }
   const g = holderOf(h);
   if (!g?.transcript || !tmux.windowOf(h, h)?.alive) return false;
   const call = pending(tail(g.transcript)).sort((a, b) => b.at - a.at)[0];

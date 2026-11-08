@@ -1,12 +1,16 @@
-// The Claude Code adapter: an interactive `claude` in the task's tmux window, started with a session id fixed at
-// launch and a settings file whose hooks report to the task (worker-hook). rollcall's words go in as a bracketed
-// paste and Enter (tmux.type), Esc stops a turn, and its transcript lives under ~/.claude/projects.
+// The Claude Code adapter: `rollcall claude-worker` in the task's tmux window (claude/worker.mjs), which runs Claude
+// Code with a session id fixed at launch and a settings file whose hooks report to the task (worker-hook), in one of
+// two views: the chat (Claude Code's stream mode, which front ends read and answer) or the terminal (the real CLI).
+// In the chat rollcall's words, interrupts and answers go through the worker's socket; in the terminal they go as
+// keys, as before: a bracketed paste and Enter (tmux.type), Esc to stop a turn. Its transcript lives under
+// ~/.claude/projects either way. ROLLCALL_STREAM=0 starts the plain CLI with no worker process around it.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { dialogFlag, keyQuietMs } from "../delivery.mjs";
+import { dialogFlag, keyQuietMs, received } from "../delivery.mjs";
+import * as live from "../claude/live.mjs";
 import { launchLines } from "../checkout.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -124,6 +128,19 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const files = store.filesDir(t.home, t.id);
   if (browser) mkdirSync(files, { recursive: true });
   const addDir = browser ? ` --add-dir ${q(files)}` : "";
+  if (live.streamOn()) {
+    // The worker process keeps the view it last showed (a front end's choice) across a resume.
+    const was = resume ? live.readJson(live.launchFile(t.home, t.id)) : null;
+    live.writeJson(live.launchFile(t.home, t.id), {
+      home: t.home, task: t.id, session, resume: !!resume, settings, cwd: t.worktree, bin: bin(),
+      prompt: prompt ? promptFile : null, mode: MODES.has(mode) ? mode : null, model: modelOk(model) ? model : null,
+      effort: effortOk(effort) ? effort : null, addDir: browser ? [files] : [], name: name ?? null,
+      // Stream mode (-p) skips Claude Code's trust question: a repo it has not trusted starts in the real CLI, which asks.
+      view: trusted(t) === false ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
+    });
+    writeFileSync(script, `${[...preamble(t, { browser, files }), `${q(process.execPath)} ${q(BIN)} claude-worker ${q(t.home)} ${q(t.id)}`].join("\n")}\n`);
+    return { script, session };
+  }
   const lines = [
     ...preamble(t, { browser, files }),
     resume
@@ -139,17 +156,32 @@ export function stopLegacy(session) {
   spawnSync(bin(), ["stop", session.slice(0, 8)], { stdio: "ignore", timeout: 30_000 });
 }
 
-/** rollcall's words, typed as the owner would: a bracketed paste, then Enter (which `before` may withhold). */
-export const type = (t, text, opts) => tmux.type(t.home, t.id, text, opts);
+/**
+ * rollcall's words to the worker as its next prompt. In the chat they go through its stream (taken at once, or
+ * queued into the running turn as words typed mid-turn are), and the worker taking them is the receipt. In the
+ * terminal they are typed as the owner would: a bracketed paste, then Enter (which `before` may withhold).
+ */
+export function type(t, text, opts) {
+  if (!live.inChat(t.home, t.id)) return tmux.type(t.home, t.id, text, opts);
+  // Files the owner attached ride as a last line (live.withAttachments): in the chat the images go in as images.
+  const { body, attachments } = live.attachmentsIn(String(text));
+  const r = live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" });
+  if (!r.ok) return { ok: false, err: r.err ?? "the worker refused" };
+  received(t, String(text));
+  return { ok: true, how: r.how };
+}
 
-/** Esc: Claude Code stops its turn. */
-export const interrupt = (t) => tmux.interrupt(t.home, t.id);
+/** Stops the worker's turn: the stream's interrupt in the chat, Esc in the terminal. */
+export function interrupt(t) {
+  if (!live.inChat(t.home, t.id)) return tmux.interrupt(t.home, t.id);
+  return live.send(t.home, t.id, { op: "interrupt" }).ok === true;
+}
 
 /**
  * Typing goes into Claude Code's prompt box: never while a dialog is open (Enter would answer it), nor while the
  * owner just pressed a key in the window (it would land in what they are typing).
  */
-export const takesTyping = (t, w, now = Date.now()) => !w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs();
+export const takesTyping = (t, w, now = Date.now()) => live.inChat(t.home, t.id) || (!w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs());
 
 /** The worker session's transcript, as its hooks reported it. */
 export const transcriptOf = (w) => (w?.session ? store.readGlobal(w.session)?.transcript ?? null : null);
