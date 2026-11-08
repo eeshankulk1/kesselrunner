@@ -9,12 +9,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexRecordFile, launchFile, readJson, recordFile, writeJson } from "../claude/live.mjs";
-import { PLAN_MODES, SET_MODES, decisionFor, promptOf } from "../claude/worker.mjs";
+import { PLAN_MODES, SET_MODES, promptOf } from "../claude/stream.mjs";
 import { dialogFlag } from "../delivery.mjs";
 import { pidAlive } from "../proc.mjs";
 import * as store from "../store.mjs";
 import { recordClaude } from "../usage.mjs";
-import { startClaude } from "./claude.mjs";
+import { startClaude } from "../claude/stream.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, backfill, historyFile } from "./history.mjs";
 
@@ -280,10 +280,8 @@ class Agent {
     const answer = { allow: a.allow ?? null, why: a.why ?? null, always: a.always ?? null, mode: a.mode ?? null, answers: a.answers ?? null };
     const p = this.pending.get(id);
     if (p && this.proc) {
-      const decision = decisionFor(p.prompt, p.input, a);
       this.closeRequest(id, "answered", by, answer);
-      this.proc.respond(p.rid, decision);
-      if (req.kind === "plan" && decision.behavior === "allow" && a.mode) void this.proc.setMode(a.mode).catch(() => {});
+      this.proc.answer(p.rid, p.prompt, p.input, a);
       this.persist();
       return { ok: true, answered: true, how: "answered" };
     }

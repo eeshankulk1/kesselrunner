@@ -1,12 +1,93 @@
-// A Claude agent's process in the host: Claude Code in its stream mode (the protocol the Agent SDK wraps; facts in
-// docs/plans/2026-11-08-chat-stream.md), lifted from claude/worker.mjs without its pane. It turns the stream into
-// events for the host (host/server.mjs): items folded with conversation.mjs's own folder (so they match a
+// Claude Code in its stream mode (the protocol the Agent SDK wraps; facts in docs/plans/2026-11-08-chat-stream.md):
+// the one copy of the stream code. Both the agent host (host/server.mjs) and the tmux worker's chat view
+// (claude/worker.mjs) run Claude Code through startClaude. It turns the stream into events: items folded with conversation.mjs's own folder (so they match a
 // transcript read, ids and all), streamed text, words taken, turn ends, permission requests and the exit.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { contentOf, contextOf, limitsOf } from "../claude/worker.mjs";
+import { existsSync, readFileSync } from "node:fs";
+import { extname } from "node:path";
 import { createFolder, oneLine } from "../conversation.mjs";
+import { summaryOf, trimInput } from "../away.mjs";
+
+const IMAGE = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
+const IMAGE_MAX = 5 * 1024 * 1024;
+
+/** A user message's content: the owner's text, images inline, other attached files named for the worker to read. */
+export function contentOf(text, attachments = []) {
+  const images = [];
+  const named = [];
+  for (const p of attachments) {
+    const media = IMAGE[extname(String(p)).toLowerCase()];
+    if (media) {
+      try {
+        const data = readFileSync(p);
+        if (data.length <= IMAGE_MAX) { images.push({ type: "image", source: { type: "base64", media_type: media, data: data.toString("base64") } }); named.push(p); continue; }
+      } catch {}
+    }
+    named.push(p);
+  }
+  const body = named.length ? `${text}\n\n[Attached: ${named.join(", ")}]` : String(text);
+  return images.length ? [...images, { type: "text", text: body }] : body;
+}
+
+/** The prompt a `can_use_tool` request opens, as a front end shows it (the contract's Prompt). */
+export function promptOf(req, requestId, { cwd = null, relays = null, now = Date.now() } = {}) {
+  const tool = req.tool_name ?? null;
+  const input = req.input && typeof req.input === "object" ? req.input : {};
+  const kind = tool === "AskUserQuestion" ? "question" : tool === "ExitPlanMode" ? "plan" : "permission";
+  return {
+    id: requestId, at: now, kind, tool,
+    input: trimInput(input), summary: summaryOf({ worktree: cwd }, tool, input),
+    reason: typeof req.description === "string" ? req.description : typeof input.description === "string" ? input.description : null,
+    questions: kind === "question" && Array.isArray(input.questions)
+      ? input.questions.map((x) => ({ question: x.question, header: x.header ?? "", multiSelect: !!x.multiSelect, options: (x.options ?? []).map((o) => ({ label: o.label, description: o.description ?? "" })) }))
+      : null,
+    plan: kind === "plan" && typeof input.plan === "string" ? input.plan : null,
+    relays,
+    suggestions: Array.isArray(req.permission_suggestions) ? req.permission_suggestions : null,
+  };
+}
+
+/** The modes a front end or the pane may set: the ones Shift-Tab cycles in the CLI. Wider ones stay the launch's. */
+export const SET_MODES = new Set(["default", "acceptEdits", "plan"]);
+/** The modes an approved plan may continue in. */
+export const PLAN_MODES = new Set(["default", "acceptEdits"]);
+
+/**
+ * The answer to a `can_use_tool` request, from what the owner said about prompt `p` (the original input in `input`).
+ * Only an explicit allow allows; `always` adds only the suggestions that last for this session, never a rule written
+ * to a settings file or a new directory.
+ */
+export function decisionFor(p, input, a) {
+  if (p.kind === "question") {
+    const answers = a.allow !== false && a.answers && typeof a.answers === "object" ? a.answers : null;
+    if (!answers) return { behavior: "deny", message: a.why || "The owner did not answer." };
+    return { behavior: "allow", updatedInput: { ...input, answers } };
+  }
+  if (a.allow !== true) return { behavior: "deny", message: a.why ? `The owner declined: ${a.why}` : "The owner declined this." };
+  const out = { behavior: "allow", updatedInput: input };
+  const session = a.always === true && p.kind === "permission" ? (p.suggestions ?? []).filter((x) => x?.destination === "session") : [];
+  if (session.length) out.updatedPermissions = session;
+  return out;
+}
+
+/** The context use one model request says: { pct, tokens, size }, or null. */
+export function contextOf(usage, size) {
+  if (!usage || !Number.isFinite(size) || size <= 0) return null;
+  const tokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+  if (!tokens) return null;
+  return { pct: Math.min(100, Math.round((tokens / size) * 100)), tokens, size };
+}
+
+/** The account's limits a stream's rate_limit_event carries, as the status line reports them (usage.mjs). */
+export function limitsOf(info) {
+  const w = info?.unifiedWindows;
+  if (!w || typeof w !== "object") return null;
+  const one = (x) => (x && Number.isFinite(x.utilization) ? { used_percentage: x.utilization * 100, resets_at: x.resetsAt ?? null } : undefined);
+  return { five_hour: one(w.five_hour), seven_day: one(w.seven_day) };
+}
+
+
 
 const textOf = (c) => (typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x?.type === "text").map((x) => x.text).join("\n") : "");
 
@@ -40,14 +121,15 @@ export function commandOf(bin, args, envFile) {
  *   { type: "init", session }
  *   { type: "items", items }                      items new or changed, in order (children carry `parent`)
  *   { type: "text", id, kind, append, parent }    streamed text on an item not finished yet
- *   { type: "taken", uuid }                       a message we sent went in (its replay)
+ *   { type: "text-end", id }                      that text's block finished
+ *   { type: "taken", uuid, text }                 a message we sent went in (its replay)
  *   { type: "turn-end", ms, tokens, error, context }
  *   { type: "request", rid, req }                 can_use_tool, waiting for respond(rid, decision)
  *   { type: "cancel", rid }
  *   { type: "limits", limits }
  *   { type: "exit", code, err }
  */
-export function startClaude({ cfg, resume, envFile = null, env = process.env, on, log = () => {} }) {
+export function startClaude({ cfg, resume, envFile = null, env = process.env, on, onRaw = null, log = () => {} }) {
   const [cmd, argv] = commandOf(cfg.bin, argsOf(cfg, resume), envFile);
   const child = spawn(cmd, argv, { cwd: cfg.cwd && existsSync(cfg.cwd) ? cfg.cwd : undefined, stdio: ["pipe", "pipe", "pipe"], env });
   let err = "";
@@ -115,6 +197,7 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
           const add = e.delta?.type === "text_delta" ? e.delta.text : e.delta?.type === "thinking_delta" ? e.delta.thinking : null;
           if (kind && typeof add === "string" && add) emit({ type: "text", id: `${msg.id}:${e.index}`, kind, append: add, parent: msg.parent });
         }
+        if (e.type === "content_block_stop" && msg.kinds.has(e.index)) emit({ type: "text-end", id: `${msg.id}:${e.index}` });
         return;
       }
       case "assistant":
@@ -123,7 +206,7 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
       case "user": {
         const parent = m.parent_tool_use_id ?? null;
         if (m.isReplay && !parent) {
-          emit({ type: "taken", uuid: m.uuid });
+          emit({ type: "taken", uuid: m.uuid, text: textOf(m.message?.content) });
           // Words taken into a running turn: the transcript's queued_command, not a new turn.
           if (turnOpen) fold({ type: "attachment", uuid: m.uuid, attachment: { type: "queued_command", prompt: textOf(m.message?.content), source_uuid: m.uuid } });
           else { turnOpen = true; fold(m); }
@@ -175,7 +258,7 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
       if (!line.startsWith("{")) continue;
       let m;
       try { m = JSON.parse(line); } catch { continue; }
-      try { onMessage(m); } catch (e) { log(`a stream message failed: ${e.message}`); }
+      try { onRaw?.(m); onMessage(m); } catch (e) { log(`a stream message failed: ${e.message}`); }
     }
   });
   child.on("exit", (code, signal) => emit({ type: "exit", code: code ?? (signal ? 1 : 0), signal, err: err.trim().split("\n").slice(-6).join("\n") }));
@@ -190,6 +273,13 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
       return uuid;
     },
     respond(rid, response) { write({ type: "control_response", response: { subtype: "success", request_id: rid, response } }); },
+    /** The owner's answer `a` to request `rid` (its prompt `p`, original `input`): the decision sent, and an approved plan's mode set. */
+    answer(rid, p, input, a) {
+      const decision = decisionFor(p, input, a);
+      this.respond(rid, decision);
+      if (p.kind === "plan" && decision.behavior === "allow" && a.mode) void control({ subtype: "set_permission_mode", mode: a.mode }).catch(() => {});
+      return decision.behavior === "allow";
+    },
     control,
     interrupt: () => control({ subtype: "interrupt" }),
     setModel: (model) => control({ subtype: "set_model", model }),
