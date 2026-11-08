@@ -9,8 +9,15 @@
 //   TOKENS=n reports n tokens of a 1000-token window
 //   SLOW     runs 3 s before it ends (so a steer or interrupt can meet it)
 //   WRITE=f  writes file f (relative to the thread's cwd) as the turn ends, as a shell command would
+//   HOLD     asks to run a command and waits (up to 8 s) for a client's answer
+//   TOOL     runs `ls` (a commandExecution item, started then completed)
+//   EDIT     changes src/a.js (a fileChange item)
+//   PLAN     sends its plan (turn/plan/updated)
+//   THINK    thinks first (a reasoning summary, streamed)
+//   STREAM   streams its reply in pieces, 100 ms apart
+// thread/resume answers with the turns in $FAKE_CODEX_HISTORY (a JSON file), as a thread's saved history.
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join as joinPath } from "node:path";
 import net from "node:net";
 
@@ -61,6 +68,31 @@ function serve(path) {
       await wait(300);
       notify("serverRequest/resolved", { threadId: thread.id, requestId: id });
     }
+    if (/HOLD/.test(text)) {
+      const id = ++reqN;
+      const answered = new Promise((r) => waiting.set(id, r));
+      broadcast({ id, method: "item/commandExecution/requestApproval", params: { threadId: thread.id, turnId, itemId: "i3", startedAtMs: Date.now(), command: "rm -rf build", reason: "clean the build" } });
+      await Promise.race([answered, wait(8000)]);
+      notify("serverRequest/resolved", { threadId: thread.id, requestId: id });
+    }
+    if (/PLAN/.test(text)) notify("turn/plan/updated", { threadId: thread.id, turnId, plan: [{ step: "Read the code", status: "completed" }, { step: "Fix it", status: "inProgress" }, { step: "Test it", status: "pending" }] });
+    if (/THINK/.test(text)) {
+      const rid = `r-${turnId}`;
+      notify("item/started", { threadId: thread.id, turnId, item: { type: "reasoning", id: rid, summary: [], content: [] } });
+      for (const d of ["Looking ", "at it"]) { notify("item/reasoning/summaryTextDelta", { threadId: thread.id, turnId, itemId: rid, summaryIndex: 0, delta: d }); await wait(20); }
+      notify("item/completed", { threadId: thread.id, turnId, item: { type: "reasoning", id: rid, summary: ["Looking at it"], content: [] } });
+    }
+    if (/TOOL/.test(text)) {
+      const item = { type: "commandExecution", id: `c-${turnId}`, command: "ls", cwd: thread.cwd ?? "/", commandActions: [], status: "inProgress" };
+      notify("item/started", { threadId: thread.id, turnId, item });
+      await wait(50);
+      notify("item/completed", { threadId: thread.id, turnId, item: { ...item, status: "completed", exitCode: 0, aggregatedOutput: "a.txt\n", durationMs: 12 } });
+    }
+    if (/EDIT/.test(text)) {
+      const item = { type: "fileChange", id: `f-${turnId}`, status: "completed", changes: [{ path: `${thread.cwd ?? ""}/src/a.js`, kind: { type: "update", move_path: null }, diff: "@@ -1 +1 @@\n-src/a.js\n+src/a.js changed" }] };
+      notify("item/started", { threadId: thread.id, turnId, item: { ...item, status: "inProgress" } });
+      notify("item/completed", { threadId: thread.id, turnId, item });
+    }
     if (/ASK/.test(text)) {
       const id = ++reqN;
       const answered = new Promise((r) => waiting.set(id, r));
@@ -70,13 +102,22 @@ function serve(path) {
     if (/SLOW/.test(text)) await wait(3000);
     const write = /WRITE=(\S+)/.exec(text);
     if (write && thread.cwd) { const f = joinPath(thread.cwd, write[1]); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `written by ${turnId}\n`); }
+    const reply = `done: ${text.split("\n")[0]}`;
+    if (/STREAM/.test(text) && !/LIMIT/.test(text)) {
+      notify("item/started", { threadId: thread.id, turnId, item: { type: "agentMessage", id: `a-${turnId}`, text: "" } });
+      for (let i = 0; i < reply.length; i += 4) {
+        if (thread.turn !== turnId) return;
+        notify("item/agentMessage/delta", { threadId: thread.id, turnId, itemId: `a-${turnId}`, delta: reply.slice(i, i + 4) });
+        await wait(100);
+      }
+    }
     if (thread.turn !== turnId) return; // interrupted meanwhile
     thread.turn = null;
     if (/LIMIT/.test(text)) {
       notify("turn/completed", { threadId: thread.id, turn: { id: turnId, status: "failed", error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" } } });
       return;
     }
-    notify("item/completed", { threadId: thread.id, turnId, item: { type: "agentMessage", id: `a-${turnId}`, text: `done: ${text.split("\n")[0]}` } });
+    notify("item/completed", { threadId: thread.id, turnId, item: { type: "agentMessage", id: `a-${turnId}`, text: reply } });
     notify("turn/completed", { threadId: thread.id, turn: { id: turnId, status: "completed" } });
   }
 
@@ -89,7 +130,13 @@ function serve(path) {
       case "initialize": return reply({ userAgent: "fake", codexHome: "/tmp", platformFamily: "unix", platformOs: "macos" });
       case "initialized": return;
       case "thread/start": thread.cwd = p.cwd ?? null; reply({ thread: { id: thread.id } }); return notify("thread/started", { thread: { id: thread.id } });
-      case "thread/resume": thread.id = p.threadId; return reply({ thread: { id: p.threadId } });
+      case "thread/resume": {
+        thread.id = p.threadId;
+        thread.cwd = p.cwd ?? thread.cwd;
+        let turns = [];
+        try { turns = JSON.parse(readFileSync(process.env.FAKE_CODEX_HISTORY, "utf8")); } catch {}
+        return reply({ thread: { id: p.threadId, turns } });
+      }
       case "thread/read": return reply({ thread: { id: thread.id, turns: thread.turn ? [{ id: thread.turn, status: "inProgress" }] : [] } });
       case "hooks/list": return reply({ data: [{ cwd: p.cwds?.[0] ?? "", hooks: [{ enabled: true, trustStatus: "untrusted" }], errors: [], warnings: [] }] });
       case "account/rateLimits/read": return reply({ rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 }, planType: "plus" } }, rateLimits: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } });
@@ -97,7 +144,9 @@ function serve(path) {
         const text = (p.input ?? []).map((x) => x.text).join("\n");
         const turnId = await play(text);
         reply({ turn: { id: turnId, status: "inProgress" } });
-        notify("item/started", { threadId: thread.id, turnId, item: { type: "userMessage", id: `u-${turnId}`, clientId: p.clientUserMessageId ?? null, content: [{ type: "text", text }] } });
+        const said = { type: "userMessage", id: `u-${turnId}`, clientId: p.clientUserMessageId ?? null, content: [{ type: "text", text }] };
+        notify("item/started", { threadId: thread.id, turnId, item: said });
+        setTimeout(() => notify("item/completed", { threadId: thread.id, turnId, item: said }), 5);
         notify("account/rateLimits/updated", { rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } });
         void finish(turnId, text);
         return;
