@@ -258,7 +258,7 @@ const strip = ({ key, ...x }) => x;
 function reopen(ids) {
   store.updateMachineFile("held", (raw) => {
     const items = Array.isArray(raw) ? raw : [];
-    for (const x of items) if (ids.includes(x.id) && x.state === "approved") Object.assign(x, { state: "held", answer: null });
+    for (const item of items) if (ids.includes(item.id) && item.state === "approved") Object.assign(item, { state: "held", answer: null });
     return { value: items, out: true };
   });
 }
