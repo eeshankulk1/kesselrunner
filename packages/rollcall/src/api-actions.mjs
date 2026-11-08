@@ -20,6 +20,7 @@ import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf, workerAdapter } from "./harness/index.mjs";
 import { modelOk } from "./harness/claude.mjs";
+import { launchFile as codexLaunchFile, models as codexModels } from "./harness/codex.mjs";
 import { SET_MODES } from "./claude/worker.mjs";
 import * as live from "./claude/live.mjs";
 
@@ -251,7 +252,10 @@ export const ACTIONS = {
       const model = str(p, "model", { required: false, max: 100 });
       const mode = str(p, "mode", { required: false, max: 40 });
       if (!model && !mode) refuse("bad-payload", "model or mode is required");
-      if (model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
+      const codex = !!x.t && harnessOf(x.t) === "codex";
+      if (codex && mode) refuse("bad-payload", "a Codex worker keeps the permission mode it started with: set its model only");
+      if (codex && !codexModels.ok(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
+      if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
       chatWorker(x, "change its model or mode");
       const r = live.send(x.h, x.id, { op: "set", model, mode });
@@ -267,13 +271,13 @@ export const ACTIONS = {
       const x = targetOf(p);
       const to = str(p, "to", { max: 20 });
       if (!live.VIEWS.includes(to)) refuse("bad-payload", `to is ${live.VIEWS.join(" or ")}`);
-      if (x.t && harnessOf(x.t) === "codex") refuse("not-available", "a Codex worker's chat view comes with its conversation read; its terminal shows it now");
+      const codex = !!x.t && harnessOf(x.t) === "codex";
       const rec = live.record(x.h, x.id);
       if (!rec) {
         // Nothing runs it under the stream worker: a worker started before the chat view, or none running now. The
         // view is kept for its next start.
         if (tmux.windowOf(x.h, x.id ?? x.h)?.alive && to === "chat") refuse("refused", "its worker runs the plain CLI, started before the chat view: stop it and resume it (task.stop, task.resume) to bring it back in the chat");
-        const f = live.launchFile(x.h, x.id);
+        const f = codex ? codexLaunchFile(x.h, x.id) : live.launchFile(x.h, x.id);
         const was = live.readJson(f);
         if (was?.view === to) return { switched: false, pending: false, already: true, view: viewAfter(x) };
         live.writeJson(f, { ...(was ?? {}), view: to });

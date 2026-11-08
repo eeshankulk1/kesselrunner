@@ -3,7 +3,7 @@ status: done
 absorbed-into: packages/rollcall/API.md, packages/rollcall/README.md, docs/architecture.md
 date: 2026-11-08
 decided-with-owner: 2026-11-08 (cockpit task t21 "Chat view": stream mode over reading the CLI's log, the real CLI on a switch, the Falcon in stream mode in this build, one question in one place)
-covers: "The rollcall side of the chat view: a stream-mode Claude worker and Falcon, the conversation read for front ends, answering live moments from a front end, and the switch to and from the real CLI"
+covers: "The rollcall side of the chat view: a stream-mode Claude worker and Falcon, Codex workers in the chat, the conversation read for front ends, answering live moments from a front end, and the switch to and from the real CLI"
 ---
 
 # Chat stream (rollcall side)
@@ -74,7 +74,7 @@ window shows it, while the worker runs in chat.
 every resume), then lays the live file over it: `streaming` items for text not yet in the transcript, the
 `queued` messages, and `turns.jsonl` for a turn end's time and tokens. `api conversation <ref> --follow` watches
 the transcript, the record and the live file, and prints the contract's `item`, `text`, `prompt`, `view` and
-`reset` lines. Codex workers: the same items from the Codex worker's own journal (later in this build).
+`reset` lines. Codex workers: the same items from the Codex worker's own journal (see Codex workers below).
 
 ## One question, one place
 
@@ -84,3 +84,22 @@ the transcript, the record and the live file, and prints the contract's `item`, 
   open question (`taskOfQuestion`); answering the task's question elsewhere answers the Falcon's prompt as
   denied with a note (what `closeFalconPicker` does with Esc in the terminal), and answering the prompt goes
   through the Falcon's own PostToolUse routing (`picks()`) as a pick does today.
+
+## Codex workers (task t24)
+
+- The worker keeps its app server and thread through a switch: the chat view shows the plain text view in the pane,
+  the terminal view runs Codex's own UI attached to the same server (`codex --remote`). Only the UI starts and stops.
+- It hears every item of its thread in both views and writes the chat's items to `codex-<session>.jsonl` in its folder
+  (`src/codex/items.mjs` maps them); text streams to `stream.live.json` from `item/agentMessage/delta` and
+  `item/reasoning/summaryTextDelta`. Live item ids differ from the ids `thread/read` gives the same items later
+  (`item-N`, checked on 0.146), so the journal is the record; a resume with no journal writes it once from
+  `thread/resume`'s turns, ids prefixed with the turn's.
+- A message rollcall sends keeps its `clientUserMessageId` as its item id, so the chat's waiting copy and the taken one
+  are the same item.
+- Its record (`codex.json`) gains `ctl` (a control socket taking the Claude worker's requests), `view`, `switching` and
+  `prompt`; `claude/live.mjs record()` finds either worker. A Codex worker from before this has no `ctl` and reads as
+  the plain CLI (stop and resume it).
+- Approvals with no decision become a `permission` prompt; `always` answers `acceptForSession` (permissions: scope
+  `session`). `worker.set` takes a Codex model, sent on the next turn rollcall starts (Codex keeps a turn's model for
+  the turns after); the mode stays the launch's.
+

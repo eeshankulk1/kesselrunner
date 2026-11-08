@@ -6,6 +6,9 @@
 //   claude.json          its record: { pid, child, sock, home, task, session, view, switching, busy, turnAt, prompt, at }
 //   stream.live.json     text streaming now and messages waiting for the turn: { session, at, items, queued }
 //   turns.jsonl          one line per finished turn: { at, ms, tokens, error, session }
+//
+// A Codex worker (codex/worker.mjs) keeps codex.json and stream.live.json in the same folder, and takes the same
+// socket requests: record() and send() reach either.
 import { spawnSync } from "node:child_process";
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -32,10 +35,20 @@ export function readJson(f) {
   try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; }
 }
 
-/** The running worker's record, or null when no stream worker runs there (none started, or its process is gone). */
+/** A Codex worker's record (codex/worker.mjs): its own app server's socket is `sock`, its control socket `ctl`. */
+export const codexRecordFile = (h, task) => join(dirOf(h, task), "codex.json");
+
+/**
+ * The running worker's record, or null when no worker with a chat view runs there (none started, its process is
+ * gone, or a Codex worker from before the chat view, which has no control socket). A Claude worker's, else a Codex
+ * worker's with `harness: "codex"` and `sock` set to its control socket, which takes the same requests.
+ */
 export function record(h, task) {
   const r = readJson(recordFile(h, task));
-  return r && pidAlive(r.pid) ? r : null;
+  if (r && pidAlive(r.pid)) return r;
+  if (!task) return null;
+  const c = readJson(codexRecordFile(h, task));
+  return c?.ctl && pidAlive(c.pid) ? { ...c, harness: "codex", sock: c.ctl } : null;
 }
 
 /** The worker runs in the chat view: rollcall's words, interrupts and answers go through its stream. */

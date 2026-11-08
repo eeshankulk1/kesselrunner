@@ -2,7 +2,8 @@
 // that draws it as a chat. One reader for every view: it folds Claude Code's transcript (the CLI and stream mode
 // write the same one) into the contract's items, then lays the stream-mode worker's live file over it (text still
 // streaming, messages sent while busy) and its turns.jsonl (a turn's time and tokens). With --follow it watches
-// those files and prints each change as a line, with the same envelope as `api stream`.
+// those files and prints each change as a line, with the same envelope as `api stream`. A Codex worker writes the same
+// items to its own journal as it hears them (codex/items.mjs), so a Codex task reads that file the same way.
 //
 // Transcripts are large (tens of MB, mostly the whole API request on `api-request*` lines), so a line is judged by
 // its first bytes and only the kept ones are parsed. Items follow the contract in chat-contract.md ("Items").
@@ -11,6 +12,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { INTERFACE, parseRef, refOf } from "./api.mjs";
 import { registerClient, unregisterClient } from "./clients.mjs";
+import { createJournalFolder } from "./codex/items.mjs";
+import { journalFile as codexJournal } from "./harness/codex.mjs";
 import { harnessOf, sessionHarness } from "./harness/index.mjs";
 import { P } from "./session.mjs";
 import * as store from "./store.mjs";
@@ -55,18 +58,18 @@ function feed(folder, buf, from = 0, to = buf.length) {
 
 // ---------------------------------------------------------------- the fold
 
-const oneLine = (s, max = 300) => {
+export const oneLine = (s, max = 300) => {
   const t = String(s ?? "").trim();
   const first = t.split("\n")[0];
   const line = first.length < t.length ? `${first} …` : first;
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 };
-const cutText = (text) => {
+export const cutText = (text) => {
   const t = String(text ?? "");
   return { text: t.length > RESULT_CUT ? t.slice(0, RESULT_CUT) : t, truncated: t.length > RESULT_CUT, size: t.length };
 };
 /** `input` with every long string cut at 2,000 chars. */
-const cutInput = (v) => {
+export const cutInput = (v) => {
   if (typeof v === "string") return v.length > INPUT_CUT ? v.slice(0, INPUT_CUT) : v;
   if (Array.isArray(v)) return v.map(cutInput);
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cutInput(x)]));
@@ -363,8 +366,9 @@ export function transcriptFor(id, cwd = null) {
 }
 
 /**
- * What `ref` reads: { ok, ref, home, id, harness, dir, session, transcript, cwd } or { ok: false, code, message }.
- * A task's current (or last) worker session, or with a bare home the supervisor's own.
+ * What `ref` reads: { ok, ref, home, id, harness, dir, session, transcript, cwd, record } or { ok: false, code,
+ * message }. A task's current (or last) worker session, or with a bare home the supervisor's own. `transcript` is the
+ * file the items come from (a Codex worker's journal), `record` the name of the worker's record in `dir`.
  */
 export function resolveTarget(ref) {
   const r = parseRef(ref);
@@ -375,25 +379,31 @@ export function resolveTarget(ref) {
     if (!t) return { ok: false, code: "not-found", message: `no task ${r.id} in supervisor ${r.home}` };
     const s = t.sessions?.at(-1);
     const harness = s ? sessionHarness(s) : harnessOf(t);
-    if (harness !== "claude") return { ok: false, code: "not-available", message: `${refOf(t)} runs on ${harness}: its conversation is not readable yet` };
     const dir = store.workerDir(r.home, r.id);
+    if (harness === "codex") {
+      const rec = readJson(join(dir, "codex.json"));
+      const session = rec?.session ?? s?.id ?? null;
+      const journal = session ? codexJournal(r.home, r.id, session) : null;
+      return { ok: true, ref: refOf(t), home: r.home, id: r.id, harness, dir, session, cwd: t.worktree ?? t.repo?.main ?? null, transcript: journal, record: "codex.json" };
+    }
+    if (harness !== "claude") return { ok: false, code: "not-available", message: `${refOf(t)} runs on ${harness}: its conversation is not readable yet` };
     const rec = readJson(join(dir, "claude.json"));
     const session = rec?.session ?? s?.id ?? null;
     const cwd = t.worktree ?? t.repo?.main ?? null;
-    return { ok: true, ref: refOf(t), home: r.home, id: r.id, harness, dir, session, cwd, transcript: transcriptFor(session, cwd) };
+    return { ok: true, ref: refOf(t), home: r.home, id: r.id, harness, dir, session, cwd, transcript: transcriptFor(session, cwd), record: "claude.json" };
   }
   const dir = store.workerDir(r.home, r.home);
   const rec = readJson(join(dir, "claude.json"));
   const last = lastSession(r.home);
   const session = rec?.session ?? last?.id ?? null;
   const cwd = last?.cwd ?? null;
-  return { ok: true, ref: r.home, home: r.home, id: null, harness: "claude", dir, session, cwd, transcript: transcriptFor(session, cwd) };
+  return { ok: true, ref: r.home, home: r.home, id: null, harness: "claude", dir, session, cwd, transcript: transcriptFor(session, cwd), record: "claude.json" };
 }
 
 const alive = (pid) => { if (!pid) return true; try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
 /** The worker record's view and open prompt: a terminal view with no prompt when there is no record (or its process is gone). */
-function recordOf(dir) {
-  const rec = dir ? readJson(join(dir, "claude.json")) : null;
+function recordOf(dir, name = "claude.json") {
+  const rec = dir ? readJson(join(dir, name)) : null;
   const live = rec && alive(rec.pid);
   return { view: rec?.view === "chat" ? "chat" : "terminal", switching: rec?.switching ?? null, prompt: live && rec.view === "chat" ? (rec.prompt ?? null) : null, session: rec?.session ?? null };
 }
@@ -480,7 +490,7 @@ class Tail {
 
 /** Everything a page or a follow reads for a target. */
 function load(target) {
-  const folder = createFolder({ cwd: target.cwd });
+  const folder = target.harness === "codex" ? createJournalFolder({ cwd: target.cwd, session: target.session }) : createFolder({ cwd: target.cwd });
   const tail = target.transcript ? new Tail(target.transcript, folder) : null;
   tail?.read();
   folder.takeDirty();
@@ -523,7 +533,7 @@ function pageOf(state, { before = null, limit = PAGE } = {}) {
     const kids = x.kind === "subagent" ? childrenOf(state, x, files) : [];
     items.push(enrich(x, matched), ...kids);
   }
-  const rec = recordOf(target.dir);
+  const rec = recordOf(target.dir, target.record);
   return {
     ok: true, ref: target.ref, session: folder.session ?? target.session ?? null, harness: target.harness ?? "claude", view: rec.view,
     items, cursor: start > 0 ? all[start].id : null, more: start > 0, prompt: rec.prompt,
@@ -597,8 +607,8 @@ export function follow(target, out = process.stdout, { limit = PAGE, client = nu
       // Finished subagents before the page keep their children to themselves (a front end pages back for them).
       doneKids = new Set(state.folder.subagents.filter((s) => s.state !== "running").map((s) => s.id));
       gone = new Map();
-      rec = recordOf(t.dir);
-      stamps = { live: stamp(at("stream.live.json")), turns: stamp(at("turns.jsonl")), rec: stamp(at("claude.json")) };
+      rec = recordOf(t.dir, t.record);
+      stamps = { live: stamp(at("stream.live.json")), turns: stamp(at("turns.jsonl")), rec: stamp(at(t.record ?? "claude.json")) };
       files = new Map();
       filesAt = 0;
       watchDirs();
@@ -681,10 +691,10 @@ export function follow(target, out = process.stdout, { limit = PAGE, client = nu
       }
 
       // The record: the open prompt and the view.
-      const rs = stamp(at("claude.json"));
+      const rs = stamp(at(target.record ?? "claude.json"));
       if (rs !== stamps.rec) {
         stamps.rec = rs;
-        const next = recordOf(target.dir);
+        const next = recordOf(target.dir, target.record);
         if (JSON.stringify(next.prompt) !== JSON.stringify(rec.prompt)) write({ type: "prompt", prompt: next.prompt });
         if (next.view !== rec.view || JSON.stringify(next.switching) !== JSON.stringify(rec.switching)) write({ type: "view", view: next.view, switching: next.switching });
         rec = next;

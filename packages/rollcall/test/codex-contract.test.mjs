@@ -50,6 +50,31 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
     for (const d of ["accept", "decline"]) assert.match(decisions, new RegExp(`"${d}"`), `${f} takes ${d}`);
   }
   for (const p of ["permissions", "scope"]) assert.ok(p in read("PermissionsRequestApprovalResponse.json").properties, `a permissions answer carries ${p}`);
+  // The chat view (codex/items.mjs, codex/worker.mjs): streamed text, the plan, the thread items it maps and their
+  // fields, a resumed thread's saved history, the session-wide approvals, images in a message, a turn's model.
+  for (const m of ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "turn/plan/updated"]) assert.ok(notes.has(m), `notification ${m}`);
+  const v2 = read("codex_app_server_protocol.v2.schemas.json").definitions;
+  const items = Object.fromEntries(v2.ThreadItem.oneOf.map((o) => [o.properties.type.enum[0], new Set(Object.keys(o.properties))]));
+  const want = {
+    userMessage: ["id", "clientId", "content"], agentMessage: ["id", "text"], reasoning: ["id", "summary", "content"], plan: ["id", "text"],
+    commandExecution: ["id", "command", "cwd", "status", "exitCode", "aggregatedOutput"], fileChange: ["id", "changes", "status"],
+    mcpToolCall: ["id", "server", "tool", "arguments", "status", "result", "error"], collabAgentToolCall: ["id", "tool", "prompt", "status"],
+    webSearch: ["id", "query"], contextCompaction: ["id"], hookPrompt: ["id", "fragments"],
+  };
+  for (const [type, fields] of Object.entries(want)) for (const f of fields) assert.ok(items[type]?.has(f), `a ${type} item carries ${f}`);
+  for (const f of ["path", "kind", "diff"]) assert.ok(f in v2.FileUpdateChange.properties, `a file change carries ${f}`);
+  assert.deepEqual(v2.CommandExecutionStatus.enum.sort(), ["completed", "declined", "failed", "inProgress"]);
+  for (const f of ["id", "status", "items", "error", "durationMs", "startedAt", "completedAt"]) assert.ok(f in v2.Turn.properties, `a turn carries ${f}`);
+  for (const f of ["step", "status"]) assert.ok(f in v2.TurnPlanStep.properties, `a plan step carries ${f}`);
+  assert.ok("thread" in v2.ThreadResumeResponse.properties && "turns" in v2.Thread.properties, "a resumed thread comes with its turns");
+  assert.ok(props("ThreadReadParams").has("includeTurns"));
+  assert.ok(props("TurnStartParams").has("model"), "turn/start takes a model");
+  assert.match(JSON.stringify(v2.UserInput), /"localImage"/, "a message takes a local image");
+  for (const [f, def] of [["CommandExecutionRequestApprovalResponse", "CommandExecutionApprovalDecision"], ["FileChangeRequestApprovalResponse", "FileChangeApprovalDecision"]]) {
+    assert.match(JSON.stringify(read(`${f}.json`).definitions[def]), /"acceptForSession"/, `${f} takes acceptForSession`);
+  }
+  assert.ok(read("PermissionsRequestApprovalResponse.json").definitions.PermissionGrantScope.enum.includes("session"));
+
   const caps = read("v1/InitializeParams.json").definitions.InitializeCapabilities.properties;
   assert.ok("experimentalApi" in caps, "initialize still takes experimentalApi");
   assert.match(JSON.stringify(read("v2/HooksListResponse.json").definitions.HookTrustStatus), /untrusted/);

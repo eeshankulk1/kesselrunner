@@ -128,12 +128,12 @@ export function limitsOf(info) {
 // ---------------------------------------------------------------- the plain text view in the pane
 
 const ESC = "\x1b[";
-const dim = (s) => `${ESC}2m${s}${ESC}0m`;
-const bold = (s) => `${ESC}1m${s}${ESC}0m`;
-const cyan = (s) => `${ESC}36m${s}${ESC}0m`;
-const yellow = (s) => `${ESC}33m${s}${ESC}0m`;
+export const dim = (s) => `${ESC}2m${s}${ESC}0m`;
+export const bold = (s) => `${ESC}1m${s}${ESC}0m`;
+export const cyan = (s) => `${ESC}36m${s}${ESC}0m`;
+export const yellow = (s) => `${ESC}33m${s}${ESC}0m`;
 
-function screen(out = process.stdout) {
+export function screen(out = process.stdout) {
   let open = null; // the block whose text streams on the current line
   const w = (s) => { try { out.write(s); } catch {} };
   const close = () => { if (open) { w("\n"); open = null; } };
@@ -146,7 +146,7 @@ function screen(out = process.stdout) {
   };
 }
 
-const userLine = (text) => {
+export const userLine = (text) => {
   const t = safe(text);
   return t.startsWith(P) ? dim(`› ${store.clip(store.oneLine(t), 400)}`) : `${bold("› You")}  ${store.clip(t, 4000)}`;
 };

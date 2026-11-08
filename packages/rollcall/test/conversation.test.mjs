@@ -225,7 +225,7 @@ test("a follow prints the page, then new items, appended text, prompts, views, a
   await done;
 });
 
-test("api conversation resolves a task's worker session and the Falcon's own; a Codex task is not available yet", () => {
+test("api conversation resolves a task's worker session and the Falcon's own; a Codex task reads its worker's journal", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rollcall-conv-cli-")));
   const home = join(root, "home");
   const config = join(root, "claude");
@@ -251,7 +251,12 @@ test("api conversation resolves a task's worker session and the Falcon's own; a 
   assert.equal(p.out.more, true);
   const f = run("conversation", "alpha");
   assert.equal(f.out.items.at(-1).text, "/supervisor alpha");
-  assert.equal(run("conversation", "alpha:t2").out.error.code, "not-available");
+  // A Codex task: its worker's journal (codex/items.mjs), an empty page while it has none.
+  assert.deepEqual([run("conversation", "alpha:t2").out.harness, run("conversation", "alpha:t2").out.items], ["codex", []]);
+  const workers = join(home, "_supervisors", "alpha", "workers", "t2");
+  mkdirSync(workers, { recursive: true });
+  writeFileSync(join(workers, "codex-th.jsonl"), `${JSON.stringify({ id: "u1", at: T0, kind: "user", text: "hi", images: [], from: "owner", queued: false })}\n`);
+  assert.deepEqual(run("conversation", "alpha:t2").out.items.map((x) => x.text), ["hi"]);
   assert.equal(run("conversation", "alpha:t9").out.error.code, "not-found");
   assert.ok(run("version").out.verbs.includes("conversation"));
 });
