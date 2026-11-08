@@ -13,8 +13,10 @@ const GH = join(FIXTURES, "gh");
 chmodSync(GH, 0o755);
 
 /** A sandbox with a fake GitHub: `ci` decides the checks, `manifest` the project's queue settings. */
-function repo(t, { manifest = { release: { merge: "merge" } }, ci = [{ name: "test" }], files = {} } = {}) {
+function repo(t, { manifest = { release: { merge: "merge" } }, ci = [{ name: "test" }], files = {}, green = false } = {}) {
   const sb = sandbox(t);
+  // Most tests here are about trains: they ask for one (land.retest) unless they test green PRs landing as they are.
+  if (!green) manifest = { ...manifest, land: { retest: true, ...manifest.land } };
   write(join(sb.main, ".claude/test-manifest.json"), JSON.stringify(manifest));
   for (const [f, text] of Object.entries(files)) write(join(sb.main, f), text);
   // The lander waits on CI only where a workflow runs on PRs.
@@ -134,6 +136,75 @@ test("a train of one whose head holds main merges its own PR; a squash repo land
   assert.notEqual(pushed, bHead);
   assert.equal(git(sb.origin, "rev-parse", `${pushed}^2`), bHead);
   assert.ok(s.calls.some((c) => c.join(" ") === `pr merge 2 --squash --match-head-commit ${pushed}`));
+});
+
+test("a green PR lands as it is: no tree built, no suite run, no check waited on, even when main moved since it was cut", (t) => {
+  const sb = repo(t, {
+    green: true,
+    manifest: { release: { merge: "squash" }, ci: { prePush: [{ name: "ios", when: ["**"], command: "echo ran >> /tmp/never && exit 1", ship: "exit 1" }] } },
+  });
+  const a = shipper(sb, "feat-a", { "src/a.js": "from a\n" });
+  const b = shipper(sb, "feat-b", { "src/b.js": "from b\n" });
+  const bHead = git(b.wt, "rev-parse", "HEAD");
+  for (const s of [a, b]) { const r = s.q("add"); assert.equal(r.code, 0, r.stderr); }
+  sb.lander();
+  assert.deepEqual(outcomes(sb).map((o) => [o.pr, o.kind]), [[1, "landed"], [2, "landed"]]);
+  assert.match(outcomes(sb)[1].text, /^#2 landed on main as [0-9a-f]{8}: its own checks were green, so it went straight in/);
+  assert.equal(prOf(sb, 2).lastHead, bHead, "B's branch was not touched: no merge of main pushed to it");
+  const s = sb.gh();
+  assert.ok(s.calls.some((c) => c.join(" ") === `pr merge 2 --squash --match-head-commit ${bHead}`));
+  assert.ok(!s.prs.some((p) => p.headRefName.startsWith("mq/")), "no train PRs");
+  assert.doesNotMatch(landerLog(sb), /run train-|pre-push/, "the pre-push suite never ran");
+  assert.ok(sb.originHas("src/a.js") && sb.originHas("src/b.js"));
+});
+
+test("a green PR whose checks run again waits for them, then lands", (t) => {
+  const sb = repo(t, { green: true });
+  const a = shipper(sb, "feat-a", { "src/a.js": "a\n" });
+  assert.equal(a.q("add").code, 0);
+  sb.setGh((s) => { s.ci = [{ name: "test", pending: true }]; });
+  sb.lander();
+  assert.deepEqual(outcomes(sb), [], "nothing landed while a check runs");
+  assert.match(a.q("status").stdout, /1\. #1 feat-a/);
+  sb.setGh((s) => { s.ci = [{ name: "test" }]; });
+  sb.lander();
+  assert.deepEqual(outcomes(sb).map((o) => [o.pr, o.kind]), [[1, "landed"]]);
+});
+
+test("a PR whose checks still run never holds up the green PR behind it", (t) => {
+  const sb = repo(t, { green: true, manifest: { release: { merge: "squash" } } });
+  const a = shipper(sb, "feat-a", { "src/new-a.js": "a\n" });
+  const b = shipper(sb, "feat-b", { "src/new-b.js": "b\n" });
+  // B joins first. Its checks run again after joining; A, behind it, is green.
+  for (const s of [b, a]) { const r = s.q("add"); assert.equal(r.code, 0, r.stderr); }
+  sb.setGh((s) => { s.ci = [{ name: "test", pendingIfFiles: ["src/new-b.js"] }]; });
+  sb.lander();
+  assert.deepEqual(outcomes(sb).map((o) => [o.pr, o.kind]), [[1, "landed"]], "A landed past B, whose check runs");
+  assert.match(b.q("status").stdout, /#2 feat-b/);
+});
+
+test("what may clash goes through a train: a land.serial group both sides changed, a conflict, a branch protection that wants it up to date", (t) => {
+  const sb = repo(t, { green: true, manifest: { release: { merge: "squash" }, land: { serial: [{ paths: ["migrations/**"], why: "one head" }] } } });
+  const a = shipper(sb, "feat-a", { "migrations/001.sql": "a\n" });
+  const b = shipper(sb, "feat-b", { "migrations/002.sql": "b\n" });
+  const c = shipper(sb, "feat-c", { "src/same.js": "c\n" });
+  const d = shipper(sb, "feat-d", { "src/same.js": "d\n" });
+  const bHead = git(b.wt, "rev-parse", "HEAD");
+  for (const s of [a, b, c, d]) { const r = s.q("add"); assert.equal(r.code, 0, r.stderr); }
+  sb.lander();
+  assert.deepEqual(outcomes(sb).map((o) => [o.pr, o.kind]).sort(), [[1, "landed"], [2, "landed"], [3, "landed"], [4, "conflict"]]);
+  assert.notEqual(prOf(sb, 2).lastHead, bHead, "B, in A's serial group, was tested on top of A first");
+  assert.equal(git(sb.origin, "rev-parse", `${prOf(sb, 2).lastHead}^2`), bHead);
+
+  // A repo whose branch protection wants an up-to-date branch: GitHub says BEHIND, and the train merges main in.
+  sb.setGh((s) => { s.upToDate = true; });
+  const e = shipper(sb, "feat-e", { "src/e.js": "e\n" }, { from: "main" });
+  const f = shipper(sb, "feat-f", { "src/f.js": "f\n" }, { from: "main" });
+  for (const s of [e, f]) { const r = s.q("add"); assert.equal(r.code, 0, r.stderr); }
+  sb.lander();
+  assert.deepEqual(outcomes(sb).slice(-2).map((o) => [o.pr, o.kind]), [[5, "landed"], [6, "landed"]]);
+  assert.match(outcomes(sb).at(-2).text, /went straight in/);
+  assert.match(outcomes(sb).at(-1).text, /landed on main as [0-9a-f]{8}\./, "F, behind once E landed, landed through a train");
 });
 
 test("a conflict with main goes back to its session with the files; one with an earlier entry waits for it", (t) => {

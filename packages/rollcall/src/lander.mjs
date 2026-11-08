@@ -1,6 +1,8 @@
-// The lander: one per repo, a script and never an agent. It lands the merge queue's waiting entries in
-// trains: up to 4 PRs merged onto origin's default branch in the order they became ready, checked once
-// as one tree, and merged as that tree, so what lands is what passed. A train of one merges the entry's
+// The lander: one per repo, a script and never an agent. A waiting entry green on its own head that merges
+// cleanly lands as it is (greenWay); the default branch's own checks after the merge are the safety net. The
+// rest, and every entry where the manifest sets land.retest, land in trains: up to 4 PRs merged onto origin's
+// default branch in the order they became ready, checked once as one tree, and merged as that tree, so what
+// lands is what passed. A train of one merges the entry's
 // own PR. A conflict, a red check, a guard hit or a new review thread goes back to the entry's session (queue.mjs finishEntry).
 // What may clear by itself (GitHub down, git's sign-in) never ends an entry: it stays and retries, and past
 // ROLLCALL_QUEUE_STUCK_MS its task hears why, once.
@@ -131,9 +133,24 @@ async function round(c) {
       settled = true;
       continue;
     }
-    ready.push({ ...e, body: pr.body ?? "", need: need.map((x) => x.pr) });
+    ready.push({ ...e, body: pr.body ?? "", need: need.map((x) => x.pr), rollup: pr.statusCheckRollup, mergeState: pr.mergeStateStatus });
   }
   if (!ready.length) return settled;
+
+  // Green lands now: an entry green on its own head that merges cleanly lands as it is, one per round, with no
+  // tree built or tested here. The default branch's own checks after the merge test it with everything else.
+  // Only what may clash although git merges it (land.serial), what GitHub will not merge as it is, and a
+  // project that asks for it (land.retest) go through a train.
+  if (!m.land?.retest) {
+    const trains = [];
+    for (const e of ready) {
+      const how = greenWay(c, m, base, e);
+      if (how === "land") return (await landGreen(c, e, method, base)) || settled;
+      if (how === "train") trains.push(e);
+    }
+    ready.splice(0, ready.length, ...trains);
+    if (!ready.length) return settled;
+  }
 
   // Form the train: oldest first; a solo entry alone; two entries in one land.serial group never together;
   // one that carries another PR's commits only behind it.
@@ -161,6 +178,54 @@ async function round(c) {
   c.log(`train ${n}: ${prs(train)} on ${short(base)}`);
   try {
     return await land(c, { n, base, m, method, train, stage });
+  } finally {
+    store.updateQueue(key, (q) => { if (q.train?.n === n) q.train = null; });
+  }
+}
+
+/**
+ * How a waiting entry lands: "land" (green on its own head, merges cleanly, nothing serial changed on both sides),
+ * "wait" (its checks run again, or a PR it carries is still ahead) or "train" (built and tested with main first).
+ */
+function greenWay(c, m, base, e) {
+  if (e.retest) return "train";
+  if (e.need.length) return "wait";
+  const k = checksOf(e.rollup);
+  if (k.failed.length) return "train";
+  if (k.pending.length) { trouble(c, [e], `its checks are running again (${k.pending.slice(0, 4).join(", ")})`, "checks"); return "wait"; }
+  // Branch protection wants something the head lacks (an up-to-date branch, a check), or GitHub sees a conflict.
+  if (["BEHIND", "BLOCKED", "DIRTY"].includes(e.mergeState)) return "train";
+  const conflicts = mergeConflicts(c.main, base, e.head);
+  if (!conflicts || conflicts.length) return "train";
+  const mine = serialGroups(m, changedFiles(c.main, base, e.head));
+  if (mine.length && serialGroups(m, changedFiles(c.main, e.head, base)).some((g) => mine.includes(g))) return "train";
+  return "land";
+}
+
+/** Merges a green entry's own PR as it is. True when anything changed. A refusal sends it through a train from now on. */
+async function landGreen(c, e, method, base) {
+  const { key, main, b } = c;
+  const rv = reviewBack(c, e);
+  if (rv.err) { trouble(c, [e], `could not read #${e.pr}'s review threads before merging (${rv.err})`, "settle"); return false; }
+  if (rv.back) return true;
+  const n = store.updateQueue(key, (q) => {
+    q.seq += 1;
+    q.train = { n: q.seq, prs: [e.pr], stage: "merging (green)", base, at: Date.now() };
+    return q.seq;
+  })?.out;
+  try {
+    const r = gh(main, ["pr", "merge", String(e.pr), `--${method}`, "--match-head-commit", e.head]);
+    fetchSync(main, b);
+    const sha = resolveRef(c.info, `refs/remotes/origin/${b}`);
+    if (!r.ok && !isAncestor(main, e.head, `refs/remotes/origin/${b}`) && prView(main, e.pr)?.state !== "MERGED") {
+      c.log(`#${e.pr}: gh pr merge refused it as it is (${store.clip(r.err, 200)}); it goes through a train`);
+      store.updateQueue(key, (q) => { if (q.entries[e.pr]) q.entries[e.pr].retest = true; });
+      return true;
+    }
+    clear(c, [e]);
+    finishEntry(key, e, "landed", `#${e.pr} landed on ${b} as ${short(sha ?? "")}: its own checks were green, so it went straight in, and ${b}'s checks after the merge test it with everything else. Next: the release steps (/pr-create Step 7), then the report.`, { sha, train: n ?? null });
+    c.log(`#${e.pr}: green, landed as it is as ${short(sha ?? "")}${n ? ` (round ${n})` : ""}`);
+    return true;
   } finally {
     store.updateQueue(key, (q) => { if (q.train?.n === n) q.train = null; });
   }
@@ -383,9 +448,9 @@ async function land(c, t) {
     stage(`CI on #${prn}`, { pr: prn });
     const blame = (failed) => suspects(c, m, base, members, failed);
     let res = await waitChecks(c, prn, commit, members, { since, was, blame });
-    if (res.failed && !res.rerun) {
-      if (!blame(res.failed).length && rerun(c, res.failed)) { await sleep(Math.min(POLL_MS(), 10_000)); res = await waitChecks(c, prn, commit, members, { blame }); res.rerun = true; }
-    }
+    // A failed check runs once more before anyone is blamed: one flaky backend test once cost a PR its place and a
+    // second hour of iPhone tests. The re-run repeats only the failed jobs, and the pre-push passes stay recorded.
+    if (res.failed && rerun(c, res.failed)) { await sleep(Math.min(POLL_MS(), 10_000)); res = await waitChecks(c, prn, commit, members, { blame }); res.rerun = true; }
     if (res.billing) {
       closeTrain(c, members, prn);
       c.log(`train ${n}: GitHub refused its jobs: ${res.billing}`);
