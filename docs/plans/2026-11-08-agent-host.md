@@ -41,7 +41,8 @@ protocol directly (no Agent SDK package: rollcall stays dependency-free). Codex 
   short on macOS), mode 0600.
 - On start it rebuilds its state from disk: every task's `agent.json` (below). An agent recorded `running` or `idle`
   has no process now (the host that ran it is gone), so it becomes `parked`, with a `system` item saying the host
-  restarted. Open requests stay open (see Requests). Nothing starts by itself.
+  restarted. One recorded `terminal` is handled as The terminal escape hatch says. Open requests stay open (see
+  Requests). Nothing starts by itself.
 - On SIGTERM it closes each agent's input (Claude Code finishes and exits, its transcript saved), parks them all, and
   exits. `host stop` does the same.
 
@@ -51,8 +52,9 @@ An agent is one task's worker, named by its ref (`falcon:t3`). Its files live in
 (`store.workerDir(h, id)`), beside the launch files the harness adapter writes:
 
 - `agent.json`: the host's record, swapped in whole on every change:
-  `{ ref, home, task, harness, state, session, sessions, since, turnAt, parkedAt, model, mode, pid, host }`.
-  `pid` is the child's, `host` the host's pid. Anything in rollcall may read it; only the host writes it.
+  `{ ref, home, task, harness, state, session, sessions, since, turnAt, parkedAt, model, mode, pid, host, terminal }`.
+  `pid` is the child's, `host` the host's pid. `terminal` is `{ at, cwd, pid, start }` while the agent is open in a
+  terminal (`pid` and `start` the `rollcall open` process's), else null. Anything in rollcall may read it; only the host writes it.
 - `history.jsonl`: the task's one history (below).
 - `claude.json` (Claude) or `codex.json` (Codex): the compatibility record (see The seam).
 
@@ -249,11 +251,23 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   stream worker's terminal view did); or `codex resume <thread>`. The agent is `terminal` (`send: "hold"`).
 - Meanwhile: `say` holds the words (`how: "held"`, shown queued) and they go in when the terminal closes; `interrupt`
   and `start` are refused with the reason; `park` does nothing; the idle timer does not run.
-- On exit (`terminal-done`, or the connection closing): the host reads the session's transcript and appends the items
-  the history lacks (`history.mjs catchUp`), the agent is `parked`, and held words start it. A Codex agent's terminal
-  turns stay in its thread (`codex resume` writes no journal): the history gets a note, and Codex reads them on its
-  next turn. Folding them into the history is left for later.
-- A host restart while an agent is `terminal` parks it, with a note: the command that held it died with the old host.
+- On exit (`terminal-done`, or the connection closing): the host appends what the terminal added that the history
+  lacks, in order, the agent is `parked`, and held words start it. A Claude session's items come from its transcript
+  (`history.mjs catchUp`). `codex resume` writes no journal, so a Codex agent's come from the thread itself
+  (`host/codex.mjs terminalTurns`): `thread/read` with its turns on a short-lived `codex app-server` (under the login
+  shell with `host-env.sh`, as the agent runs), less every turn the history already has (its `turn-start` or
+  `turn-end` item) and any that started before the terminal opened. The new turns' items get historyItems' ids
+  (`<turn>:<item>`) with the session's prefix, so they never meet a live item's, and their lines also go in the
+  session's journal. Only when that read fails does the history get a note instead (Codex still reads the turns on
+  its next turn). `agent.json` drops `terminal` only after the items are in, so a host that dies in between reads
+  them again on its restart and adds only what is missing.
+- `rollcall open` sends its own pid with `terminal`, kept on `agent.json` with its start time. A host that restarts
+  while an agent is `terminal` checks that process (`proc.mjs sameProcess`, so a reused pid does not count): while it
+  runs, the agent stays `terminal` and the host polls it (`ROLLCALL_HOST_TERMINAL_POLL_MS`, default a second), and
+  its end closes the terminal as above. When it is already gone, the host reads the terminal back just after it
+  starts listening (the agent shows `terminal` and holds words until then) and leaves it `parked`. `rollcall open`
+  itself, when the CLI exits and its connection died with the old host, sends `terminal-done` to the host running
+  now. Closing twice adds nothing: the second close finds no terminal open.
 
 ## The terminal Falcon (pending the owner's answer)
 

@@ -365,6 +365,7 @@ Old events and long-dead sessions are pruned at session start. This is coordinat
 | `ROLLCALL_STREAM` | on | `0` starts a Claude worker as the plain CLI with no `claude-worker` process around it (no chat view), and a Codex worker in Codex's own screen |
 | `ROLLCALL_HOST` | off | `1` starts new Claude and Codex task workers in the agent host (`rollcall host`) instead of a tmux window; a resumed session goes back where it ran |
 | `ROLLCALL_HOST_PARK_MS` | 3600000 | How long a hosted agent sits idle before the host parks it (stops its process; the next message resumes it) |
+| `ROLLCALL_HOST_TERMINAL_POLL_MS` | 1000 | How often a restarted host checks that a terminal opened before the restart (`rollcall open`) still runs |
 | `ROLLCALL_WORKER_VIEW` | unset | `chat` or `terminal`: the view a new Claude worker or the Falcon starts in; unset means the chat while a front end follows rollcall (`api stream --client`), else the terminal. A resume keeps its last view |
 | `ROLLCALL_CLAUDE_CONTRACT` | unset | Test only: `live` makes `test/claude-contract.test.mjs` run one real Haiku turn; `0` skips that test |
 
