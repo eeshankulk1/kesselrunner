@@ -560,6 +560,13 @@ export async function runHost() {
   const server = createServer((c) => lineServer(c, handle));
   await new Promise((r, j) => { server.once("error", j); server.listen(sock, r); });
   try { chmodSync(sock, 0o600); } catch {}
+  // Agent control sockets a killed host left behind (no handler ran): rollcall-host-<its pid>-<n>.sock.
+  try {
+    for (const n of readdirSync(tmpdir())) {
+      const m = /^rollcall-host-(\d+)-[0-9a-f]+\.sock$/.exec(n);
+      if (m && !pidAlive(Number(m[1]))) rmSync(join(tmpdir(), n), { force: true });
+    }
+  } catch {}
   await restore();
   writeJson(infoFile(), { pid: process.pid, sock, at: Date.now(), version: VERSION });
   log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored)`);
