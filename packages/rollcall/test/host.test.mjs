@@ -268,3 +268,44 @@ test("host: only one runs per store", async (t) => {
   const c = await x.client();
   assert.equal((await c.call("hello")).ok, true);
 });
+
+test("host: with ROLLCALL_HOST=1 a task worker starts in the host, and the old seam drives it", async (t) => {
+  const x = setup(t);
+  const saved = { ...process.env };
+  Object.assign(process.env, x.sb.env, { ROLLCALL_HOST: "1", KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
+  t.after(async () => {
+    const { call } = await import("../src/host/client.mjs");
+    await call("shutdown", {}, { start: false });
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  });
+  const store = await import("../src/store.mjs");
+  const { launch, workerState, stopWorker } = await import("../src/supervisor.mjs");
+  const { adapter } = await import("../src/harness/index.mjs");
+  const r = launch(store.readTask("alpha", "t1"), { prompt: "the brief" });
+  assert.equal(r.ok, true, r.err);
+  let task = store.readTask("alpha", "t1");
+  assert.equal(task.sessions.at(-1).hosted, true);
+  assert.equal(task.sessions.at(-1).tmux, false);
+  await until(() => x.history().some((e) => e.ev === "item" && e.item.kind === "assistant"));
+  await until(() => x.agent()?.state === "idle");
+  const w = workerState(task);
+  assert.equal(w.hosted, true);
+  assert.equal(w.alive, true);
+  // rollcall's words go through the stream worker's seam (claude/live.mjs), unchanged.
+  const typed = adapter("claude").type(task, "more words");
+  assert.equal(typed.ok, true, typed.err);
+  await until(() => x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 2);
+  // `api conversation` reads the host's history.
+  const { spawnSync } = await import("node:child_process");
+  const out = spawnSync(process.execPath, [BIN, "api", "conversation", ref], { env: process.env, encoding: "utf8" });
+  const page = JSON.parse(out.stdout);
+  assert.equal(page.ok, true, out.stdout + out.stderr);
+  assert.equal(page.view, "chat");
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["the brief", "more words"]);
+  assert.equal(stopWorker(task), true);
+  await until(() => x.agent()?.state === "stopped");
+  task = store.readTask("alpha", "t1");
+  assert.equal(workerState(task).stopped, true);
+  assert.equal(x.compat(), null, "a stopped agent has no record: nothing reaches it");
+});

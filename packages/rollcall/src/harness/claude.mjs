@@ -109,7 +109,7 @@ export function preamble(t, { browser = false, files = null } = {}) {
  * Writes the worker's launch files (its settings, the first prompt, the script its pane sources) for a new
  * session, or with `resume` its last one again (or the one `session` names). Returns { script, session }.
  */
-export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
+export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null, hosted = false }) {
   const dir = store.workerDir(t.home, t.id);
   const last = t.sessions?.at(-1);
   const session = resume && last ? pick ?? last.id : randomUUID();
@@ -128,7 +128,7 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const files = store.filesDir(t.home, t.id);
   if (browser) mkdirSync(files, { recursive: true });
   const addDir = browser ? ` --add-dir ${q(files)}` : "";
-  if (live.streamOn()) {
+  if (live.streamOn() || hosted) {
     // The worker process keeps the view it last showed (a front end's choice) across a resume.
     const was = resume ? live.readJson(live.launchFile(t.home, t.id)) : null;
     live.writeJson(live.launchFile(t.home, t.id), {
@@ -136,7 +136,8 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
       prompt: prompt ? promptFile : null, mode: MODES.has(mode) ? mode : null, model: modelOk(model) ? model : null,
       effort: effortOk(effort) ? effort : null, addDir: browser ? [files] : [], name: name ?? null,
       // Stream mode (-p) skips Claude Code's trust question: a repo it has not trusted starts in the real CLI, which asks.
-      view: trusted(t) === false ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
+      // The agent host has no terminal view (until its escape hatch): a hosted worker always runs in the chat.
+      view: hosted ? "chat" : trusted(t) === false ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
     });
     writeFileSync(script, `${[...preamble(t, { browser, files }), `${q(process.execPath)} ${q(BIN)} claude-worker ${q(t.home)} ${q(t.id)}`].join("\n")}\n`);
     return { script, session };

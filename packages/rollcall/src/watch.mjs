@@ -28,7 +28,7 @@ import { P, cli } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as trouble from "./trouble.mjs";
 import {
-  HANDOFF, closesAt, closing, colorOf, ensureWatcher, holderOf, homeOf, label, markCap, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
+  HANDOFF, closesAt, closing, hostedTask, stopWorker, colorOf, ensureWatcher, holderOf, homeOf, label, markCap, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
   unpark, watcherEnv, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
@@ -443,6 +443,11 @@ export function tick(h, now = Date.now()) {
       const st = workerState(t, now);
       const at = closesAt(st, now);
       if (at !== null && now >= at && (!st?.alive || !tmux.viewed(h, t.id))) tmux.killWindow(h, t.id);
+    } else if (hostedTask(t)) {
+      // A finished task's hosted agent stops on the same clock (agent host: no window to close).
+      const st = workerState(t, now);
+      const at = st?.alive ? closesAt(st, now) : null;
+      if (at !== null && now >= at) stopWorker(t);
     }
   }
   try { if (usageOffers(h, views, seen, now)) changed = true; } catch {}

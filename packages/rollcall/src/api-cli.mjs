@@ -46,6 +46,15 @@ async function run(args, ctx, json) {
       if (limit !== undefined && !(Number(limit) > 0)) return error("bad-payload", "--limit takes a number above 0", 2);
       const t = resolveTarget(ref);
       if (!t.ok) return error(t.code, t.message);
+      // A task the agent host runs reads its one history from the host (host/conversation.mjs).
+      const hosted = await import("./host/conversation.mjs");
+      if (hosted.hostedRef(t.ref)) {
+        if (following) { await hosted.hostedFollow(t.ref, process.stdout, { limit: limit ? Number(limit) : undefined }); return 0; }
+        const page = await hosted.hostedPage(t.ref, { before, limit: limit ? Number(limit) : undefined });
+        if (!page.ok) return error(page.error.code, page.error.message);
+        ctx.say(JSON.stringify(page));
+        return 0;
+      }
       if (following) { await follow(ref, process.stdout, { limit: limit ? Number(limit) : undefined, client }); return 0; }
       const page = readPage(t, { before, limit: limit ? Number(limit) : undefined });
       if (!page.ok) return error(page.error.code, page.error.message);

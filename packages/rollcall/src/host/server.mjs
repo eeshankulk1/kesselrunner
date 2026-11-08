@@ -76,6 +76,7 @@ class Agent {
     this.ctl = null; // the control socket's path
     this.server = null;
     this.starting = null;
+    this.exitWaiters = [];
   }
 
   /** The history, read from its file on first use. */
@@ -161,7 +162,20 @@ class Agent {
   }
 
   /** Starts the agent's process on its launch file: a new session, or its last one resumed. */
-  async start({ prompt = null } = {}) {
+  async start({ prompt = null, restart = false } = {}) {
+    if (this.proc && restart) {
+      // supervisor.mjs launch wrote a launch file: the same session running takes its first prompt as words; another
+      // session (a handoff, a fresh start) replaces the process.
+      const cfg = readJson(launchFile(this.h, this.id));
+      if (cfg?.session && cfg.session === this.rec.session) {
+        let first = "";
+        if (cfg.prompt) { try { first = readFileSync(cfg.prompt, "utf8"); } catch {} }
+        writeJson(launchFile(this.h, this.id), { ...cfg, resume: true, prompt: null });
+        if (first.trim()) this.send(first, [], "rollcall");
+        return { ok: true, agent: this.state(), already: true };
+      }
+      await this.endProcess("handoff");
+    }
     if (this.proc) return { ok: true, agent: this.state(), already: true };
     if (this.starting) return this.starting;
     this.starting = this._start({ prompt }).finally(() => { this.starting = null; });
@@ -279,6 +293,18 @@ class Agent {
     return { ok: true, answered: true, how: "words", delivered: r.how };
   }
 
+  /** Ends the running process (`how`: "park", "stop", "handoff") and resolves once it exited. */
+  endProcess(how) {
+    const p = this.proc;
+    if (!p) return Promise.resolve();
+    const gone = new Promise((r) => this.exitWaiters.push(r));
+    this.ending = how;
+    p.close();
+    setTimeout(() => { if (this.proc === p) p.kill(); }, how === "park" ? 10_000 : 5_000).unref();
+    setTimeout(() => { if (this.proc === p) p.kill("SIGKILL"); }, 15_000).unref();
+    return gone;
+  }
+
   maybePark() {
     if (this.rec.state !== "idle" || !this.proc || this.pending.size || this.queued.length) return false;
     return this.park();
@@ -290,10 +316,7 @@ class Agent {
       return true;
     }
     if (this.rec.state === "running" || this.pending.size) return false;
-    this.ending = "park";
-    this.proc.close();
-    const p = this.proc;
-    setTimeout(() => { if (this.proc === p) p.kill(); }, 10_000).unref();
+    void this.endProcess("park");
     return true;
   }
 
@@ -301,11 +324,7 @@ class Agent {
     for (const id of [...this.hist.open.keys()]) this.closeRequest(id, "cancelled", "stop");
     this.queued = [];
     if (!this.proc) { this.setState("stopped"); return true; }
-    this.ending = "stop";
-    this.proc.close();
-    const p = this.proc;
-    setTimeout(() => { if (this.proc === p) p.kill(); }, 5_000).unref();
-    setTimeout(() => { if (this.proc === p) p.kill("SIGKILL"); }, 10_000).unref();
+    void this.endProcess("stop");
     return true;
   }
 
@@ -367,6 +386,8 @@ class Agent {
         this.streaming.clear();
         rmSync(dialogFlag(this.h, this.id), { force: true });
         log(`${this.ref}: process ended (${how ?? `exit ${e.code}`})`);
+        for (const w of this.exitWaiters.splice(0)) w();
+        if (how === "handoff") return; // a new process starts at once
         if (how === "stop") { this.setState("stopped"); return; }
         if (how !== "park" && e.code !== 0) {
           this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `Claude Code stopped (exit ${e.code}). A message brings it back.${e.err ? `\n${e.err}` : ""}` });
@@ -467,7 +488,7 @@ async function handle(req, c) {
       case "hello": return { ok: true, pid: process.pid, version: VERSION, interface: INTERFACE };
       case "list": return { ok: true, agents: [...agents.values()].filter((a) => a.rec.state).map((a) => a.state()) };
       case "state": return { ok: true, agent: need().state() };
-      case "start": return await need().start({ prompt: typeof req.prompt === "string" ? req.prompt : null });
+      case "start": return await need().start({ prompt: typeof req.prompt === "string" ? req.prompt : null, restart: req.restart === true });
       case "say": return await need().say(req);
       case "interrupt": return await need().interrupt();
       case "set": return await need().set(req);
