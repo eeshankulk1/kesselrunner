@@ -15,9 +15,8 @@ protocol directly (no Agent SDK package: rollcall stays dependency-free). Codex 
 ## Slices
 
 1. **This one.** The host, its agents (task workers only), their state, history and requests, the push socket, and
-   the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`. Built so far: all of it for Claude Code
-   workers. Still to build: the Codex runtime (`host/codex.mjs`, below); until then a Codex task starts in tmux as
-   before whatever the gate says.
+   the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`. Built: all of it, for Claude Code and Codex
+   workers. Each harness has one copy of its protocol code, which the tmux workers run too.
 2. Supervisors in the host, and the supervisor's tools (start, tell, wait, interrupt, read the chat) instead of typing
    into tmux.
 3. The terminal escape hatch: "open in terminal" runs the real CLI on the agent's session; the host shows it busy until
@@ -59,7 +58,8 @@ An agent is one task's worker, named by its ref (`falcon:t3`). Its files live in
 
 ### The runtimes
 
-- **Claude** (`host/claude.mjs`): `claude -p --input-format stream-json --output-format stream-json
+- **Claude** (`claude/stream.mjs` `startClaude`, the one copy of the stream code: the tmux worker's chat view runs it
+  too, adding only its pane, live file and switch): `claude -p --input-format stream-json --output-format stream-json
   --include-partial-messages --verbose --replay-user-messages --permission-prompt-tool stdio`, plus the launch's
   `--session-id` or `--resume`, `--add-dir`, `--settings`, mode, model and effort, from `claude-launch.json` (as
   `harness/claude.mjs writeLaunch` writes it). It runs under the owner's login shell
@@ -71,10 +71,20 @@ An agent is one task's worker, named by its ref (`falcon:t3`). Its files live in
   `tool_result` closes its tool; `result` ends the turn with its time, tokens and error; `compact_boundary` is a
   compaction. Messages under a subagent (`parent_tool_use_id`) fold into that subagent's own folder, their items
   carrying `parent`.
-- **Codex** (`host/codex.mjs`): `codex app-server` on a unix socket, one thread per session (`thread/start`, or
-  `thread/resume` on the recorded thread), items mapped with `codex/items.mjs` as the Codex worker's journal does.
-  Item ids get the session's first 8 characters as a prefix (`3f2a9c1d:item-4`): Codex numbers live items per
-  process, so two sessions would reuse them.
+- **Codex** (`host/codex.mjs` on `codex/session.mjs` `startCodex`, the one copy of the Codex code: the tmux worker
+  runs it too, adding only its two views, live file, record and control socket). `codex app-server` on a unix socket
+  (`rollcall-codex-<host pid>-<hex>.sock` in the temp folder), under the login shell with `host-env.sh` as Claude
+  is, one thread per session (`thread/start`, or `thread/resume` on the launch file's `thread`, which the session
+  writes back once the thread runs, so a wake resumes it). Items mapped with `codex/items.mjs` (the session still
+  writes the journal too). Item ids get the session's first 8 characters as a prefix (`3f2a9c1d:item-4`): Codex
+  numbers live items per process, so two sessions would reuse them. A user message keeps its client id as its id
+  (the owner's `uuid`, or `rollcall-d-<hex>` for rollcall's words, so the prompt-submit hook knows whose they are).
+  startCodex carries what the tmux worker did itself: the hooks (`workerHook`: prompt-submit, stop, stop-failure,
+  dialog, clear, ask, cap, session-start, session-end), the turn snapshots, the usage-limit wait, the context file and
+  cap flag, the untrusted-hooks note and the thread on the task's session. Differences from Claude: a turn starts with
+  `turn/started` (the host's `turn-start` event), the mode cannot change (`set` takes a model only), and words
+  steered in as a turn ended and never taken leave the queue after 3 s, as in the tmux worker. `agent.json` keeps the
+  app server's socket (`serverSock`): a restarted host stops a server the killed one left (pid and socket must match).
 
 ### State
 
@@ -168,19 +178,20 @@ The host keeps that seam for each hosted agent:
 
 - It writes the compat record (`claude.json`, or `codex.json` with `ctl`) with `pid` = the host's pid,
   `sock` / `ctl` = a control socket per agent served by the host, `view: "chat"`, `session`, `busy` and the first open
-  request as `prompt`. It stays while the agent is parked (a `say` wakes it) and goes when the agent stops.
+  request as `prompt`; a Codex agent's adds `thread` and `turn`, so `harness/codex.mjs` sees a worker that takes words. It stays while the agent is parked (a `say` wakes it) and goes when the agent stops.
 - The control socket takes the stream worker's ops (`say`, `interrupt`, `answer`, `set`, `state`); `switch` is
   `refused` (no terminal view until the escape hatch).
 - `supervisor.mjs workerState` reads `agent.json` for a session the host runs (`hosted: true` on the session):
   `alive` while `running` or `idle`, `parked`, `stopped`; busy and idle still come from the hooks' status log.
-- `launch` asks the host to `start`; `stopWorker` asks it to `stop`; `park` asks it to `park` (the host also parks on
+- `launch` asks the host to `start` (with the harness); `stopWorker` asks it to `stop`; `park` asks it to `park` (the host also parks on
   its own timer, and `parkDue` leaves hosted agents to it).
 - `api conversation <ref>` reads a hosted task's history (from the host when it runs, else from the file), and
   `--follow` subscribes, printing the same `page`, `item`, `text`, `prompt` lines as before.
 
 ## The gate
 
-`ROLLCALL_HOST=1` (in settings `env`) starts new task workers, Claude and Codex, in the host. Off by default, so the
+`ROLLCALL_HOST=1` (in settings `env`) starts new task workers, Claude and Codex, in the host (`harness/codex.mjs
+writeLaunch` takes `hosted`, so a hosted Codex launch is always the chat view). Off by default, so the
 owner's live crew keeps running as it does until the later slices land. A session started in the host records
 `hosted: true` on the task's session, so a resume goes back to the host whatever the setting says then. Supervisors
 stay in tmux in this slice.
@@ -190,4 +201,9 @@ stay in tmux in this slice.
 `test/host.test.mjs`, against `test/fixtures/fake-claude.mjs` and `fake-codex.mjs`, each test with its own store:
 start, say, queued words while running, a prompt answered from two clients with the first winning, interrupt, park on
 idle and wake on a message, history across a session change, backfill, a restart keeping requests and history, and
-the push subscription's lines.
+the push subscription's lines; for Codex, words with their ids and streamed text, the seam, the hooks, an approval
+answered from two clients, a refused mode, and park then wake on the same thread. Every test stops the host it
+started (SIGTERM in `t.after`, which parks its agents and ends their processes).
+
+The slow full run (25 minutes) was not this branch: `queue.test.mjs` alone took 235 s here and 238 s on
+origin/main on the same machine at the same time, and no `rollcall host` or fake app server is left after the suite.

@@ -416,7 +416,7 @@ A Codex worker (`rollcall codex-worker <home> <task>`) has the same two views ov
 
 ## The agent host
 
-Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), new Claude task workers run in the agent host instead of a tmux window: `rollcall host`, one long-lived process per store (`ROLLCALL_HOME`), with its lock, `host.json` and log in `<store>/_host/` and its socket at `rollcall-host-<8 hex of the store path's sha256>.sock` in the system temp folder. A client that needs it starts it (`host/client.mjs ensureHost`), detached, so it outlives the client. The design and its later slices (supervisors, Codex, the terminal escape hatch): `docs/plans/2026-11-08-agent-host.md`.
+Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), new task workers, Claude and Codex, run in the agent host instead of a tmux window: `rollcall host`, one long-lived process per store (`ROLLCALL_HOME`), with its lock, `host.json` and log in `<store>/_host/` and its socket at `rollcall-host-<8 hex of the store path's sha256>.sock` in the system temp folder. A client that needs it starts it (`host/client.mjs ensureHost`), detached, so it outlives the client. The design and its later slices (supervisors, the terminal escape hatch): `docs/plans/2026-11-08-agent-host.md`.
 
 **What changes for the commands above.** A hosted task's snapshot reads as a chat-view worker (`view: "chat"`, its first open request as `prompt`); `task.tell`, `prompt.answer`, `task.interrupt`, `worker.set` and `task.stop` reach it as before; `task.switch` is `refused` (no terminal view until the escape hatch); `attach` has no window to show. `api conversation <ref>` reads the task's one history from the host, across every session; `--follow` prints the same `page`, `item`, `text`, `prompt` and `heartbeat` lines, needs no `reset` for a new session, and prints `reset` then `page` only after the host restarted.
 
@@ -427,7 +427,7 @@ Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), 
 | `hello` | | `pid`, `version`, `interface` |
 | `list` | | `agents` |
 | `state` | `ref` | `agent` |
-| `start` | `ref`, optional `prompt`, `restart` | `agent`, `already` |
+| `start` | `ref`, optional `prompt`, `restart`, `harness` (`claude`, `codex`; else the newer launch file) | `agent`, `already` |
 | `say` | `ref`, `text`, optional `attachments` (paths, ten at most), `from` (`owner`, `rollcall`), `uuid` | `how` (`sent`, `queued`, `resumed`), `uuid` (the item's id) |
 | `interrupt` | `ref` | `interrupted` |
 | `answer` | `request`, optional `ref`, `by`, and by kind: `allow`, `why`, `always`, `mode`; `answers` | `answered`, `how` (`answered`, or `words` for a request whose process is gone) |
@@ -442,6 +442,8 @@ Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), 
 **Events.** `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }`: `state` (`agent`), `item` (`item`: new, or replacing the one with its `id`; words sent come first as a `queued: true` user item with the id `say` returned), `text` (`id`, `kind`, `append`, `parent`: streamed text on an item not finished yet), `request` (`request`), `closed` (`id`, `how`: `answered`, `cancelled` or `words`; `by`), `session` (`session`, `how`: `new` or `resume`).
 
 **Requests.** A question or permission prompt is a request: the prompt shape above plus `ref` and `session`, with an id of the host's own (`rq-...`) that survives a restart. The first answer wins; any later one hears `already-answered`. Claude Code cancelling it closes it (`cancelled`). An answer to a request whose process is gone (a crash, a host restart) wakes the agent on its session and delivers the answer as the owner's words (`how: "words"`), so the owner never meets a dead end.
+
+**Codex agents.** A hosted Codex agent runs its own `codex app-server` on a unix socket, one thread per session, with the same hooks, snapshots, journal, usage-limit wait and context cap a tmux Codex worker has (both run `src/codex/session.mjs`). Its item ids carry the session's first 8 characters (`3f2a9c1d:item-4`); a user message keeps the id it was sent with. Approvals and questions are requests like Claude's. `worker.set` takes a model only (Codex keeps the permission mode it started with). Words steered in as a turn ended and never taken leave the queue after 3 s. Its seam is `codex.json`, with `ctl` and `thread`.
 
 **Restart.** The host rebuilds itself from the `agent.json` files. An agent whose process went with the old host is `parked`, with a `system` item saying so; its open requests stay open. Nothing starts by itself.
 
@@ -459,7 +461,7 @@ Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), 
 
 ## Contract tests
 
-- `test/host.test.mjs` (this package): the agent host against a stand-in Claude Code: start, words sent and queued, a request answered from two clients with the first winning, interrupt, park on idle and wake on a message, one history across a session change with earlier sessions backfilled, a restart keeping requests and history, the push lines, one host per store, and a task worker started through `ROLLCALL_HOST=1` driven by the old seam.
+- `test/host.test.mjs` (this package): the agent host against a stand-in Claude Code and Codex: start, words sent and queued, a request answered from two clients with the first winning, interrupt, park on idle and wake on a message, one history across a session change with earlier sessions backfilled, a restart keeping requests and history, the push lines, one host per store, a task worker started through `ROLLCALL_HOST=1` driven by the old seam, and a Codex agent's words, approvals (first answer wins), seam, hooks, park and resume of its thread.
 - `test/conversation.test.mjs` (this package): transcripts folded into items, pages and cursors, the live overlay and a follow's lines.
 - `test/claude-worker.test.mjs` (this package): the stream-mode worker against a stand-in Claude Code: words in, queued words, prompts and their answers, interrupt, model and mode, the switch both ways, and the actions behind them.
 - `test/codex-chat.test.mjs` (this package): Codex items mapped onto the chat's, the journal and its history, and a Codex worker in the chat view against a stand-in Codex: words sent and queued, an approval prompt and its answer, the model for the next turn, the switch both ways, an interrupt, a resume that writes the journal from history. `test/codex-contract.test.mjs` checks the installed Codex still has every message and field this uses.

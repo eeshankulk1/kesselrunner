@@ -1,5 +1,5 @@
 // `rollcall host`: the agent host (docs/plans/2026-11-08-agent-host.md). One long-lived process per store that runs
-// every hosted agent as its child (host/claude.mjs, host/codex.mjs), owns each agent's state (agent.json), keeps one
+// every hosted agent as its child (claude/stream.mjs, host/codex.mjs), owns each agent's state (agent.json), keeps one
 // history per task (host/history.mjs), saves questions and permission prompts as requests, and serves a socket where
 // front ends call and subscribe. Each agent also gets the control socket and record the stream worker had
 // (claude/live.mjs), so delivery, `task tell`, answers and away mode reach it unchanged.
