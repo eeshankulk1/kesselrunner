@@ -193,11 +193,12 @@ export async function claudeWorker([h, task]) {
   process.on("exit", () => { try { stream?.child.kill("SIGTERM"); } catch {} try { terminal?.kill("SIGTERM"); } catch {} cleanup(); });
 
   // ---- launch arguments, shared by both views
-  // --add-dir takes every word up to the next flag, so it goes first, never before a prompt.
+  // As the plain CLI always started: the session, then --add-dir (which takes every word up to the next flag, so
+  // --settings follows it and it never stands before a prompt), then the rest.
   const common = () => [
+    ...(started ? ["--resume", state.session] : ["--session-id", state.session]),
     ...(cfg.addDir?.length ? ["--add-dir", ...cfg.addDir] : []),
     "--settings", cfg.settings,
-    ...(started ? ["--resume", state.session] : ["--session-id", state.session]),
     ...(cfg.mode ? ["--permission-mode", cfg.mode] : []),
     ...(cfg.model ? ["--model", cfg.model] : []),
     ...(cfg.effort ? ["--effort", cfg.effort] : []),
@@ -242,6 +243,8 @@ export async function claudeWorker([h, task]) {
       case "switch": return requestSwitch(req.to);
       case "say": {
         if (state.view !== "chat" || !stream) return { ok: false, err: "the worker runs in the terminal view", view: state.view };
+        // The stream's input is closed for a switch to the terminal: the words wait on the caller's queue, which types them there.
+        if (stream.closing) return { ok: false, err: "the worker is switching to the terminal view", view: "terminal" };
         const text = String(req.text ?? "");
         if (!text.trim() && !req.attachments?.length) return { ok: false, err: "nothing to say" };
         const uuid = typeof req.uuid === "string" && req.uuid ? req.uuid : randomUUID();

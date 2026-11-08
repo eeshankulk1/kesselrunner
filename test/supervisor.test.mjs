@@ -2483,7 +2483,13 @@ function mergedGh(w) {
 const showTask = (w, id) => JSON.parse(w.sup.cli(["task", "show", id, "--json"]).stdout);
 
 test("a scripted front end beside the Falcon starts a task, answers its question, tells it, attaches to it and sees it land, and the Falcon shows the same; its notices replace rollcall's own while it runs", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  // This stand-in Claude Code speaks only the terminal: a front end following rollcall would start workers in the chat
+  // view (claude-worker.test.mjs covers that), so this one keeps them in the terminal, where the Falcon shows them.
+  const was = process.env.ROLLCALL_WORKER_VIEW;
+  process.env.ROLLCALL_WORKER_VIEW = "terminal";
+  t.after(() => { if (was === undefined) delete process.env.ROLLCALL_WORKER_VIEW; else process.env.ROLLCALL_WORKER_VIEW = was; });
   const w = world(t);
+  for (const x of Object.values(w)) if (x && typeof x === "object" && x.env && typeof x.env === "object") x.env.ROLLCALL_WORKER_VIEW = "terminal";
   const gh = mergedGh(w);
   const s = apiStream(w, undefined, gh);
   await until(() => s.of("snapshot").length === 1, { timeout: 20_000 });

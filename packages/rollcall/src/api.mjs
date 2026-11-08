@@ -1,11 +1,12 @@
 // The front-end interface: one versioned way in for every front end (the cockpit Mac and iOS apps, scripts), over
-// the same state and the same code the terminal Falcon uses. Four verbs, JSON out:
+// the same state and the same code the terminal Falcon uses. Six verbs, JSON out:
 //   rollcall api version                     the interface version and what it offers
 //   rollcall api snapshot [--home <h>]       everything a front end draws, as one document
 //   rollcall api stream [--home <h>] [--client <name>] [--notifies]
 //                                            the snapshot, then each change as one JSON line, until stopped
 //   rollcall api do <action> [<json> | -]    every action the Falcon can take (api-actions.mjs)
 //   rollcall api attach <home>[:<task>]      what a front end runs to show that session's real terminal
+//   rollcall api conversation <ref> [--follow] a worker's (or the Falcon's) conversation as items (conversation.mjs)
 // The contract is API.md beside this package's README; a breaking change bumps INTERFACE. rollcall stays daemonless:
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
 import { readFileSync } from "node:fs";
