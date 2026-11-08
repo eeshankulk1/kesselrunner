@@ -158,6 +158,21 @@ test("a green PR lands as it is: no tree built, no suite run, no check waited on
   assert.ok(sb.originHas("src/a.js") && sb.originHas("src/b.js"));
 });
 
+test("a green PR whose merge fails for a reason that may clear (the network) tries again as it is, not on a train", (t) => {
+  const sb = repo(t, { green: true, manifest: { release: { merge: "squash" } } });
+  const a = shipper(sb, "feat-a", { "src/a.js": "a\n" });
+  const head = git(a.wt, "rev-parse", "HEAD");
+  assert.equal(a.q("add").code, 0);
+  sb.setGh((s) => { s.failMerge = "error connecting to api.github.com"; });
+  sb.lander();
+  assert.deepEqual(outcomes(sb), [], "the failed round landed nothing");
+  sb.lander();
+  assert.deepEqual(outcomes(sb).map((o) => [o.pr, o.kind]), [[1, "landed"]]);
+  assert.match(outcomes(sb)[0].text, /went straight in/);
+  assert.equal(prOf(sb, 1).lastHead, head, "no train pushed a merge of main to it");
+  assert.match(landerLog(sb), /gh pr merge #1 failed: error connecting/);
+});
+
 test("a green PR whose checks run again waits for them, then lands", (t) => {
   const sb = repo(t, { green: true });
   const a = shipper(sb, "feat-a", { "src/a.js": "a\n" });

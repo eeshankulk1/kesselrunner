@@ -9,7 +9,8 @@
 //            lag?: ms (GitHub behind itself: pr view shows each PR as it stood that long ago, a new PR is not there yet,
 //                 and a merge is refused until the head it names has shown), failView?: text (pr view fails with it),
 //            annotations?: { <job id>: [{ message }] }, reruns: { <run id>: n }, calls: [argv...],
-//            failGraphql?: text (api graphql fails with it), upToDate?: true (branch protection: a PR must hold its base) }
+//            failGraphql?: text (api graphql fails with it), upToDate?: true (branch protection: a PR must hold its base),
+//            failMerge?: text (the next pr merge fails with it, once) }
 //   A PR's review threads: pr.threads = [{ id, isResolved, isOutdated, path, line, comments: [{ author: { login, __typename }, body, url, createdAt }] }];
 //   api graphql answers the reviewThreads query and the addPullRequestReviewThreadReply / resolveReviewThread mutations.
 // A check runs forever (pending: true, or pendingIfFiles: every file exists at the PR's head).
@@ -95,6 +96,7 @@ if (group === "pr" && cmd === "view") {
   s.prs.push(pr);
   process.stdout.write(`${URL}/pull/${pr.number}\n`);
 } else if (group === "pr" && cmd === "merge") {
+  if (s.failMerge) { const text = s.failMerge; delete s.failMerge; die(text); }
   const pr = find(ref);
   if (!pr || pr.state !== "OPEN") die("pull request is not open");
   const sha = head(pr);

@@ -202,6 +202,9 @@ function greenWay(c, m, base, e) {
   return "land";
 }
 
+/** What gh says when GitHub itself will not merge a PR as it is. */
+const REFUSED = /not mergeable|base branch policy|protected branch|up to date|behind|required status|review/i;
+
 /** Merges a green entry's own PR as it is. True when anything changed. A refusal sends it through a train from now on. */
 async function landGreen(c, e, method, base) {
   const { key, main, b } = c;
@@ -218,6 +221,9 @@ async function landGreen(c, e, method, base) {
     fetchSync(main, b);
     const sha = resolveRef(c.info, `refs/remotes/origin/${b}`);
     if (!r.ok && !isAncestor(main, e.head, `refs/remotes/origin/${b}`) && prView(main, e.pr)?.state !== "MERGED") {
+      // GitHub's own refusal (branch protection, not mergeable) holds for this head: trains from now on. Anything
+      // else (the network, a sign-in) may clear: the entry stays as it is and the next round tries again.
+      if (!REFUSED.test(r.err ?? "")) { trouble(c, [e], `gh pr merge #${e.pr} failed: ${store.clip(r.err, 200)}`); return false; }
       c.log(`#${e.pr}: gh pr merge refused it as it is (${store.clip(r.err, 200)}); it goes through a train`);
       store.updateQueue(key, (q) => { if (q.entries[e.pr]) q.entries[e.pr].retest = true; });
       return true;
