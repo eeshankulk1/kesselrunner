@@ -8,7 +8,7 @@ kesselrunner is a Claude Code setup in one repo: global instructions, skills, ag
 |---|---|---|
 | Instructions | The rules every session follows: worktrees, build phase and ship phase, docs, delegation | `CLAUDE.md`, applied into `~/.claude/CLAUDE.md` |
 | Supervisor (the Falcon) | One session you talk to (on Claude Code); a worker per task in its own worktree and tmux tab, on Claude Code or Codex | `skills/supervisor/`, `scripts/supervisor/`, `falcon` in `packages/rollcall/` |
-| rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble, the harness layer that runs a worker on either agent CLI, and the usage meter | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
+| rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble, away mode (a worker's permission prompts held while the owner is out), the harness layer that runs a worker on either agent CLI, and the usage meter | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
 | Front-end interface | One versioned way in for every front end (the Falcon's actions, native apps, scripts): a snapshot, a stream of changes, every action, the reads a screen needs (diffs, turns, review comments, PR timeline, logs, repo items) so an app never runs git or gh itself, terminal attach, as `rollcall api` | `packages/rollcall/src/api*.mjs` ([API.md](../packages/rollcall/API.md)) |
 | Ship chain | `/pr-create` and the skills and agents it calls: checks, review, docs, PR, CI watch, landing, release steps | `skills/`, `agents/` |
 | Memory | Project state and notes, loaded into each session | [docsic](https://github.com/eeshankulk1/docsic), installed and wired up by sync |

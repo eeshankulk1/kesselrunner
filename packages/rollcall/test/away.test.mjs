@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { changes } from "../src/api-stream.mjs";
 import { approvalAnswer, decisionIn } from "../src/codex/worker.mjs";
-import { matchKey, summaryOf, trimInput } from "../src/away.mjs";
+import { grantable, matchKey, summaryOf, trimInput } from "../src/away.mjs";
 import { BIN, sandbox } from "./helpers.mjs";
 
 const WORKER = { env: { ROLLCALL_TASK: "alpha:t1" } };
@@ -61,6 +61,10 @@ test("held items: what a person reads, what a grant matches, and an input kept t
   assert.equal(trimInput({ command: "x".repeat(5000) }).command.length, 2000);
   const big = trimInput({ command: "ls", blobs: Array.from({ length: 50 }, () => "y".repeat(1900)) });
   assert.deepEqual(big, { gist: "ls", trimmed: true }, "an input still too big keeps its gist");
+  assert.notEqual(matchKey("Bash", { command: "ls" }), matchKey("Bash", { command: "ls", dangerouslyDisableSandbox: true }), "a flag changes what a command does");
+  assert.equal(grantable({ key: matchKey("Bash", { command: "ls" }) }), true);
+  assert.equal(grantable({ key: matchKey("permissions", { description: "more" }) }), false, "a request that names nothing to match is never approved ahead");
+  assert.equal(grantable({ key: matchKey("Bash", { command: "ls" }), truncated: true }), false, "nor one the owner saw only part of");
 });
 
 test("Codex: a held approval is declined so the turn goes on, an approved one accepted, each in its request's own shape", () => {
@@ -102,7 +106,7 @@ test("away mode: a worker's permission request is held with a note, once per req
   assert.match(h.id, /^h-\d+-[0-9a-f]+$/);
   assert.deepEqual({ ...h, id: null, at: null }, {
     id: null, at: null, ref: "alpha:t1", home: "alpha", harness: "claude", tool: "Bash", input: { command: "npm publish", description: "publish the package" },
-    summary: "npm publish", reason: "publish the package", state: "held", answer: null,
+    summary: "npm publish", reason: "publish the package", state: "held", answer: null, truncated: false,
   });
   const told = notices(sb).filter((n) => n.kind === "held");
   assert.equal(told.length, 1);
@@ -202,9 +206,23 @@ test("held.answer: an approval lets the next matching request through once and r
   assert.ok(snap(sb).held.filter((x) => open.includes(x.id)).every((x) => x.state === "approved" && x.answer.all));
   assert.equal(permission(sb, { command: "git push" }, { id: "t2" }).decision.behavior, "allow");
   assert.equal(permission(sb, { command: "git push" }, { id: "t2" }).decision.behavior, "deny", "allow all's grant was used once");
+
+  // A request the owner saw only part of gets no grant: approving it tells the worker, and it asks again.
+  const long = `echo ${"x".repeat(2100)}`;
+  permission(sb, { command: long });
+  const cut = snap(sb).held.find((x) => x.state === "held" && x.truncated);
+  assert.ok(cut, "a cut input is marked");
+  assert.equal(act(sb, "held.answer", { id: cut.id, allow: true }).ok, true);
+  assert.equal(permission(sb, { command: long }).decision.behavior, "deny", "no grant for what the owner could not see");
+  // Turning away mode off drops a grant not yet used: the request shows to the owner, who is back.
+  permission(sb, { command: "npm test" });
+  const test1 = snap(sb).held.find((x) => x.state === "held" && x.summary === "npm test");
+  assert.equal(act(sb, "held.answer", { id: test1.id, allow: true }).ok, true);
+  assert.equal(act(sb, "away.set", { on: false }).ok, true);
+  assert.equal(permission(sb, { command: "npm test" }), null);
 });
 
-test("away CLI answers: refused in an agent session, the owner's terminal answers and lists", (t) => {
+test("away CLI answers: refused in a worker, the owner's terminal answers and lists", (t) => {
   const { sb, sup } = setup(t);
   assert.equal(owner(sb, ["away", "on"]).code, 0);
   permission(sb, { command: "npm publish" });
@@ -212,7 +230,7 @@ test("away CLI answers: refused in an agent session, the owner's terminal answer
   const status = owner(sb, ["away", "status"]);
   assert.match(status.stdout, /away mode on since/);
   assert.match(status.stdout, new RegExp(`${id}  alpha:t1: Bash: npm publish`));
-  assert.match(sup.cli(["away", "allow", id]).stderr, /the owner's: run it in your own terminal/, "an agent session gives no grant");
+  assert.equal(owner(sb, ["away", "allow", id], WORKER).code, 1, "a worker gives no grant (an agent's shell is stopped by the Bash guard)");
   const denied = owner(sb, ["away", "deny", id, "not", "today"]);
   assert.equal(denied.code, 0, denied.stderr);
   assert.match(denied.stdout, new RegExp(`${id} denied; not sent to its worker`));

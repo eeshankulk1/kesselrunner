@@ -8,7 +8,7 @@
 // Three machine records, each under its own lock (store.updateMachineFile):
 //   away.json     { on, since, by, last }: the switch, and the last finished spell with what got done in it
 //   held.json     [item]: held requests, open until answered; answered ones stay a day
-//   grants.json   [{ ref, tool, key, at, until }]: approvals not yet used, a day at most
+//   grants.json   [{ ref, tool, key, at, until }]: approvals not yet used, a day at most, dropped when away mode ends
 import { randomBytes } from "node:crypto";
 import { relative } from "node:path";
 import { describe } from "./asked.mjs";
@@ -61,7 +61,10 @@ export function setAway(on, by, now = Date.now()) {
       : { on: false, since: null, by: null, last: { since: raw.since ?? now, until: now, done: doneBetween(raw.since ?? now, now) } };
     return { value, out: { already: false } };
   });
-  return r ? { away: awayState(), already: r.out.already } : null;
+  if (!r) return null;
+  // An approval not yet used is only for while the owner is away: once back, the worker's request shows to them.
+  if (!on && !r.out.already) store.updateMachineFile("grants", () => ({ value: null, out: true }));
+  return { away: awayState(), already: r.out.already };
 }
 
 // ---------------------------------------------------------------- held requests
@@ -83,11 +86,19 @@ export function trimInput(input) {
 /** What a request is, for matching a grant: its tool and its input without the agent's own words about it. */
 export function matchKey(tool, input) {
   const i = input && typeof input === "object" ? input : {};
-  if (typeof i.command === "string") return `${tool}\n${i.command.trim()}`;
   const stable = (v) => (Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v);
   const { description, ...rest } = i;
+  // Every other field counts (a command's sandbox or background flag changes what it does); only its edge spaces do not.
+  if (typeof rest.command === "string") rest.command = rest.command.trim();
   return `${tool}\n${JSON.stringify(stable(rest))}`;
 }
+
+/**
+ * Whether an approval of held `item` can let the worker's next matching request through. Not when the owner saw only
+ * part of it (its input was cut to fit), and not when it names nothing to match (a Codex file change that lists no
+ * files): then the approval reaches the worker as words, and the request asks again.
+ */
+export const grantable = (item) => !item.truncated && !String(item.key ?? "").endsWith("\n{}");
 
 /** One plain line a person reads: the command, `Edit src/a.ts`, or the tool and what it names. */
 export function summaryOf(t, tool, input) {
@@ -126,9 +137,12 @@ export function holdRequest(t, { harness, tool, input, now = Date.now() }) {
     const same = items.find((x) => x.ref === ref && x.state === "held" && x.key === key);
     if (same) return { value: items, out: { item: same, fresh: false } };
     const reason = typeof input?.description === "string" && input.description.trim() ? store.clip(store.oneLine(input.description), 300) : null;
+    const shown = trimInput(input);
     const item = {
-      id: `h-${now}-${randomBytes(3).toString("hex")}`, ref, home: t.home, at: now, harness, tool, input: trimInput(input),
+      id: `h-${now}-${randomBytes(3).toString("hex")}`, ref, home: t.home, at: now, harness, tool, input: shown,
       summary: summaryOf(t, tool, input), reason, state: "held", answer: null, key,
+      // The owner sees `input`: when it had to be cut, what they approve is not all of what would run.
+      truncated: JSON.stringify(shown) !== JSON.stringify(input && typeof input === "object" ? input : {}),
     };
     return { value: [...items, item], out: { item, fresh: true } };
   });
@@ -206,9 +220,10 @@ export function deliverToTask(ref, text, note, by) {
   return { delivered: r.ok, how: r.how ?? null, why: r.why ?? null };
 }
 
+const ASKS_AGAIN = " (rollcall could not approve it ahead of time, so it asks again: shown to the owner, or held again while they are away)";
 const approvedText = (items) => (items.length === 1
-  ? `The owner approved your held request: ${items[0].summary}. Run it now.`
-  : `The owner approved your held requests:\n${items.map((x, i) => `${i + 1}. ${x.summary}`).join("\n")}\nRun them now.`);
+  ? `The owner approved your held request: ${items[0].summary}. Run it now${grantable(items[0]) ? "" : ASKS_AGAIN}.`
+  : `The owner approved your held requests:\n${items.map((x, i) => `${i + 1}. ${x.summary}${grantable(x) ? "" : ASKS_AGAIN}`).join("\n")}\nRun them now.`);
 const deniedText = (item, why) => `The owner denied your held request: ${item.summary}.${why ? ` Their words: ${why}` : ""}`;
 
 /**
@@ -226,14 +241,27 @@ export function answerHeld(id, { allow, why = null, by, all = false, now = Date.
     return { value: items, out: { already: false, item } };
   });
   if (!r) return { code: "busy" };
-  if (r.out.code || r.out.already) return r.out;
+  if (r.out.code) return r.out;
+  if (r.out.already) return { already: true, item: strip(r.out.item) };
   const { item } = r.out;
-  if (allow) grant(item.ref, item.tool, item.key, now);
+  if (allow && grantable(item) && !grant(item.ref, item.tool, item.key, now)) {
+    reopen([item.id]);
+    return { code: "busy" };
+  }
   const d = deliverToTask(item.ref, allow ? approvedText([item]) : deniedText(item, why), `held request ${allow ? "approved" : "denied"} by the owner (${by}): ${item.summary}${why ? ` - ${why}` : ""}`, by);
   return { already: false, item: strip(item), ...d };
 }
 
 const strip = ({ key, ...x }) => x;
+
+/** Puts answered items back to held: their approval could not be saved, so it never happened. */
+function reopen(ids) {
+  store.updateMachineFile("held", (raw) => {
+    const items = Array.isArray(raw) ? raw : [];
+    for (const x of items) if (ids.includes(x.id) && x.state === "approved") Object.assign(x, { state: "held", answer: null });
+    return { value: items, out: true };
+  });
+}
 
 /**
  * Approves every held item (of supervisor `home` alone, when given): a grant each, and one message per task listing
@@ -247,12 +275,11 @@ export function allowAll({ home = null, by, now = Date.now() }) {
     return { value: items, out: mine.map((x) => ({ ...x })) };
   });
   if (!r) return null;
-  const approved = r.out;
+  const failed = r.out.filter((item) => grantable(item) && !grant(item.ref, item.tool, item.key, now));
+  if (failed.length) reopen(failed.map((x) => x.id));
+  const approved = r.out.filter((x) => !failed.includes(x));
   const byTask = new Map();
-  for (const item of approved) {
-    grant(item.ref, item.tool, item.key, now);
-    byTask.set(item.ref, [...(byTask.get(item.ref) ?? []), item]);
-  }
+  for (const item of approved) byTask.set(item.ref, [...(byTask.get(item.ref) ?? []), item]);
   for (const [ref, items] of byTask) {
     deliverToTask(ref, approvedText(items), `held requests approved by the owner (${by}, allow all): ${items.map((x) => x.summary).join("; ")}`, by);
   }

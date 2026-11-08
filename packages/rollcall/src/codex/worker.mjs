@@ -22,7 +22,7 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { capFlag, markCap, workerHook } from "../supervisor.mjs";
@@ -38,16 +38,32 @@ export const clientId = (prefix) => `${prefix}${randomBytes(6).toString("hex")}`
 /** The text of a userMessage item: its text parts, joined. */
 export const textOf = (item) => (item?.content ?? []).filter((c) => c?.type === "text").map((c) => c.text ?? "").join("\n").trim();
 
-/** Codex's server requests that open a dialog the owner answers, as the hook payload Claude Code's PermissionRequest would carry. */
+/** An object without its null, undefined and empty-string fields. */
+const present = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== ""));
+
+/**
+ * Codex's server requests that open a dialog the owner answers, as the hook payload Claude Code's PermissionRequest
+ * would carry. The input names everything that makes one request differ from another (the command's argv and folder,
+ * every file a patch changes and a hash of the changes, the permissions asked for): away mode's grant matches on it.
+ */
 export function dialogPayload(method, p) {
   if (method === "item/commandExecution/requestApproval" || method === "execCommandApproval") {
-    const command = Array.isArray(p?.command) ? p.command.join(" ") : p?.command ?? "";
-    return { tool_name: "Bash", tool_input: { command, description: p?.reason ?? undefined }, notification_type: "permission_prompt", message: p?.reason ?? null };
+    const argv = Array.isArray(p?.command) ? p.command : null;
+    const command = argv ? argv.join(" ") : p?.command ?? "";
+    const tool_input = present({ command, argv: argv && argv.length > 1 ? argv : null, cwd: p?.cwd, network: p?.networkApprovalContext, description: p?.reason });
+    return { tool_name: "Bash", tool_input, notification_type: "permission_prompt", message: p?.reason ?? null };
   }
   if (method === "item/fileChange/requestApproval" || method === "applyPatchApproval") {
-    return { tool_name: "Edit", tool_input: { file_path: p?.grantRoot ?? Object.keys(p?.fileChanges ?? {})[0] ?? "" }, notification_type: "permission_prompt", message: p?.reason ?? null };
+    const changes = p?.fileChanges && typeof p.fileChanges === "object" ? p.fileChanges : {};
+    const files = Object.keys(changes).sort();
+    const hash = files.length ? createHash("sha256").update(JSON.stringify(files.map((f) => [f, changes[f]]))).digest("hex").slice(0, 16) : null;
+    const tool_input = present({ file_path: p?.grantRoot ?? files[0], files: files.length > 1 ? files : null, changes: hash, description: p?.reason });
+    return { tool_name: "Edit", tool_input, notification_type: "permission_prompt", message: p?.reason ?? null };
   }
-  if (method === "item/permissions/requestApproval") return { tool_name: null, notification_type: "permission_prompt", message: p?.reason ?? "Codex asks for more permissions" };
+  if (method === "item/permissions/requestApproval") {
+    const tool_input = present({ permissions: p?.permissions, cwd: p?.cwd, description: p?.reason });
+    return { tool_name: null, tool_input, notification_type: "permission_prompt", message: p?.reason ?? "Codex asks for more permissions" };
+  }
   if (method === "mcpServer/elicitation/request") return { tool_name: null, notification_type: "elicitation_dialog", message: `${p?.serverName ?? "an MCP server"} asks for input` };
   return null;
 }
@@ -246,7 +262,7 @@ export async function codexWorker([h, id]) {
     // while the owner is away (away.mjs). Codex's decline lets the turn go on but carries no reason, so the note goes
     // in as a steer. With no decision the hook raised the dialog flag, as for any dialog.
     const permission = APPROVALS.has(m.method);
-    const out = hook("dialog", permission ? { ...d, tool_name: d.tool_name ?? "permissions", tool_input: d.tool_input ?? { description: m.params?.reason ?? undefined }, hook_event_name: "PermissionRequest", harness: "codex" } : d);
+    const out = hook("dialog", permission ? { ...d, tool_name: d.tool_name ?? "permissions", tool_input: d.tool_input ?? {}, hook_event_name: "PermissionRequest", harness: "codex" } : d);
     const decided = decisionIn(out);
     if (!decided) { pending.set(m.id, "dialog"); return; }
     conn.respond(m.id, approvalAnswer(m.method, m.params, decided.behavior === "allow", decided.message));

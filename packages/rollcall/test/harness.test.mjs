@@ -54,7 +54,15 @@ test("models and modes map per harness: a Claude model means nothing on Codex, a
 
 test("Codex's protocol in the shapes Claude Code's hooks carry: dialogs, questions, answers, limits, context", async () => {
   const w = await mod("codex/worker.mjs");
-  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: ["git", "push"], reason: "push" }), { tool_name: "Bash", tool_input: { command: "git push", description: "push" }, notification_type: "permission_prompt", message: "push" });
+  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: ["git", "push"], reason: "push" }), { tool_name: "Bash", tool_input: { command: "git push", argv: ["git", "push"], description: "push" }, notification_type: "permission_prompt", message: "push" });
+  // Away mode's grant matches on the input, so it names what makes one request differ from another.
+  assert.deepEqual(w.dialogPayload("item/commandExecution/requestApproval", { command: "ls", cwd: "/w" }).tool_input, { command: "ls", cwd: "/w" });
+  assert.notDeepEqual(w.dialogPayload("execCommandApproval", { command: ["a b"] }).tool_input, w.dialogPayload("execCommandApproval", { command: ["a", "b"] }).tool_input, "argv with a space is not the same command");
+  const patch = (fileChanges) => w.dialogPayload("applyPatchApproval", { fileChanges }).tool_input;
+  assert.notDeepEqual(patch({ "a.ts": { add: "x" } }), patch({ "a.ts": { add: "y" } }), "the same file with other changes is another request");
+  assert.deepEqual(patch({ "b.ts": {}, "a.ts": {} }).files, ["a.ts", "b.ts"]);
+  assert.deepEqual(w.dialogPayload("item/fileChange/requestApproval", { reason: "edit" }).tool_input, { description: "edit" }, "a v2 file change names no files");
+  assert.deepEqual(w.dialogPayload("item/permissions/requestApproval", { permissions: { network: { enabled: true } }, cwd: "/w", reason: "net" }).tool_input, { permissions: { network: { enabled: true } }, cwd: "/w", description: "net" });
   assert.equal(w.dialogPayload("mcpServer/elicitation/request", { serverName: "github" }).notification_type, "elicitation_dialog");
   assert.equal(w.dialogPayload("item/tool/call", {}), null, "a dynamic tool call opens nothing for the owner");
   const p = { questions: [{ id: "q1", header: "Ship", question: "Ship it?", options: [{ label: "Yes", description: "go" }] }, { id: "q2", header: "Why", question: "Why?" }] };

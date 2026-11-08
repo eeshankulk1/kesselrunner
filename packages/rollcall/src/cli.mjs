@@ -700,8 +700,9 @@ function away(args) {
     say(held.length ? `Held for you (rollcall away allow|deny <id>, or allow-all):\n${held.join("\n")}` : "Nothing is held.");
     return 0;
   }
-  // An answer grants a permission: only the owner's own terminal gives one, never an agent session.
-  if (whoAmI()) fail("answering what away mode held is the owner's: run it in your own terminal (`!` in the Falcon), not from an agent session");
+  // An answer grants a permission: only the owner gives one. A worker is refused above; an agent's own shell is
+  // refused by the Bash guard (hooks.mjs saidDenial), which the owner's `!` in the Falcon never passes. Process
+  // ancestry cannot tell the two apart: `!` runs under the agent session's own process.
   if (sub === "allow" || sub === "deny") {
     const [id, ...why] = rest;
     if (!id) return usageError(`usage: rollcall away ${sub} <id>${sub === "deny" ? ' ["<why>"]' : ""}`);

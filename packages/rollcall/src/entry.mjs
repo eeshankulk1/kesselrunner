@@ -8,7 +8,7 @@ export async function hookAnswer(event, payload) {
   // those after loading at most the command-line reader.
   const bash = payload?.tool_name === "Bash" && event === "pre-tool-use" ? String(payload.tool_input?.command ?? "") : null;
   const temp = bash !== null && bash.includes("/tmp/claude-") && /\b(rm|rmdir|unlink|trash|srm|rmtree|rmSync|rimraf)\b|-delete\b/.test(bash);
-  const said = bash !== null && /\bsaid\.json\b|\btask\s+relay\b|\bapi[\s'\"\\]+do\b/.test(bash);
+  const said = bash !== null && /\bsaid\.json\b|\btask\s+relay\b|\bapi[\s'\"\\]+do\b|\baway[\s'\"\\]+(allow|deny|on|off)\b|_machine\b/.test(bash);
   const skip = bash !== null && !temp && !said && (!/\bgit\b/.test(bash) || !(await import("./shell.mjs")).gitMutations(bash, process.cwd()).length);
   return skip ? null : (await import("./hooks.mjs")).runHook(event, payload);
 }
