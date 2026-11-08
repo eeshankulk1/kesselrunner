@@ -40,6 +40,7 @@ export const VERSION = (() => { try { return JSON.parse(readFileSync(new URL("..
 
 export const USAGE = `  rollcall api version | snapshot [--home <h>] | stream [--home <h>] [--client <name>] [--notifies]
               | do <action> [<json> | -] | attach <home>[:<task>] [--client <name>] [--resume]
+              | conversation <home>[:<task>] [--before <cursor>] [--limit <n>] [--follow] [--client <name>]
                                          the front-end interface (JSON): what a front end draws, its changes,
                                          every action, and its terminals (API.md)`;
 

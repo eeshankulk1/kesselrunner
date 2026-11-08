@@ -255,3 +255,9 @@ test("api conversation resolves a task's worker session and the Falcon's own; a 
   assert.equal(run("conversation", "alpha:t9").out.error.code, "not-found");
   assert.ok(run("version").out.verbs.includes("conversation"));
 });
+
+test("a queued_command attachment is read whichever key comes first on its line", () => {
+  const a = { uuid: "a1", timestamp: new Date(T0).toISOString(), attachment: { type: "queued_command", prompt: "hello", source_uuid: "q1" } };
+  const lines = [{ type: "attachment", ...a }, { parentUuid: null, type: "attachment", ...a, uuid: "a2", attachment: { ...a.attachment, source_uuid: "q2", prompt: "again" } }];
+  assert.deepEqual(foldTranscript(lines.map((x) => JSON.stringify(x)).join("\n")).map((x) => x.id), ["q1", "q2"]);
+});

@@ -16,7 +16,7 @@
 // prompt open now; stream.live.json holds the text streaming now and the messages waiting for the turn.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
@@ -30,6 +30,7 @@ import { VIEWS, launchFile, liveFile, readJson, recordFile, turnsFile, writeJson
 const LIVE_MS = 80; // the live file's rewrite, at most this often while text streams
 const KEEP_DONE_MS = 4000; // a finished block stays in the live file this long: the transcript has it by then
 const QUIET_POLL_MS = 500;
+const KEY_SETTLE_MS = 300; // a prompt is on screen this long before a key answers it
 const IMAGE = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
 const IMAGE_MAX = 5 * 1024 * 1024;
 
@@ -69,17 +70,43 @@ export function promptOf(req, requestId, { cwd = null, relays = null, now = Date
   };
 }
 
-/** The answer to a `can_use_tool` request, from what the owner said about prompt `p` (the original input in `input`). */
+/** The modes a front end or the pane may set: the ones Shift-Tab cycles in the CLI. Wider ones stay the launch's. */
+export const SET_MODES = new Set(["default", "acceptEdits", "plan"]);
+/** The modes an approved plan may continue in. */
+export const PLAN_MODES = new Set(["default", "acceptEdits"]);
+
+/**
+ * The answer to a `can_use_tool` request, from what the owner said about prompt `p` (the original input in `input`).
+ * Only an explicit allow allows; `always` adds only the suggestions that last for this session, never a rule written
+ * to a settings file or a new directory.
+ */
 export function decisionFor(p, input, a) {
   if (p.kind === "question") {
-    const answers = a.answers && typeof a.answers === "object" ? a.answers : null;
+    const answers = a.allow !== false && a.answers && typeof a.answers === "object" ? a.answers : null;
     if (!answers) return { behavior: "deny", message: a.why || "The owner did not answer." };
     return { behavior: "allow", updatedInput: { ...input, answers } };
   }
-  if (!a.allow) return { behavior: "deny", message: a.why ? `The owner declined: ${a.why}` : "The owner declined this." };
+  if (a.allow !== true) return { behavior: "deny", message: a.why ? `The owner declined: ${a.why}` : "The owner declined this." };
   const out = { behavior: "allow", updatedInput: input };
-  if (p.kind === "permission" && a.always && p.suggestions?.length) out.updatedPermissions = p.suggestions;
+  const session = a.always === true && p.kind === "permission" ? (p.suggestions ?? []).filter((x) => x?.destination === "session") : [];
+  if (session.length) out.updatedPermissions = session;
   return out;
+}
+
+/** Text from Claude or a tool, safe to print in the pane: no control characters (an escape could redraw a prompt). */
+export const safe = (s) => String(s ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+
+/** What the pane shows under a prompt before y approves it: the whole command, edit or input, never a clipped line. */
+export function detailOf(tool, input) {
+  const i = input && typeof input === "object" ? input : {};
+  const lines = (prefix, text) => safe(text).split("\n").map((l) => `${prefix}${l}`);
+  if (typeof i.command === "string") return lines("  $ ", i.command);
+  if (tool === "Edit" && typeof i.old_string === "string") return [...lines("  - ", i.old_string), ...lines("  + ", i.new_string ?? "")];
+  if (tool === "MultiEdit" && Array.isArray(i.edits)) return i.edits.flatMap((e) => [...lines("  - ", e?.old_string ?? ""), ...lines("  + ", e?.new_string ?? "")]);
+  if (tool === "Write" && typeof i.content === "string") return lines("  + ", i.content);
+  if (tool === "NotebookEdit" && typeof i.new_source === "string") return lines("  + ", i.new_source);
+  const json = JSON.stringify(i, null, 2);
+  return json && json !== "{}" ? lines("  ", json) : [];
 }
 
 /** The context use one model request says: { pct, tokens, size }, or null. */
@@ -120,7 +147,7 @@ function screen(out = process.stdout) {
 }
 
 const userLine = (text) => {
-  const t = String(text);
+  const t = safe(text);
   return t.startsWith(P) ? dim(`› ${store.clip(store.oneLine(t), 400)}`) : `${bold("› You")}  ${store.clip(t, 4000)}`;
 };
 
@@ -149,6 +176,7 @@ export async function claudeWorker([h, task]) {
   const live = { items: new Map(), queued: [] };
   let liveTimer = null;
   const writeLive = () => {
+    clearTimeout(liveTimer);
     liveTimer = null;
     const now = Date.now();
     for (const [k, x] of live.items) if (x.doneAt && now - x.doneAt > KEEP_DONE_MS) live.items.delete(k);
@@ -164,7 +192,7 @@ export async function claudeWorker([h, task]) {
     c.on("data", (d) => {
       buf += d;
       const i = buf.indexOf("\n");
-      if (i < 0) return;
+      if (i < 0) { if (buf.length > 4_000_000) c.destroy(); return; }
       let req = null;
       try { req = JSON.parse(buf.slice(0, i)); } catch {}
       Promise.resolve(handle(req)).catch((e) => ({ ok: false, err: e.message })).then((r) => { try { c.end(`${JSON.stringify(r ?? { ok: false, err: "no answer" })}\n`); } catch {} });
@@ -172,6 +200,7 @@ export async function claudeWorker([h, task]) {
     c.on("error", () => {});
   });
   await new Promise((resolve) => server.listen(sock, resolve));
+  try { chmodSync(sock, 0o600); } catch {} // only the owner reaches it, whatever the umask or the temp folder
   state.sock = sock;
 
   const cleanup = () => {
@@ -264,10 +293,12 @@ export async function claudeWorker([h, task]) {
       case "answer": return answer(req);
       case "set": {
         if (state.view !== "chat" || !stream) return { ok: false, err: "the worker runs in the terminal view", view: state.view };
+        if (req.mode && !SET_MODES.has(req.mode)) return { ok: false, code: "bad-payload", err: `mode is one of ${[...SET_MODES].join(", ")}` };
         const done = {};
         if (req.model) { const r = await stream.control({ subtype: "set_model", model: req.model }).catch((e) => ({ error: e.message })); if (r?.error) return { ok: false, err: r.error }; done.model = req.model; }
         if (req.mode) { const r = await stream.control({ subtype: "set_permission_mode", mode: req.mode }).catch((e) => ({ error: e.message })); if (r?.error) return { ok: false, err: r.error }; done.mode = req.mode; }
-        rememberLaunch(done);
+        // Only the model carries into a resume or a switch: a mode lasts for this session, as Shift-Tab's does in the CLI.
+        if (done.model) rememberLaunch({ model: done.model });
         return { ok: true, set: done };
       }
       default: return { ok: false, err: `unknown op ${req.op}` };
@@ -280,22 +311,39 @@ export async function claudeWorker([h, task]) {
     const open = pending.get(a.prompt);
     if (!open) return closed.has(a.prompt) ? { ok: true, already: true } : { ok: false, code: "not-found", err: `no prompt ${a.prompt}` };
     if (open.prompt.kind === "question" && !(a.answers && typeof a.answers === "object") && a.allow !== false) return { ok: false, code: "bad-payload", err: "a question takes answers" };
+    if (a.mode != null && !PLAN_MODES.has(a.mode)) return { ok: false, code: "bad-payload", err: `mode is one of ${[...PLAN_MODES].join(", ")}` };
     closed.add(a.prompt);
     const decision = decisionFor(open.prompt, open.input, a);
     pending.delete(a.prompt);
     stream?.respond(a.prompt, decision);
-    ui.line(dim(`  ${decision.behavior === "allow" ? "approved" : "declined"}${a.by ? ` from ${a.by}` : ""}`));
+    ui.line(dim(`  ${decision.behavior === "allow" ? "approved" : "declined"}${a.by ? ` from ${safe(a.by)}` : ""}`));
     if (open.prompt.kind === "plan" && decision.behavior === "allow" && a.mode) void stream?.control({ subtype: "set_permission_mode", mode: a.mode }).catch(() => {});
     closePrompt();
     return { ok: true, answered: true };
   }
   const closePrompt = () => {
-    state.prompt = pending.size ? [...pending.values()].at(-1).prompt : null;
+    const next = pending.size ? [...pending.values()].at(-1) : null;
+    state.prompt = next?.prompt ?? null;
+    if (next) showPrompt(next.prompt, next.input); // the pane's y answers what it shows last
     // The dialog flag the PermissionRequest hook raised goes with the last prompt: no tool result follows a denial.
     if (!state.prompt && id) rmSync(dialogFlag(h, id), { force: true });
     save();
     trySwitch();
   };
+
+  let shown = null; // the prompt the pane printed last: { id, at }
+  function showPrompt(p, input) {
+    shown = { id: p.id, at: Date.now() };
+    if (p.kind === "question") {
+      ui.line(`${yellow("?")} ${bold(safe(p.questions?.[0]?.question ?? "A question"))}`);
+      if (p.questions?.length === 1 && !p.questions[0].multiSelect) p.questions[0].options.forEach((o, n) => ui.line(dim(`  ${n + 1}. ${safe(o.label)}`)));
+      ui.hint("Answer with a number, or in the app");
+      return;
+    }
+    if (p.kind === "plan") { ui.line(`${yellow("?")} ${bold("Approve the plan?")}`); if (p.plan) for (const l of safe(p.plan).split("\n")) ui.line(`  ${l}`); }
+    else { ui.line(`${yellow("?")} ${bold(`Allow ${safe(p.tool)}?`)}${p.reason ? ` ${dim(safe(p.reason))}` : ""}`); for (const l of detailOf(p.tool, input)) ui.line(l); }
+    ui.hint("y approves, n declines (or answer in the app)");
+  }
 
   // ---- keys in the plain view
   const keys = (d) => {
@@ -304,7 +352,9 @@ export async function claudeWorker([h, task]) {
     if (s === "\r" || s === "\n") { const r = requestSwitch("terminal"); if (r.pending) ui.hint(state.busy || state.prompt ? "The real CLI opens when this turn ends." : "The real CLI opens in a moment."); return; }
     if (s === "\x1b" || s === "\x03") { if (state.busy) { ui.hint("Stopping the turn…"); void stream?.control({ subtype: "interrupt" }).catch(() => {}); } return; }
     const p = state.prompt;
-    if (!p) return;
+    // A key answers only the prompt the pane shows, and only once it has been there a moment: a y pressed for one
+    // prompt never lands on another that arrived in the same instant.
+    if (!p || shown?.id !== p.id || Date.now() - shown.at < KEY_SETTLE_MS) return;
     if ((p.kind === "permission" || p.kind === "plan") && /^[yn]$/i.test(s)) { answer({ prompt: p.id, allow: /y/i.test(s), by: "the terminal" }); return; }
     if (p.kind === "question" && p.questions?.length === 1 && !p.questions[0].multiSelect && /^[1-9]$/.test(s)) {
       const o = p.questions[0].options[Number(s) - 1];
@@ -324,6 +374,7 @@ export async function claudeWorker([h, task]) {
       const child = spawn(cfg.bin, args, { cwd: cfg.cwd, stdio: ["pipe", "pipe", "pipe"], env: process.env });
       let err = "";
       child.stderr.on("data", (d) => { err = (err + d).slice(-4000); });
+      child.stdin.on("error", () => {}); // a write after Claude Code exited: its exit handler reports that
       const send = (o) => { try { child.stdin.write(`${JSON.stringify(o)}\n`); } catch {} };
       const waiting = new Map(); // control request id -> resolve
       const control = (request) => new Promise((ok, fail) => {
@@ -333,6 +384,7 @@ export async function claudeWorker([h, task]) {
         send({ type: "control_request", request_id: rid, request });
       });
       const respond = (rid, response) => send({ type: "control_response", response: { subtype: "success", request_id: rid, response } });
+      const refuse = (rid, error) => send({ type: "control_response", response: { subtype: "error", request_id: rid, error } });
       stream = { child, send, control, respond, closing: false };
       state.child = child.pid;
       started = true; // the next run resumes, whatever happens to this one
@@ -344,7 +396,6 @@ export async function claudeWorker([h, task]) {
 
       let msg = null; // the model message streaming now: { id, parent }
       let usage = null;
-      const blockIds = new Map(); // `${msg}:${index}` -> live id
       let buf = "";
       child.stdout.on("data", (d) => {
         buf += d;
@@ -372,7 +423,6 @@ export async function claudeWorker([h, task]) {
               const kind = e.content_block?.type === "text" ? "assistant" : e.content_block?.type === "thinking" ? "thinking" : null;
               if (!kind) return;
               const lid = `${msg.id}:${e.index}`;
-              blockIds.set(lid, lid);
               live.items.set(lid, { id: lid, kind, text: "", parent: msg.parent, doneAt: null });
               return;
             }
@@ -381,7 +431,7 @@ export async function claudeWorker([h, task]) {
               const add = e.delta?.type === "text_delta" ? e.delta.text : e.delta?.type === "thinking_delta" ? e.delta.thinking : null;
               if (!x || typeof add !== "string" || !add) return;
               x.text += add;
-              if (x.kind === "assistant" && !x.parent) ui.text(x.id, add);
+              if (x.kind === "assistant" && !x.parent) ui.text(x.id, safe(add));
               liveSoon();
               return;
             }
@@ -394,7 +444,7 @@ export async function claudeWorker([h, task]) {
           case "assistant": {
             if (m.parent_tool_use_id) return;
             for (const b of m.message?.content ?? []) {
-              if (b.type === "tool_use") ui.line(`${cyan("•")} ${cyan(b.name)} ${dim(store.clip(summaryOf({ worktree: cfg.cwd }, b.name, b.input).replace(new RegExp(`^${b.name} `), ""), 200))}`);
+              if (b.type === "tool_use") ui.line(`${cyan("•")} ${cyan(safe(b.name))} ${dim(safe(store.clip(String(summaryOf({ worktree: cfg.cwd }, b.name, b.input)).replace(new RegExp(`^${b.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `), ""), 200)))}`);
             }
             return;
           }
@@ -431,15 +481,13 @@ export async function claudeWorker([h, task]) {
           case "rate_limit_event": { const l = limitsOf(m.rate_limit_info); if (l) { try { recordClaude(l); } catch {} } return; }
           case "control_request": {
             const r = m.request ?? {};
-            if (r.subtype !== "can_use_tool") { respond(m.request_id, {}); return; }
+            if (r.subtype !== "can_use_tool") { refuse(m.request_id, `rollcall does not handle ${r.subtype ?? "this request"}`); return; }
             const input = r.input && typeof r.input === "object" ? r.input : {};
             const p = promptOf(r, m.request_id, { cwd: cfg.cwd, relays: id ? null : relaysOf(h, input) });
             pending.set(m.request_id, { prompt: p, input });
             state.prompt = p;
             save();
-            ui.line(`${yellow("?")} ${p.kind === "question" ? bold(store.clip(p.questions?.[0]?.question ?? "A question", 300)) : p.kind === "plan" ? bold("Approve the plan?") : `${bold(`Allow ${p.tool}?`)} ${store.clip(p.summary, 300)}`}`);
-            if (p.kind === "question" && p.questions?.length === 1 && !p.questions[0].multiSelect) p.questions[0].options.forEach((o, n) => ui.line(dim(`  ${n + 1}. ${o.label}`)));
-            ui.hint(p.kind === "question" ? "Answer with a number, or in the app" : "y approves, n declines (or answer in the app)");
+            showPrompt(p, input);
             return;
           }
           case "control_cancel_request": {
@@ -474,7 +522,9 @@ export async function claudeWorker([h, task]) {
       child.on("exit", (code) => {
         rawKeys(false);
         ui.close();
-        for (const [rid] of pending) pending.delete(rid);
+        pending.clear();
+        // No tool result follows a prompt a dead stream left open: its dialog flag would hold rollcall's typing for good.
+        if (id) rmSync(dialogFlag(h, id), { force: true });
         state.prompt = null; state.busy = false; state.child = null;
         live.items.clear(); live.queued = [];
         writeLive();

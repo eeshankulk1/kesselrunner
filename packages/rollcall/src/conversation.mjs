@@ -31,10 +31,10 @@ const KEEP_TYPE = new Set(["user", "assistant", "system"]);
 function wanted(buf, start, end) {
   const head = buf.toString("latin1", start, Math.min(end, start + 240));
   const top = /^\{"type":"([^"]+)"/.exec(head);
-  if (top) return KEEP_TYPE.has(top[1]);
+  if (top && top[1] !== "attachment") return KEEP_TYPE.has(top[1]);
   const a = /"attachment":\{"type":"([^"]+)"/.exec(head);
   if (a) return KEEP_ATTACHMENT.has(a[1]);
-  return head.startsWith("{");
+  return !top && head.startsWith("{");
 }
 
 /** Feeds the complete lines of buf[from, to) to `folder`; returns where the unread rest (a partial line) starts. */
@@ -129,7 +129,7 @@ function saveImage(session, id, block) {
   const dir = join(tmpdir(), "rollcall-images", String(session ?? "unknown").replace(/[^\w-]/g, ""));
   const file = join(dir, `${String(id).replace(/[^\w:-]/g, "")}.${ext}`.replace(/:/g, "-"));
   try {
-    if (!existsSync(file)) { mkdirSync(dir, { recursive: true }); writeFileSync(file, Buffer.from(src.data, "base64")); }
+    if (!existsSync(file)) { mkdirSync(dir, { recursive: true, mode: 0o700 }); writeFileSync(file, Buffer.from(src.data, "base64"), { mode: 0o600 }); }
     return file;
   } catch { return null; }
 }
@@ -395,7 +395,7 @@ const alive = (pid) => { if (!pid) return true; try { process.kill(pid, 0); retu
 function recordOf(dir) {
   const rec = dir ? readJson(join(dir, "claude.json")) : null;
   const live = rec && alive(rec.pid);
-  return { view: rec?.view === "chat" ? "chat" : "terminal", switching: rec?.switching ?? null, prompt: live ? (rec.prompt ?? null) : null, session: rec?.session ?? null };
+  return { view: rec?.view === "chat" ? "chat" : "terminal", switching: rec?.switching ?? null, prompt: live && rec.view === "chat" ? (rec.prompt ?? null) : null, session: rec?.session ?? null };
 }
 
 /** turns.jsonl lines matched to the turn ends they belong to (the nearest end within 30 s, each once): Map endId -> line. */

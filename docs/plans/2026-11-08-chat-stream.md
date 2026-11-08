@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: done
+absorbed-into: packages/rollcall/API.md, packages/rollcall/README.md, docs/architecture.md
 date: 2026-11-08
 decided-with-owner: 2026-11-08 (cockpit task t21 "Chat view": stream mode over reading the CLI's log, the real CLI on a switch, the Falcon in stream mode in this build, one question in one place)
 covers: "The rollcall side of the chat view: a stream-mode Claude worker and Falcon, the conversation read for front ends, answering live moments from a front end, and the switch to and from the real CLI"

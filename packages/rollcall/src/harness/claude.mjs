@@ -135,7 +135,8 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
       home: t.home, task: t.id, session, resume: !!resume, settings, cwd: t.worktree, bin: bin(),
       prompt: prompt ? promptFile : null, mode: MODES.has(mode) ? mode : null, model: modelOk(model) ? model : null,
       effort: effortOk(effort) ? effort : null, addDir: browser ? [files] : [], name: name ?? null,
-      view: live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
+      // Stream mode (-p) skips Claude Code's trust question: a repo it has not trusted starts in the real CLI, which asks.
+      view: trusted(t) === false ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
     });
     writeFileSync(script, `${[...preamble(t, { browser, files }), `${q(process.execPath)} ${q(BIN)} claude-worker ${q(t.home)} ${q(t.id)}`].join("\n")}\n`);
     return { script, session };

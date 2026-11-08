@@ -2,7 +2,8 @@
 // rollcall processes reach it through its socket: words go in as sent or queued, a turn's end lands in turns.jsonl
 // and the context file, permission prompts and questions open on the record and close once answered (a second
 // answer is `already`), an interrupt reaches the stream, set changes the model and mode and the launch file keeps
-// them, a switch moves between the stream and the real CLI at a quiet point keeping the session, the API actions
+// the model (wider modes refused), only an explicit allow allows and `always` adds only session rules, the pane
+// prints no control characters, a switch moves between the stream and the real CLI at a quiet point keeping the session, the API actions
 // (prompt.answer, worker.set, task.switch, task.tell to the supervisor) drive it, and SIGTERM removes its record and
 // socket.
 import assert from "node:assert/strict";
@@ -12,6 +13,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, wr
 import { join } from "node:path";
 import { test } from "node:test";
 import { request } from "../src/claude/send.mjs";
+import { decisionFor, detailOf, safe } from "../src/claude/worker.mjs";
 import { BIN, FIXTURES, sandbox, until, write } from "./helpers.mjs";
 
 const FAKE = join(FIXTURES, "fake-claude.mjs");
@@ -74,6 +76,27 @@ function bare(t) {
 }
 
 // ---------------------------------------------------------------- words in
+
+test("decisionFor: only allow: true allows; always adds only session suggestions; a declined question denies", () => {
+  const perm = { kind: "permission", suggestions: [{ type: "addRules", destination: "session" }, { type: "addRules", destination: "localSettings" }, { type: "addDirectories", destination: "projectSettings" }] };
+  const input = { command: "ls" };
+  for (const allow of [undefined, null, "true", 1, false]) assert.equal(decisionFor(perm, input, { allow }).behavior, "deny", String(allow));
+  assert.deepEqual(decisionFor(perm, input, { allow: true }), { behavior: "allow", updatedInput: input });
+  assert.deepEqual(decisionFor(perm, input, { allow: true, always: true }).updatedPermissions, [{ type: "addRules", destination: "session" }]);
+  assert.equal(decisionFor({ kind: "permission", suggestions: [{ destination: "userSettings" }] }, input, { allow: true, always: true }).updatedPermissions, undefined);
+  const q = { kind: "question" };
+  assert.equal(decisionFor(q, {}, { allow: false, answers: { a: "b" } }).behavior, "deny");
+  assert.deepEqual(decisionFor(q, { questions: [] }, { answers: { a: "b" } }), { behavior: "allow", updatedInput: { questions: [], answers: { a: "b" } } });
+});
+
+test("the pane prints no control characters, and shows a whole command or edit under a prompt", () => {
+  assert.equal(safe("ok\x1b[2K\x1b[1Gfine\x07\r"), "ok[2K[1Gfine");
+  assert.equal(safe("a\tb\nc"), "a\tb\nc");
+  const long = `echo ${"x".repeat(500)}; rm -rf /tmp/z`;
+  assert.deepEqual(detailOf("Bash", { command: long }), [`  $ ${long}`]);
+  assert.deepEqual(detailOf("Edit", { file_path: "/a", old_string: "one\ntwo", new_string: "three" }), ["  - one", "  - two", "  + three"]);
+  assert.deepEqual(detailOf("Bash", { command: "ls\x1b]0;x\x07" }), ["  $ ls]0;x"]);
+});
 
 test("say while idle is sent: busy for the turn, then a turns.jsonl line and the task's context file", async (t) => {
   const sb = bare(t);
@@ -228,7 +251,7 @@ test("interrupt during a SLOW turn reaches the stream and the turn ends as an er
   assert.ok(turns[0].ms < 1900, `ended early (${turns[0].ms} ms)`);
 });
 
-test("set sends set_model and set_permission_mode, and the launch file remembers them", async (t) => {
+test("set sends set_model and set_permission_mode; the launch file remembers the model only, and wider modes are refused", async (t) => {
   const sb = bare(t);
   const w = await startWorker(t, sb);
   assert.deepEqual(await w.send({ op: "set", model: "opus", mode: "acceptEdits" }), { ok: true, set: { model: "opus", mode: "acceptEdits" } });
@@ -236,7 +259,8 @@ test("set sends set_model and set_permission_mode, and the launch file remembers
   assert.deepEqual(reqs, [{ subtype: "set_model", model: "opus" }, { subtype: "set_permission_mode", mode: "acceptEdits" }]);
   const l = w.launch();
   assert.equal(l.model, "opus");
-  assert.equal(l.mode, "acceptEdits");
+  assert.equal(l.mode ?? null, null, "a mode lasts for the session, as Shift-Tab's does");
+  for (const mode of ["bypassPermissions", "auto", "dontAsk"]) assert.equal((await w.send({ op: "set", mode })).code, "bad-payload", mode);
 });
 
 // ---------------------------------------------------------------- the switch

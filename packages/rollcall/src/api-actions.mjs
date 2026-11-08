@@ -19,7 +19,8 @@ import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf, workerAdapter } from "./harness/index.mjs";
-import { MODES as CLAUDE_MODES, modelOk } from "./harness/claude.mjs";
+import { modelOk } from "./harness/claude.mjs";
+import { SET_MODES } from "./claude/worker.mjs";
 import * as live from "./claude/live.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
@@ -117,6 +118,8 @@ const viewAfter = (x) => (x.t ? fresh(x.t) : null);
 function attachmentsOf(p) {
   if (p.attachments === undefined || p.attachments === null) return [];
   if (!Array.isArray(p.attachments) || p.attachments.some((a) => typeof a !== "string" || !a.startsWith("/"))) refuse("bad-payload", "attachments are absolute paths");
+  // The path goes into the worker's text as "[Attached: a, b]": a newline or a ", /" would forge a second file or line.
+  if (p.attachments.some((a) => /[\x00-\x1f\x7f]|, \//.test(a))) refuse("bad-payload", "an attachment path has a control character or \", /\"");
   if (p.attachments.length > 10) refuse("bad-payload", "attachments: ten at most");
   const missing = p.attachments.filter((a) => !existsSync(a));
   if (missing.length) refuse("bad-payload", `no such file: ${missing.join(", ")}`);
@@ -130,9 +133,6 @@ function chatWorker(x, what) {
   if (rec.view !== "chat") refuse("refused", `${x.t ? label(x.t) : `supervisor ${x.h}`} runs in the terminal view: switch it to the chat (task.switch) to ${what} here, or do it in its terminal`);
   return rec;
 }
-
-/** Permission modes a chat-view worker can change to (Claude Code's set_permission_mode). */
-const SET_MODES = new Set(["default", "plan", ...CLAUDE_MODES]);
 
 // ---------------------------------------------------------------- the actions
 
@@ -235,7 +235,7 @@ export const ACTIONS = {
       if (p.answers !== undefined && (typeof p.answers !== "object" || p.answers === null || Array.isArray(p.answers))) refuse("bad-payload", "answers maps each question to its answer");
       if (p.mode !== undefined && !["acceptEdits", "default"].includes(p.mode)) refuse("bad-payload", "mode is acceptEdits or default");
       const why = str(p, "why", { required: false, max: 2000 });
-      const r = live.send(x.h, x.id, { op: "answer", prompt: id, allow: p.allow === true, why, always: p.always === true, mode: p.mode ?? null, answers: p.answers ?? null, by: client });
+      const r = live.send(x.h, x.id, { op: "answer", prompt: id, allow: typeof p.allow === "boolean" ? p.allow : null, why, always: p.always === true, mode: p.mode ?? null, answers: p.answers ?? null, by: client });
       if (r.code === "not-found") refuse("not-found", `no prompt ${id} in that worker`);
       if (r.code === "bad-payload") refuse("bad-payload", r.err);
       if (!r.ok) refuse("failed", r.err ?? "the worker did not take the answer");
