@@ -11,16 +11,16 @@ import { join } from "node:path";
 import { codexRecordFile, launchFile, readJson, recordFile, writeJson } from "../claude/live.mjs";
 import { PLAN_MODES, SET_MODES, commandOf, promptOf } from "../claude/stream.mjs";
 import { dialogFlag } from "../delivery.mjs";
-import { pidAlive } from "../proc.mjs";
+import { pidAlive, sameProcess, startOf } from "../proc.mjs";
 import * as store from "../store.mjs";
 import { recordClaude } from "../usage.mjs";
 import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
 import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
 import { loadFinder, relaysOf } from "../claude/worker.mjs";
-import { startCodexAgent } from "./codex.mjs";
+import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
-import { History, backfill, catchUp, historyFile } from "./history.mjs";
+import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
 
@@ -96,6 +96,8 @@ class Agent {
     this.server = null;
     this.starting = null;
     this.exitWaiters = [];
+    this.terminal = null; // { at, cwd, pid, start } while open in a terminal (also on the record, rec.terminal)
+    this.terminalWatch = null;
   }
 
   /** The history, read from its file on first use. */
@@ -402,8 +404,9 @@ class Agent {
    * The terminal escape hatch: the real CLI on this agent's own session, which the caller runs (`rollcall open`). The
    * host ends its process first (two processes never share a session), shows `terminal` until closeTerminal, holds
    * words sent meanwhile, and never parks it. `c` is the caller's connection: when it closes, so does the terminal.
+   * `pid` is the caller's process (it waits on the CLI): a host that restarts meanwhile watches it (restore).
    */
-  async openTerminal(c = null) {
+  async openTerminal(c = null, { pid = null } = {}) {
     if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal already`);
     if (this.rec.state === "running") return err("refused", `${this.ref} is in a turn: wait for it to end, or interrupt it, then open it`);
     const harness = this.rec.state ? this.rec.harness : newerLaunch(this.h, this.id);
@@ -439,8 +442,9 @@ class Agent {
       this.hist.append({ ev: "session", session: cfg.session, harness, how: started ? "resume" : "new", terminal: true });
       broadcast(this.ref, "session", { session: cfg.session, how: started ? "resume" : "new" });
     }
-    this.terminal = { at: Date.now(), cwd: cfg.cwd ?? null };
-    this.rec.terminalAt = this.terminal.at;
+    pid = Number.isInteger(pid) && pid > 1 ? pid : null;
+    this.terminal = { at: Date.now(), cwd: cfg.cwd ?? null, pid, start: pid ? startOf(pid) : null };
+    this.rec.terminal = this.terminal;
     this.setState("terminal");
     log(`${this.ref}: open in a terminal on session ${cfg.session}`);
     if (c) c.once("close", () => { void this.closeTerminal(); });
@@ -452,12 +456,16 @@ class Agent {
     if (!this.terminal) return { ok: true, closed: false };
     const was = this.terminal;
     this.terminal = null;
-    this.rec.terminalAt = null;
+    clearInterval(this.terminalWatch);
+    this.terminalWatch = null;
     let added = [];
-    if (this.rec.harness === "claude") {
-      try { added = await catchUp(this.hist, { home: this.h, id: this.wid, dir: this.dir, session: this.rec.session, cwd: was.cwd, harness: "claude" }); } catch (e) { log(`${this.ref}: the terminal's turns were not read: ${e.message}`); }
-      for (const item of added) broadcast(this.ref, "item", { item });
-    } else this.item({ id: `host-terminal:${hex(6)}`, at: Date.now(), kind: "system", text: "Codex ran in a terminal. What it did there is in its thread, and Codex reads it on its next turn." });
+    try { added = await this.terminalItems(was); } catch (e) {
+      log(`${this.ref}: the terminal's turns were not read: ${e.message}`);
+      if (this.rec.harness === "codex") this.item({ id: `host-terminal:${hex(6)}`, at: Date.now(), kind: "system", text: "Codex ran in a terminal, and what it did there could not be read here. It is in its thread, and Codex reads it on its next turn." });
+    }
+    for (const item of added) broadcast(this.ref, "item", { item });
+    // Only now: a host that dies before this reads the terminal again on its restart, and adds what is missing.
+    this.rec.terminal = null;
     log(`${this.ref}: the terminal closed (${added.length} items from it)`);
     if (this.rec.state !== "terminal") { this.persist(); return { ok: true, closed: true, added: added.length, agent: this.state() }; }
     this.setState("parked");
@@ -466,6 +474,30 @@ class Agent {
       if (!r.ok) log(`${this.ref}: held words did not go in: ${r.error?.message}`);
     }
     return { ok: true, closed: true, added: added.length, agent: this.state() };
+  }
+
+  /**
+   * What the terminal added to the session, appended to the history: a Claude session's transcript lines, or a Codex
+   * thread's turns (`codex resume` writes no journal: host/codex.mjs terminalTurns). Only what the history lacks, so
+   * reading it twice adds nothing.
+   */
+  async terminalItems(was) {
+    if (this.rec.harness !== "codex") return catchUp(this.hist, { home: this.h, id: this.wid, dir: this.dir, session: this.rec.session, cwd: was.cwd, harness: "claude" });
+    const cfg = readJson(codexLaunchFile(this.h, this.id));
+    const thread = this.rec.thread ?? cfg?.thread;
+    if (!cfg?.bin || !thread) throw new Error("no Codex launch file or thread");
+    const session = this.rec.session ?? cfg.session;
+    const items = await terminalTurns({ h: this.h, id: this.id, cfg: { ...cfg, session }, thread, since: was.at, has: (x) => this.hist.index.has(x), envFile: join(this.dir, "host-env.sh"), env: childEnv() });
+    return addNew(this.hist, session, items);
+  }
+
+  /** A host restarted while the terminal ran: the command that runs it is watched, and its end closes the terminal. */
+  watchTerminal() {
+    clearInterval(this.terminalWatch);
+    this.terminalWatch = setInterval(() => {
+      if (this.terminal && !pidAlive(this.terminal.pid, this.terminal.start)) void this.closeTerminal();
+    }, msEnv("ROLLCALL_HOST_TERMINAL_POLL_MS", 1000));
+    this.terminalWatch.unref?.();
   }
 
   onEvent(e) {
@@ -618,8 +650,12 @@ function agentFor(ref) {
   return a;
 }
 
-/** Every agent a host ran before, from disk: a process recorded running is gone with that host, so it is parked. */
+/**
+ * Every agent a host ran before, from disk: a process recorded running is gone with that host, so it is parked. One
+ * open in a terminal stays `terminal` while the command that runs it lives, and closes (closeTerminal) once it is gone.
+ */
 async function restore() {
+  const gone = []; // agents whose terminal closed while no host ran
   for (const h of store.listHomes()) {
     let ids = [];
     try { ids = readdirSync(join(store.homeDir(h), "workers")); } catch { continue; }
@@ -629,10 +665,12 @@ async function restore() {
       const a = new Agent(h, id === h ? null : id);
       agents.set(a.ref, a);
       if (rec.state === "terminal") {
-        // The command that ran the terminal held its connection to the host that died: nothing tells this one it closed.
-        a.item({ id: `host-restart:${hex(6)}`, at: Date.now(), kind: "system", text: "The host restarted while this agent was open in a terminal. A message brings it back here." });
-        a.rec.state = "parked";
-        a.rec.parkedAt = Date.now();
+        // The command that runs the terminal held its connection to the host that died, so nothing tells this one it
+        // closed: while that command runs, it is watched; once it is gone, what the terminal added is read now.
+        const t = rec.terminal ?? {};
+        a.terminal = { at: t.at ?? rec.terminalAt ?? rec.since ?? 0, cwd: t.cwd ?? readJson(launchOf(h, a.id, rec.harness))?.cwd ?? null, pid: t.pid ?? null, start: t.start ?? null };
+        if (sameProcess(a.terminal.pid, a.terminal.start)) { a.watchTerminal(); log(`${a.ref}: still open in a terminal (pid ${a.terminal.pid}); watching it`); }
+        else gone.push(a);
       }
       if (rec.state === "running" || rec.state === "idle") {
         // A Codex agent's app server outlives a host killed outright: it goes, by the pid and socket on the record.
@@ -645,6 +683,9 @@ async function restore() {
       a.persist();
     }
   }
+  // Read in the background, so the host answers meanwhile: until then the agent shows `terminal` and holds words,
+  // which go in after the terminal's turns.
+  for (const a of gone) void a.closeTerminal().catch((e) => log(`${a.ref}: the terminal did not close: ${e.message}`));
 }
 
 // ---------------------------------------------------------------- the socket
@@ -691,7 +732,7 @@ async function handle(req, c) {
       // The terminal escape hatch. `open` is a front end's: the argv that runs it (`rollcall open <ref>`), as `api
       // attach` gives tmux's. `terminal` is that command's own call, held for as long as the terminal runs.
       case "open": { const a = need(); return { ok: true, argv: [process.execPath, BIN, "open", a.ref], ref: a.ref, agent: a.state() }; }
-      case "terminal": return await need().openTerminal(c);
+      case "terminal": return await need().openTerminal(c, { pid: req.pid });
       case "terminal-done": return await need().closeTerminal();
       case "park": { const a = need(); return { ok: true, parked: a.park() }; }
       case "stop": { const a = need(); return { ok: true, stopped: a.stop() }; }

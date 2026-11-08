@@ -16,7 +16,7 @@ export const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")
 export const lines = (f) => { try { return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 
 /** A sandbox with home alpha and task t1 (worktree: the repo), a fake Claude launch file, and a host to start. */
-export function setup(t, { env = {} } = {}) {
+export function setup(t, { env = {}, codexThreads = false } = {}) {
   const sb = sandbox(t);
   const h = "alpha";
   const dir = join(sb.home, "_supervisors", h, "workers", "t1");
@@ -42,11 +42,13 @@ export function setup(t, { env = {} } = {}) {
     return cfg;
   };
   const codexLog = join(sb.root, "fake-codex.jsonl");
-  const hostEnv = { ...sb.env, FAKE_CLAUDE_LOG: log, FAKE_CODEX_LOG: codexLog, ROLLCALL_SNAPSHOTS: "0", CLAUDE_CONFIG_DIR: claudeDir, ...env };
+  // codexThreads: the fake Codex saves its threads in a folder, so a terminal's `codex resume` and the host share them.
+  const threads = codexThreads ? join(sb.root, "codex-threads") : null;
+  const hostEnv = { ...sb.env, FAKE_CLAUDE_LOG: log, FAKE_CODEX_LOG: codexLog, ROLLCALL_SNAPSHOTS: "0", CLAUDE_CONFIG_DIR: claudeDir, ...(threads ? { FAKE_CODEX_THREADS: threads } : {}), ...env };
   const procs = [];
   const sock = socketFor(sb.home);
   const x = {
-    sb, h, dir, log, sock, claudeDir, task, launch, codexLaunch,
+    sb, h, dir, log, sock, claudeDir, task, launch, codexLaunch, hostEnv,
     codexCompat: () => readJson(join(dir, "codex.json")),
     codexFake: () => lines(codexLog),
     agent: () => readJson(join(dir, "agent.json")),

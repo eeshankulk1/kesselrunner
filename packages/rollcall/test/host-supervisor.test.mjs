@@ -1,7 +1,9 @@
 // Done when: a supervisor runs in the agent host like a task worker (its own history, ref the bare home), a question it
 // asks that relays a task's question is answered once from either side, the supervisor's tools (start, tell, wait,
 // interrupt, read the chat) reach a hosted worker with no tmux call at all, and the terminal escape hatch shows the
-// agent as `terminal`, holds words sent meanwhile, and picks up the terminal's turns into the history once it closes.
+// agent as `terminal`, holds words sent meanwhile, and picks up the terminal's turns into the history once it closes:
+// a Claude session's from its transcript, a Codex thread's from the thread itself; a host restarted meanwhile watches
+// the terminal while it runs, or reads it at once when it is gone, with no turn lost or doubled.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -10,6 +12,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BIN, until } from "./helpers.mjs";
 import { FAKE, lines, readJson, setup } from "./host-helpers.mjs";
+
+const ref = "alpha:t1";
 
 const QUESTIONS = [{ question: "Bold title or a subtitle?", header: "yoda Style", multiSelect: false, options: [{ label: "Bold", description: "heavier" }, { label: "Subtitle", description: "a line" }] }];
 
@@ -125,6 +129,129 @@ test("host escape hatch: terminal state, words held, the terminal's turns join t
   const page = await c.call("history", { ref: "alpha:t1" });
   assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
   await until(() => x.agent()?.state === "idle");
+});
+
+/** `rollcall open alpha:t1` in the background, as a terminal runs it, with the host's env; `exited` resolves to its code. */
+function openTerminal(t, x, env = {}) {
+  const term = spawn(process.execPath, [BIN, "open", ref], { env: { ...x.hostEnv, ...env }, stdio: "ignore" });
+  term.exited = new Promise((r) => term.on("exit", (code) => r(code)));
+  t.after(() => { try { term.kill("SIGKILL"); } catch {} });
+  return term;
+}
+
+/** The history's item events whose text is `text`. */
+const texts = (x, text) => x.history().filter((e) => e.ev === "item" && e.item.text === text);
+
+/** A hosted Claude agent that ran one turn ("before"), now idle. */
+async function ranOnce(x, c) {
+  assert.equal((await c.call("start", { ref })).ok, true);
+  await c.call("say", { ref, text: "before" });
+  await until(() => x.agent()?.state === "idle" && texts(x, "done: before").length);
+}
+
+test("host escape hatch: a Codex terminal's turns join the history from the thread, once, after the host's own", async (t) => {
+  const x = setup(t, { codexThreads: true });
+  const cfg = x.codexLaunch();
+  await x.startHost();
+  const c = await x.client();
+  assert.equal((await c.call("start", { ref, harness: "codex" })).ok, true);
+  await c.call("say", { ref, text: "before" });
+  await until(() => x.agent()?.state === "idle" && texts(x, "done: before").length);
+  const term = openTerminal(t, x, { FAKE_CODEX_TERMINAL_TURN: "from the terminal", FAKE_CODEX_TERMINAL_MS: "800" });
+  await until(() => x.agent()?.state === "terminal");
+  const cli = await until(() => x.codexFake().find((l) => l.argv?.[0] === "resume"));
+  assert.equal(cli.argv[1], x.codexCompat().thread, "the real CLI on the agent's own thread");
+  assert.equal(await term.exited, 0);
+  await until(() => x.agent()?.state === "parked");
+  // The terminal's turn is in the history, as items with the session's prefix; the host's own turn is not read again.
+  const user = texts(x, "from the terminal");
+  const reply = texts(x, "terminal: from the terminal");
+  assert.equal(user.length, 1);
+  assert.equal(reply.length, 1);
+  assert.ok(reply[0].item.id.startsWith(`${cfg.session.slice(0, 8)}:tu-2:`), reply[0].item.id);
+  assert.equal(texts(x, "done: before").length, 1, "the host's own turn is not read back");
+  assert.ok(!x.history().some((e) => e.ev === "item" && e.item.kind === "system" && /Codex ran in a terminal/.test(e.item.text)), "no note in place of the turns");
+  // A message wakes it on the same thread; the page reads in order, and no id appears twice.
+  assert.equal((await c.call("say", { ref, text: "after" })).how, "resumed");
+  await until(() => texts(x, "done: after").length);
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "after"]);
+  const ids = page.items.map((i) => i.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("host escape hatch: a host restarted while the terminal runs watches it, and reads its turns when it ends", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  const h1 = await x.startHost();
+  let c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  assert.equal(x.agent().terminal.pid, term.pid, "the command that runs the terminal, on the record");
+  h1.kill("SIGKILL");
+  await h1.exited;
+  await x.startHost();
+  c = await x.client();
+  // Still open: it stays `terminal`, and words wait for it.
+  assert.equal((await c.call("state", { ref })).agent.state, "terminal");
+  assert.equal((await c.call("say", { ref, text: "while open" })).how, "held");
+  assert.equal(texts(x, "terminal: from the terminal").length, 0);
+  // The terminal ends (its window closed): the host sees its command go, reads its turn, and the held words go in.
+  term.kill("SIGKILL");
+  await until(() => texts(x, "done: while open").length, { timeout: 8000 });
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
+});
+
+test("host escape hatch: a terminal that ends on its own after a restart tells the new host, which reads it once", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "2500" } });
+  x.launch();
+  const h1 = await x.startHost();
+  let c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  h1.kill("SIGKILL");
+  await h1.exited;
+  await x.startHost();
+  c = await x.client();
+  assert.equal((await c.call("state", { ref })).agent.state, "terminal");
+  // `rollcall open` waits on the CLI, then calls terminal-done on the host running now; the watch adds nothing more.
+  assert.equal(await term.exited, 0);
+  await until(() => x.agent()?.state === "parked");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+});
+
+test("host escape hatch: a terminal that closed while no host ran is read at the host's start, once", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  const h1 = await x.startHost();
+  let c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  h1.kill("SIGKILL");
+  await h1.exited;
+  term.kill("SIGKILL");
+  await term.exited;
+  const h2 = await x.startHost();
+  c = await x.client();
+  await until(() => x.agent()?.state === "parked" && !x.agent().terminal);
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+  assert.ok(!x.history().some((e) => e.ev === "item" && e.item.kind === "system" && /terminal/.test(e.item.text)), "its turns, not a note");
+  // A second restart reads nothing again.
+  const before = x.history().length;
+  await c.call("shutdown");
+  await h2.exited;
+  await x.startHost();
+  c = await x.client();
+  assert.equal((await c.call("state", { ref })).agent.state, "parked");
+  assert.equal(x.history().length, before);
 });
 
 test("host supervisor tools: start, tell, wait, interrupt and chat reach a hosted worker with no tmux call", async (t) => {

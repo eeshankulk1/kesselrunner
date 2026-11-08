@@ -126,13 +126,15 @@ export function agentRecord(h, id) {
  * `rollcall open <ref>`: the terminal escape hatch. The real CLI on the agent's own session (`claude --resume`, `codex
  * resume`), in this terminal. The host ends its process first and shows the agent as `terminal` while this runs; when
  * the CLI exits, the host reads what the session added into the history, and words held meanwhile wake the agent.
+ * When the host restarted meanwhile, the one running now hears it (and watches this process until then).
  */
 export async function openCommand([ref] = [], { say = (s) => process.stderr.write(`${s}\n`) } = {}) {
   if (!ref || ref.startsWith("-")) { say("usage: rollcall open <supervisor>[:<task>]"); return 2; }
   let c;
   try { c = await ensureHost(); } catch (e) { say(`rollcall: ${e.message}`); return 1; }
   try {
-    const r = await c.call("terminal", { ref });
+    // Its pid lets a host that restarts meanwhile watch for the end of this command (it waits on the CLI).
+    const r = await c.call("terminal", { ref, pid: process.pid });
     if (!r.ok) { say(`rollcall: ${r.error?.message ?? "the host did not open it"}`); return 1; }
     const env = { ...process.env };
     for (const k of [...(r.unset ?? []), "ROLLCALL_TASK"]) delete env[k];
@@ -145,7 +147,9 @@ export async function openCommand([ref] = [], { say = (s) => process.stderr.writ
       child.on("exit", (n, sig) => resolve(n ?? (sig ? 1 : 0)));
     });
     process.off("SIGINT", quiet);
-    const done = await c.call("terminal-done", { ref });
+    // The host that opened it may have restarted meanwhile: the one running now reads the terminal's turns.
+    let done = c.socket.destroyed ? { ok: false } : await c.call("terminal-done", { ref });
+    if (!done.ok && c.socket.destroyed) done = await call("terminal-done", { ref });
     if (done.ok && done.added) say(`rollcall: ${done.added} item${done.added === 1 ? "" : "s"} from the terminal joined ${ref}'s chat`);
     return code;
   } finally { c.close(); }
