@@ -166,6 +166,7 @@ Agents run these through their shell tool. Each command works out which session 
 | `rollcall back <supervisor>` / `watch <supervisor> [--once]` | `back` is what Enter runs in a parked supervisor's tab (takes it out of parking and writes the script that resumes it; exit 1 when news from its tasks brought it back first). `watch` is the home's watcher (see The watcher), which rollcall starts itself; `--once` makes one look and ends, for a check by hand. Neither is one you need to run |
 | `rollcall statusline` / `worker-hook <home> <task> <event>` | Claude Code's status line command, and a worker's launch hooks. Both fail open |
 | `rollcall claude-worker <home> [<task>]` / `_claude-send <socket>` | A Claude worker's process (or, with no task, the supervisor's), which its launch script runs: Claude Code in the chat view (its stream mode, which front ends read with `api conversation`) or the real CLI in the terminal view, switching between them at a quiet point; and the one-shot sender that puts rollcall's words, interrupts, answers and switches (a JSON request on stdin) through its socket. Neither is one you need to run; `ROLLCALL_STREAM=0` starts the plain CLI instead, `ROLLCALL_WORKER_VIEW=chat\|terminal` picks the view a new worker starts in (default: the chat while a front end follows rollcall), Codex workers' too |
+| `rollcall host [run\|status\|stop]` / `_host-call` | The agent host: one long-lived process per store that runs hosted task workers as its children and serves front ends over a socket (API.md, "The agent host"). Clients start it on demand; `status` lists its agents, `stop` parks them and ends it |
 | `rollcall codex-worker <home> <task>` / `_codex-send <socket> <thread> say\|interrupt` | A Codex worker's process, which its launch script runs (see Harnesses), and the one-shot sender that puts rollcall's words (stdin) into its thread or stops its turn. Neither is one you need to run |
 
 `-C <dir>` before any command runs it as if started in `<dir>`.
@@ -362,6 +363,8 @@ Old events and long-dead sessions are pruned at session start. This is coordinat
 | `ROLLCALL_SETUP_MINUTES` | `30` | The time limit of a worktree's setup |
 | `ROLLCALL_RUN_SETTLE_MS` | `1500` | How long `run start` waits before it checks the action is still alive |
 | `ROLLCALL_STREAM` | on | `0` starts a Claude worker as the plain CLI with no `claude-worker` process around it (no chat view), and a Codex worker in Codex's own screen |
+| `ROLLCALL_HOST` | off | `1` starts new Claude task workers in the agent host (`rollcall host`) instead of a tmux window; a resumed session goes back where it ran |
+| `ROLLCALL_HOST_PARK_MS` | 3600000 | How long a hosted agent sits idle before the host parks it (stops its process; the next message resumes it) |
 | `ROLLCALL_WORKER_VIEW` | unset | `chat` or `terminal`: the view a new Claude worker or the Falcon starts in; unset means the chat while a front end follows rollcall (`api stream --client`), else the terminal. A resume keeps its last view |
 | `ROLLCALL_CLAUDE_CONTRACT` | unset | Test only: `live` makes `test/claude-contract.test.mjs` run one real Haiku turn; `0` skips that test |
 

@@ -15,7 +15,7 @@ rollcall api conversation <ref> [--before <cursor>] [--limit <n>] [--follow] [--
 
 ## Rules
 
-- **No daemon.** rollcall runs no server. A stream is a process the front end starts and stops. A front end that needs a server (to reach a phone, say) runs its own on top of these commands.
+- **One daemon: the agent host.** `rollcall host` is the one long-lived process rollcall runs (see The agent host): it owns hosted agents and serves their state and conversation over a socket. Everything else stays a command: a stream is a process the front end starts and stops, and a front end that needs a server of its own (to reach a phone, say) runs it on top of these commands or the host's socket.
 - **JSON out.** Every verb prints JSON on stdout. `snapshot` prints one line; each stream line is one JSON object; `version`, `do` and `attach` print indented JSON.
 - **One error shape.** A refusal prints `{ "ok": false, "error": { "code": "...", "message": "..." } }` and exits 1. A usage error (an unknown verb, a missing argument, a payload that is not JSON) exits 2 with the same shape.
 - **Times** are Unix milliseconds. **Paths** are absolute.
@@ -414,6 +414,37 @@ A Codex worker (`rollcall codex-worker <home> <task>`) has the same two views ov
 
 **One question, one place.** In the chat, a worker's question is its task's `question` card, wherever it shows (the task's chat, the Falcon's chat, an inbox), and the Falcon's relay of it is a `prompt` with `relays`, never a second card. In the terminal, the CLI's own picker shows it, and a front end draws no card over a pane that shows that picker. Answering either closes the other.
 
+## The agent host
+
+Behind `ROLLCALL_HOST=1` (in settings `env`; off by default while it is built), new Claude task workers run in the agent host instead of a tmux window: `rollcall host`, one long-lived process per store (`ROLLCALL_HOME`), with its lock, `host.json` and log in `<store>/_host/` and its socket at `rollcall-host-<8 hex of the store path's sha256>.sock` in the system temp folder. A client that needs it starts it (`host/client.mjs ensureHost`), detached, so it outlives the client. The design and its later slices (supervisors, Codex, the terminal escape hatch): `docs/plans/2026-11-08-agent-host.md`.
+
+**What changes for the commands above.** A hosted task's snapshot reads as a chat-view worker (`view: "chat"`, its first open request as `prompt`); `task.tell`, `prompt.answer`, `task.interrupt`, `worker.set` and `task.stop` reach it as before; `task.switch` is `refused` (no terminal view until the escape hatch); `attach` has no window to show. `api conversation <ref>` reads the task's one history from the host, across every session; `--follow` prints the same `page`, `item`, `text`, `prompt` and `heartbeat` lines, needs no `reset` for a new session, and prints `reset` then `page` only after the host restarted.
+
+**The socket.** Newline-delimited JSON. A call is `{ "id", "op", ... }`; its answer `{ "id", "ok": true, ... }` or `{ "id", "ok": false, "error": { "code", "message" } }`.
+
+| `op` | Payload | Answer |
+|---|---|---|
+| `hello` | | `pid`, `version`, `interface` |
+| `list` | | `agents` |
+| `state` | `ref` | `agent` |
+| `start` | `ref`, optional `prompt`, `restart` | `agent`, `already` |
+| `say` | `ref`, `text`, optional `attachments` (paths, ten at most), `from` (`owner`, `rollcall`), `uuid` | `how` (`sent`, `queued`, `resumed`), `uuid` (the item's id) |
+| `interrupt` | `ref` | `interrupted` |
+| `answer` | `request`, optional `ref`, `by`, and by kind: `allow`, `why`, `always`, `mode`; `answers` | `answered`, `how` (`answered`, or `words` for a request whose process is gone) |
+| `set` | `ref`, `model` and/or `mode` (`default`, `acceptEdits`, `plan`) | `set` |
+| `park`, `stop` | `ref` | `parked`, `stopped` |
+| `history` | `ref`, optional `before`, `limit` (200) | `items`, `cursor`, `more`, `session`, `harness`, `agent`, `requests` |
+| `subscribe` | optional `refs` (every agent when absent) | `subscribed`, `agents`; then events on the same connection |
+| `shutdown` | | the host parks every agent and exits |
+
+**An agent.** `{ ref, home, task, harness, state, send, session, since, turnAt, parkedAt, model, mode, pid, requests, queued }`. `state` is `running` (a turn runs), `idle` (its process is up, no turn), `parked` (no process: the history and requests stay) or `stopped`. `send` says what a message does now: `join` (goes into the running turn), `start` (starts a turn) or `wake` (resumes the session, then delivers). An idle agent parks after `ROLLCALL_HOST_PARK_MS` (an hour), never with a request open or words waiting. The host's record of it is `agent.json` in the task's worker folder; the history is `history.jsonl` beside it.
+
+**Events.** `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }`: `state` (`agent`), `item` (`item`: new, or replacing the one with its `id`; words sent come first as a `queued: true` user item with the id `say` returned), `text` (`id`, `kind`, `append`, `parent`: streamed text on an item not finished yet), `request` (`request`), `closed` (`id`, `how`: `answered`, `cancelled` or `words`; `by`), `session` (`session`, `how`: `new` or `resume`).
+
+**Requests.** A question or permission prompt is a request: the prompt shape above plus `ref` and `session`, with an id of the host's own (`rq-...`) that survives a restart. The first answer wins; any later one hears `already-answered`. Claude Code cancelling it closes it (`cancelled`). An answer to a request whose process is gone (a crash, a host restart) wakes the agent on its session and delivers the answer as the owner's words (`how: "words"`), so the owner never meets a dead end.
+
+**Restart.** The host rebuilds itself from the `agent.json` files. An agent whose process went with the old host is `parked`, with a `system` item saying so; its open requests stay open. Nothing starts by itself.
+
 ## Several front ends at once
 
 - **The first answer wins.** `question.answer` settles under the task's lock. Of two surfaces answering at once, one wins; the other hears `already-answered`. An app answering after a pick in the Falcon's picker hears `already-answered` too; a front end that holds an id from an older question may hear `no-question`, and reads `answered` from the next snapshot. A pick in the Falcon's picker for a question a front end answered first goes nowhere, and the supervisor hears that it was answered already and from where.
@@ -428,6 +459,7 @@ A Codex worker (`rollcall codex-worker <home> <task>`) has the same two views ov
 
 ## Contract tests
 
+- `test/host.test.mjs` (this package): the agent host against a stand-in Claude Code: start, words sent and queued, a request answered from two clients with the first winning, interrupt, park on idle and wake on a message, one history across a session change with earlier sessions backfilled, a restart keeping requests and history, the push lines, one host per store, and a task worker started through `ROLLCALL_HOST=1` driven by the old seam.
 - `test/conversation.test.mjs` (this package): transcripts folded into items, pages and cursors, the live overlay and a follow's lines.
 - `test/claude-worker.test.mjs` (this package): the stream-mode worker against a stand-in Claude Code: words in, queued words, prompts and their answers, interrupt, model and mode, the switch both ways, and the actions behind them.
 - `test/codex-chat.test.mjs` (this package): Codex items mapped onto the chat's, the journal and its history, and a Codex worker in the chat view against a stand-in Codex: words sent and queued, an approval prompt and its answer, the model for the next turn, the switch both ways, an interrupt, a resume that writes the journal from history. `test/codex-contract.test.mjs` checks the installed Codex still has every message and field this uses.

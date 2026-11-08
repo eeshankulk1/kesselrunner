@@ -15,7 +15,9 @@ protocol directly (no Agent SDK package: rollcall stays dependency-free). Codex 
 ## Slices
 
 1. **This one.** The host, its agents (task workers only), their state, history and requests, the push socket, and
-   the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`.
+   the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`. Built so far: all of it for Claude Code
+   workers. Still to build: the Codex runtime (`host/codex.mjs`, below); until then a Codex task starts in tmux as
+   before whatever the gate says.
 2. Supervisors in the host, and the supervisor's tools (start, tell, wait, interrupt, read the chat) instead of typing
    into tmux.
 3. The terminal escape hatch: "open in terminal" runs the real CLI on the agent's session; the host shows it busy until
@@ -140,7 +142,7 @@ Newline-delimited JSON both ways. A call is `{ "id": <any>, "op": "...", ... }`;
 | `hello` | | `pid`, `version`, `interface` |
 | `list` | | `agents`: each agent's state |
 | `state` | `ref` | `agent` |
-| `start` | `ref`, optional `prompt` (text), `resume` | `agent`; reads `claude-launch.json` / `codex-launch.json` |
+| `start` | `ref`, optional `prompt` (text), `restart` | `agent`; reads `claude-launch.json`. With `restart` (what `launch` sends) a launch file for another session replaces the running process, and one for the same session gives its first prompt as words |
 | `say` | `ref`, `text`, optional `attachments` (paths), `from` (`owner`, `rollcall`), `uuid` | `how` (`sent`, `queued`, `resumed`), `uuid` |
 | `interrupt` | `ref` | `interrupted` |
 | `answer` | `request`, and by kind: `allow`, `why`, `always`, `mode`; `answers` | `answered`, `how` |
