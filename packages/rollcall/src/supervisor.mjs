@@ -807,9 +807,10 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // carries an agent_id: taken for the worker's, it turned the task needs-you over a question no one asked.
       if (p.agent_id) return null;
       // While the owner watches this window, the question opens right here, unless they are away: then it goes on the
-      // task's record, where they find it when they are back.
+      // task's record, where they find it when they are back. A terminal that only shows it (the Cockpit app keeps one
+      // on each task) is not the owner watching.
       const away = isAway();
-      if (!away && tmux.viewed(h, id)) return null;
+      if (!away && tmux.watched(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);

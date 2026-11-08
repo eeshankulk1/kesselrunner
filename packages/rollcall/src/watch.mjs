@@ -343,11 +343,11 @@ function shipMoved(t, w, prAt, now) {
 
 /**
  * A dialog open in task `t`'s live worker `w` is news once per dialog (`seen` keeps which), since only the
- * owner answers it, unless a terminal shows that worker: the owner sees it there, and it is news once they
- * leave it open. Returns whether it queued news.
+ * owner answers it, unless the owner is looking at that worker (a focused terminal shows it): they see it there,
+ * and it is news once they leave it open. Returns whether it queued news.
  */
 function promptDue(h, t, w, seen) {
-  if (!isOpen(t) || !w?.alive || !w.dialog || seen[`prompt:${t.id}`] === w.dialog || tmux.viewed(h, t.id)) return false;
+  if (!isOpen(t) || !w?.alive || !w.dialog || seen[`prompt:${t.id}`] === w.dialog || tmux.watched(h, t.id)) return false;
   seen[`prompt:${t.id}`] = w.dialog;
   store.enqueueWake(h, { task: t.id, kind: "prompt" });
   return true;

@@ -94,13 +94,19 @@ export function promptAuthor(file, text, since) {
 /** A call as its prompt shows it: { tool, what (the command, file or address, one line), why (its description) }. */
 export function describe({ name, input }) {
   const one = (v, n) => (typeof v === "string" && v.trim() ? store.clip(store.oneLine(v), n) : null);
-  const what = ["command", "file_path", "notebook_path", "path", "url", "pattern", "query"].map((k) => one(input?.[k], 240)).find(Boolean) ?? null;
+  // A question tool's dialog says what it asks: its first question.
+  const asks = Array.isArray(input?.questions) ? one(input.questions[0]?.question, 240) : null;
+  const what = asks ?? ["command", "file_path", "notebook_path", "path", "url", "pattern", "query"].map((k) => one(input?.[k], 240)).find(Boolean) ?? null;
   return { tool: name, what, why: one(input?.description, 120) };
 }
+
+const QUESTION_TOOLS = new Set(["AskUserQuestion", "request_user_input"]);
 
 /** What a worker's open dialog asks (workerState's `asks`), in a few words: 'approval for Bash: Copy the icon (`cp a b`)'. */
 export function asksText(asks) {
   const quoted = asks?.message ? ` ("${store.clip(store.oneLine(asks.message), 160)}")` : "";
+  // The worker's own question, left open in its window: the owner answers it there, not approves it.
+  if (QUESTION_TOOLS.has(asks?.tool)) return `a question for you${asks.what ? ` ("${store.clip(asks.what, 160)}")` : ""}`;
   if (asks?.tool) return `approval for ${asks.tool}${asks.why ? `: ${asks.why}` : ""}${asks.what ? ` (\`${asks.what}\`)` : ""}`;
   if (asks?.type === "elicitation_dialog") return `a question from one of its tools${quoted}`;
   return `a permission prompt${quoted}`;
