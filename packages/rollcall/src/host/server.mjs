@@ -270,6 +270,8 @@ class Agent {
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
+    // A supervisor's prompt hook tells the owner's lines from rollcall's by this note, as a chat-view supervisor's.
+    if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
     if (this.rec.state === "terminal") {
       // Open in a terminal: the words wait, and go in when the terminal closes (closeTerminal).
       const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };

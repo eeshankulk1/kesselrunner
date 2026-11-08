@@ -6,11 +6,27 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pidAlive } from "./proc.mjs";
 import { BIN, P, currentSession } from "./session.mjs";
 import * as store from "./store.mjs";
 import { noBrowser, statusLine } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
 import { VIEWS, defaultView, launchFile, readJson, streamOn, writeJson } from "./claude/live.mjs";
+import { agentRecord, callSync, hostOn } from "./host/client.mjs";
+
+/**
+ * Whether supervisor `h` runs in the agent host (host/server.mjs, ref the bare home): the gate is on
+ * (ROLLCALL_HOST=1), or the host ran it before. Then it has no tmux window: it starts, parks and comes back through
+ * the host, and the terminal is the escape hatch (`rollcall open <h>`).
+ */
+export const supervisorHosted = (h) => hostOn() || !!agentRecord(h, null)?.state;
+
+/** The host's state for supervisor `h` (agent.json): running, idle, parked, stopped, terminal; or null. */
+export function hostedSupervisor(h) {
+  const a = agentRecord(h, null);
+  if (!a?.state) return null;
+  return { ...a, state: a.state === "stopped" || pidAlive(a.host) ? a.state : "parked" };
+}
 
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
@@ -145,7 +161,7 @@ export function writeWindow(h, back, { prompt = null } = {}) {
   let run = back.resume
     ? `${claude} --resume ${q(back.session)} --settings ${q(settings)}${first}`
     : `${claude} --session-id ${q(back.session)} --settings ${q(settings)} -n ${q(h)} ${q(`/supervisor ${h}`)}`;
-  if (streamOn()) {
+  if (streamOn() || supervisorHosted(h)) {
     const text = back.resume ? prompt : `/supervisor ${h}`;
     if (text && !back.resume) writeFileSync(promptFile, text);
     const was = back.resume ? readJson(launchFile(h, null)) : null;
@@ -179,6 +195,7 @@ const shellRun = (script) => [process.env.SHELL || "/bin/zsh", "-lic", `. ${q(sc
 
 /** Starts `back` in the supervisor's window, first in its home's session (made when there is none). Returns tmux's { ok, err }. */
 export function startWindow(h, back, opts = {}) {
+  if (supervisorHosted(h)) return startHosted(h, back, opts);
   const script = writeWindow(h, back, opts);
   const r = tmux.runInWindow(h, h, back.cwd, shellRun(script), { first: true });
   if (r.ok) tmux.setTabs(h, new Map([[h, tmux.supervisorTab(h)]]));
@@ -191,6 +208,10 @@ export function startWindow(h, back, opts = {}) {
  * `idle` is how long its conversation had been quiet; `open` how many tasks are open. Returns tmux's { ok, err }.
  */
 export function parkWindow(h, { idle, open }) {
+  if (supervisorHosted(h)) {
+    const r = callSync("park", { ref: h });
+    return r.ok && r.parked ? { ok: true } : { ok: false, err: r.error?.message ?? "the agent host did not park it" };
+  }
   const parked = join(store.homeDir(h), "parked.sh");
   const m = Math.max(1, Math.round(idle / 60_000));
   const quiet = m < 60 ? `${m} minutes` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
@@ -208,4 +229,14 @@ export function parkWindow(h, { idle, open }) {
   const r = tmux.runInWindow(h, h, cwd && existsSync(cwd) ? cwd : homedir(), shellRun(parked), { first: true });
   if (r.ok) tmux.setTabs(h, new Map([[h, tmux.supervisorTab(h, { parked: true })]]));
   return r;
+}
+
+/**
+ * Starts `back` in the agent host instead of a window: the same launch file the stream worker reads, then the host's
+ * `start` (a launch for another session replaces a running one, as a handoff needs). Returns { ok, err }.
+ */
+function startHosted(h, back, opts = {}) {
+  writeWindow(h, back, opts);
+  const r = callSync("start", { ref: h, restart: true, harness: "claude" });
+  return r.ok ? { ok: true, hosted: true } : { ok: false, err: r.error?.message ?? "the agent host did not start the supervisor" };
 }

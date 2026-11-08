@@ -235,7 +235,8 @@ export function workerState(t, now = Date.now()) {
   // A session the agent host runs (host/server.mjs) has no window: its state is the host's (agent.json). With the
   // host gone its process went too, so it reads as parked, and a message brings it back.
   const hosted = s.hosted ? hostedState(t) : null;
-  const w = hosted ? { alive: hosted === "running" || hosted === "idle" } : tmux.windowOf(t.home, t.id);
+  // Open in a terminal (the escape hatch) it is alive: the real CLI runs its session, and its hooks say busy or idle.
+  const w = hosted ? { alive: hosted === "running" || hosted === "idle" || hosted === "terminal" } : tmux.windowOf(t.home, t.id);
   const r = running(store.readStatus(t.home, t.id));
   const idle = r.turn?.ev === "idle";
   let dialog = null;
@@ -245,7 +246,7 @@ export function workerState(t, now = Date.now()) {
     asks: w?.alive && dialog ? dialogAsks(t.home, t.id) : null,
     // Parked: rollcall stopped it while it sat idle. Stopped: on purpose (start.mjs --stop), and no one resumes it unasked.
     session: s.id, harness: sessionHarness(s), legacy: false, parked: hosted ? hosted === "parked" : r.held === "parked" && !w?.alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
-    stopped: hosted ? hosted === "stopped" : r.held === "stopped", hosted: !!hosted,
+    stopped: hosted ? hosted === "stopped" : r.held === "stopped", hosted: !!hosted, terminal: hosted === "terminal",
     bg: idle ? r.turn.bg ?? null : null, last: idle ? r.turn.last ?? null : null,
     // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones.
     mode: r.launch?.mode ?? null, model: r.launch?.model ?? null, effort: r.launch?.effort ?? null,
@@ -287,7 +288,7 @@ export function closing(t, w, now = Date.now()) {
   const at = closesAt(w, now);
   if (at === null) return null;
   if (at > now) return `closes in ${Math.ceil((at - now) / 60_000)}m`;
-  return w?.alive && tmux.viewed(t.home, t.id) ? "closes when you leave it" : "closing";
+  return w?.alive && !w.hosted && tmux.viewed(t.home, t.id) ? "closes when you leave it" : "closing";
 }
 
 /**
@@ -588,7 +589,7 @@ export function deliverWords(t, text, { record, mode = null }) {
 function whyHeld(t, w) {
   if (w.dialog) return `a prompt is open in its worker: your words go in once it closes (/attach ${t.id} to answer it)`;
   if (!w.started) return "its worker is still starting: your words go in once it runs";
-  return Date.now() - tmux.lastUsed(t.home, t.id) < keyQuietMs() ? "you are using its window: your words go in once it is quiet" : "your words go in shortly";
+  return !w.hosted && Date.now() - tmux.lastUsed(t.home, t.id) < keyQuietMs() ? "you are using its window: your words go in once it is quiet" : "your words go in shortly";
 }
 
 // ---------------------------------------------------------------- the supervisor's messages: inbox and doorbell
@@ -843,7 +844,7 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // on each task) is not the owner watching.
       const away = isAway();
       // A worker in the chat view has no picker of its own on any screen: its question is always the task's.
-      if (!away && tmux.watched(h, id) && !inChat(h, id)) return null;
+      if (!away && !inChat(h, id) && tmux.watched(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);

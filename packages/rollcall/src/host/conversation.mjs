@@ -2,14 +2,16 @@
 // --follow the host's push events printed as the same lines (`page`, `item`, `text`, `prompt`, `heartbeat`, `error`)
 // a follow of a stream worker printed. The history spans every session, so a new session needs no `reset`.
 import * as store from "../store.mjs";
-import { call, ensureHost } from "./client.mjs";
+import { agentRecord, call, ensureHost } from "./client.mjs";
 
 const INTERFACE = 1;
 
 /** Whether `ref` names a task whose worker the host runs (its last session is hosted). */
 export function hostedRef(ref) {
-  const m = /^([a-z][a-z0-9-]{0,23}):([A-Za-z0-9._-]+)$/.exec(String(ref ?? ""));
+  const m = /^([a-z][a-z0-9-]{0,23})(?::([A-Za-z0-9._-]+))?$/.exec(String(ref ?? ""));
   if (!m) return false;
+  // A supervisor the host runs (or ran): its own history.
+  if (!m[2]) return !!agentRecord(m[1], null)?.state;
   return !!store.readTask(m[1], m[2])?.sessions?.at(-1)?.hosted;
 }
 

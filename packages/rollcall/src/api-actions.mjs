@@ -12,7 +12,9 @@ import { allowAll, answerHeld, setAway } from "./away.mjs";
 import { parseRef, refOf, taskView } from "./api.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
-import { deliverWords, holderOf, label } from "./supervisor.mjs";
+import { deliverWords, holderOf, hostedTask, label, workerState } from "./supervisor.mjs";
+import { callSync } from "./host/client.mjs";
+import { supervisorHosted } from "./window.mjs";
 import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
 import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
 import { answerDecision, recordWords, taskCommand } from "./task.mjs";
@@ -218,6 +220,11 @@ export const ACTIONS = {
     cli: "start.mjs <task> --interrupt",
     run(p) {
       const x = targetOf(p);
+      // A worker or supervisor the agent host runs has no window: the host stops its turn.
+      if (x.t ? hostedTask(x.t) : supervisorHosted(x.h)) {
+        const r = callSync("interrupt", { ref: x.t ? `${x.h}:${x.id}` : x.h });
+        return r.ok ? { interrupted: r.interrupted === true } : { interrupted: false, why: r.error?.message };
+      }
       const w = tmux.windowOf(x.h, x.id ?? x.h);
       if (!w?.alive) return { interrupted: false, why: "its worker is not running" };
       if (!x.t) return { interrupted: live.inChat(x.h, null) ? live.send(x.h, null, { op: "interrupt" }).ok === true : tmux.interrupt(x.h, x.h) };
@@ -293,7 +300,7 @@ export const ACTIONS = {
     cli: "start.mjs <task> --stop",
     run(p) {
       const t = taskOf(p);
-      if (!tmux.windowOf(t.home, t.id)) return { stopped: false, why: "it has no worker window", view: fresh(t) };
+      if (!hostedTask(t) && !tmux.windowOf(t.home, t.id)) return { stopped: false, why: "it has no worker window", view: fresh(t) };
       const s = start(t, ["--stop"]);
       if (s.code) refuse("failed", s.out);
       return { stopped: true, view: fresh(t) };
@@ -304,7 +311,7 @@ export const ACTIONS = {
     cli: 'start.mjs <task> --resume "<why>"',
     run(p, client) {
       const t = taskOf(p);
-      if (tmux.windowOf(t.home, t.id)?.alive) return { resumed: false, why: "its worker runs already", view: fresh(t) };
+      if (hostedTask(t) ? workerState(t)?.alive : tmux.windowOf(t.home, t.id)?.alive) return { resumed: false, why: "its worker runs already", view: fresh(t) };
       const s = start(t, ["--resume", str(p, "why", { required: false, max: 300 }) ?? `the owner brought it back from ${client}`]);
       if (s.code && s.code !== 4) refuse("failed", s.out);
       return { resumed: s.code === 0, trustPrompt: s.code === 4, message: s.out || null, view: fresh(t) };

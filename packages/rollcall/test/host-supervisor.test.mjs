@@ -126,3 +126,90 @@ test("host escape hatch: terminal state, words held, the terminal's turns join t
   assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
   await until(() => x.agent()?.state === "idle");
 });
+
+test("host supervisor tools: start, tell, wait, interrupt and chat reach a hosted worker with no tmux call", async (t) => {
+  const x = setup(t);
+  // A tmux that only notes its calls: none may come.
+  const bin = join(x.sb.root, "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const tmuxLog = join(x.sb.root, "tmux-calls.log");
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${tmuxLog}'\nexit 1\n`, { mode: 0o755 });
+  const env = { ROLLCALL_HOST: "1", PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir };
+  const saved = { ...process.env };
+  Object.assign(process.env, x.sb.env, env);
+  t.after(async () => {
+    const { call } = await import("../src/host/client.mjs");
+    await call("shutdown", {}, { start: false });
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  });
+  const sup = x.sb.session(x.sb.root);
+  sup.start();
+  assert.equal(sup.cli(["supervise", "alpha"], { env }).code, 0);
+  const cli = (args) => sup.cli(["task", ...args], { env });
+  // Start: what start.mjs runs (supervisor.mjs launch) goes to the host.
+  const store = await import("../src/store.mjs");
+  const { launch } = await import("../src/supervisor.mjs");
+  assert.equal(launch(store.readTask("alpha", "t1"), { prompt: "the brief" }).ok, true);
+  await until(() => x.agent()?.state === "idle" && x.history().some((e) => e.ev === "item" && e.item.kind === "assistant"));
+  // The hooks a real Claude Code runs say it is up and between turns (the fake runs none).
+  store.appendStatus("alpha", "t1", { ev: "session" });
+  store.appendStatus("alpha", "t1", { ev: "idle" });
+  // Tell: the message waits in the worker's inbox, and the doorbell goes in through the host.
+  const told = cli(["tell", "t1", "more words"]);
+  assert.equal(told.code, 0, told.stderr);
+  await until(() => x.history().some((e) => e.ev === "item" && e.item.kind === "assistant" && e.item.text.includes("rollcall inbox")));
+  // Wait with no turn running says so at once; interrupt stops a SLOW turn; wait then hears its end.
+  await until(() => x.agent()?.state === "idle");
+  const idle = cli(["wait", "t1"]);
+  assert.equal(idle.code, 0, idle.stderr);
+  assert.match(idle.stdout, /no turn runs/);
+  const c = await x.client();
+  assert.equal((await c.call("say", { ref: "alpha:t1", text: "SLOW please" })).ok, true);
+  await until(() => x.agent()?.state === "running");
+  const stop = cli(["interrupt", "t1"]);
+  assert.equal(stop.code, 0, stop.stderr);
+  assert.match(stop.stdout, /its turn stopped/);
+  const ended = cli(["wait", "t1", "--timeout", "1"]);
+  assert.match(ended.stdout, /turn ended|no turn runs/);
+  // Read the chat: a page of its history.
+  const chat = cli(["chat", "t1", "--limit", "50"]);
+  assert.equal(chat.code, 0, chat.stderr);
+  assert.match(chat.stdout, /> \(rollcall\) .*rollcall inbox/);
+  assert.match(chat.stdout, /turn ended/);
+  const json = JSON.parse(cli(["chat", "t1", "--json"]).stdout);
+  assert.equal(json.ok, true);
+  assert.equal(json.view, "chat");
+  // Not one tmux call on the way.
+  let calls = "";
+  try { calls = readFileSync(tmuxLog, "utf8"); } catch {}
+  assert.equal(calls, "", `tmux calls for a hosted worker:\n${calls}`);
+});
+
+test("host supervisor: under the gate it starts and parks through the host, with no window", async (t) => {
+  const x = supervisorSetup(t);
+  const bin = join(x.sb.root, "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const tmuxLog = join(x.sb.root, "tmux-calls.log");
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${tmuxLog}'\nexit 1\n`, { mode: 0o755 });
+  const saved = { ...process.env };
+  Object.assign(process.env, x.sb.env, { ROLLCALL_HOST: "1", PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
+  t.after(async () => {
+    const { call } = await import("../src/host/client.mjs");
+    await call("shutdown", {}, { start: false });
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  });
+  const { startWindow, parkWindow } = await import("../src/window.mjs");
+  const session = randomUUID();
+  assert.equal(startWindow("alpha", { session, cwd: x.sb.main, resume: false }).ok, true);
+  await until(() => x.supHistory().some((e) => e.ev === "item" && e.item.kind === "assistant"));
+  assert.equal(x.supHistory().find((e) => e.ev === "item" && e.item.kind === "user").item.text, "/supervisor alpha");
+  await until(() => x.supAgent()?.state === "idle");
+  assert.equal(x.supAgent().session, session);
+  assert.equal(parkWindow("alpha", { idle: 60_000, open: 1 }).ok, true);
+  await until(() => x.supAgent()?.state === "parked");
+  let calls = "";
+  try { calls = readFileSync(tmuxLog, "utf8"); } catch {}
+  assert.equal(calls, "", `tmux calls for a hosted supervisor:\n${calls}`);
+});

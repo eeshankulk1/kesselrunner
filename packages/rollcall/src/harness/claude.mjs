@@ -16,6 +16,10 @@ import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { TASK_ENV, capFlag, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
 import * as tmux from "../tmux.mjs";
+import { callSync } from "../host/client.mjs";
+
+/** The agent host runs (or would resume) the task's worker: nothing is ever typed into a window for it. */
+const hosted = (t) => !!t.sessions?.at(-1)?.hosted;
 import { effortOk } from "./index.mjs";
 
 export const name = "claude";
@@ -163,7 +167,15 @@ export function stopLegacy(session) {
  * terminal they are typed as the owner would: a bracketed paste, then Enter (which `before` may withhold).
  */
 export function type(t, text, opts) {
-  if (!live.inChat(t.home, t.id)) return tmux.type(t.home, t.id, text, opts);
+  if (!live.inChat(t.home, t.id)) {
+    if (!hosted(t)) return tmux.type(t.home, t.id, text, opts);
+    // A hosted worker whose host is down: the call starts the host, which wakes it on its session.
+    const { body, attachments } = live.attachmentsIn(String(text));
+    const r = callSync("say", { ref: `${t.home}:${t.id}`, text: body, attachments, from: "rollcall" });
+    if (!r.ok) return { ok: false, err: r.error?.message ?? "the agent host refused" };
+    received(t, String(text));
+    return { ok: true, how: r.how };
+  }
   // Files the owner attached ride as a last line (live.withAttachments): in the chat the images go in as images.
   const { body, attachments } = live.attachmentsIn(String(text));
   const r = live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" });
@@ -174,7 +186,7 @@ export function type(t, text, opts) {
 
 /** Stops the worker's turn: the stream's interrupt in the chat, Esc in the terminal. */
 export function interrupt(t) {
-  if (!live.inChat(t.home, t.id)) return tmux.interrupt(t.home, t.id);
+  if (!live.inChat(t.home, t.id)) return hosted(t) ? callSync("interrupt", { ref: `${t.home}:${t.id}` }).interrupted === true : tmux.interrupt(t.home, t.id);
   return live.send(t.home, t.id, { op: "interrupt" }).ok === true;
 }
 
@@ -182,7 +194,7 @@ export function interrupt(t) {
  * Typing goes into Claude Code's prompt box: never while a dialog is open (Enter would answer it), nor while the
  * owner just pressed a key in the window (it would land in what they are typing).
  */
-export const takesTyping = (t, w, now = Date.now()) => live.inChat(t.home, t.id) || (!w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs());
+export const takesTyping = (t, w, now = Date.now()) => live.inChat(t.home, t.id) || hosted(t) || (!w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs());
 
 /** The worker session's transcript, as its hooks reported it. */
 export const transcriptOf = (w) => (w?.session ? store.readGlobal(w.session)?.transcript ?? null : null);
