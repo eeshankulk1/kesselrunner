@@ -100,7 +100,7 @@ export function workerRecord(h, id) {
  * the last session's thread again (or the one `session` names). The session id is rollcall's own; Codex's thread id
  * is learned when the worker starts it and recorded on the session. Returns { script, session }.
  */
-export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
+export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null, hosted = false }) {
   const dir = store.workerDir(t.home, t.id);
   const last = t.sessions?.at(-1);
   const session = resume && last ? pick ?? last.id : randomUUID();
@@ -116,7 +116,8 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   // the chat while a front end follows rollcall (claude/live.mjs defaultView).
   let was = null;
   if (resume) { try { was = JSON.parse(readFileSync(launchFile(t.home, t.id), "utf8")); } catch {} }
-  const view = !live.streamOn() ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView();
+  // The agent host has no terminal view (until its escape hatch): a hosted worker always runs in the chat.
+  const view = hosted ? "chat" : !live.streamOn() ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView();
   writeFileSync(launchFile(t.home, t.id), JSON.stringify({
     home: t.home, task: t.id, session, thread, name, cwd: t.worktree, prompt: prompt ? promptFile : null,
     model: on.model, effort: on.effort, mode, view, ...policyFor(mode), writableRoots: writableRoots(t), bin: bin(),

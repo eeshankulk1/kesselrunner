@@ -16,6 +16,8 @@ import { BIN, FIXTURES, sandbox, until } from "./helpers.mjs";
 
 const FAKE = join(FIXTURES, "fake-claude.mjs");
 chmodSync(FAKE, 0o755);
+const FAKE_CODEX = join(FIXTURES, "fake-codex.mjs");
+chmodSync(FAKE_CODEX, 0o755);
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 const lines = (f) => { try { return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
@@ -39,11 +41,21 @@ function setup(t, { env = {} } = {}) {
     writeFileSync(join(dir, "claude-launch.json"), JSON.stringify(cfg));
     return cfg;
   };
-  const hostEnv = { ...sb.env, FAKE_CLAUDE_LOG: log, CLAUDE_CONFIG_DIR: claudeDir, ...env };
+  /** A Codex launch file, as harness/codex.mjs writes it, and the task's session for it. */
+  const codexLaunch = (patch = {}) => {
+    const cfg = { home: h, task: "t1", session: randomUUID(), thread: null, name: null, cwd: sb.main, prompt: null, model: null, effort: null, mode: "auto", view: "chat", approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write", writableRoots: [], bin: FAKE_CODEX, questions: true, ...patch };
+    writeFileSync(join(dir, "codex-launch.json"), JSON.stringify(cfg));
+    task({ sessions: [{ id: cfg.session, at: Date.now(), harness: "codex", thread: cfg.thread, hosted: true }] });
+    return cfg;
+  };
+  const codexLog = join(sb.root, "fake-codex.jsonl");
+  const hostEnv = { ...sb.env, FAKE_CLAUDE_LOG: log, FAKE_CODEX_LOG: codexLog, ROLLCALL_SNAPSHOTS: "0", CLAUDE_CONFIG_DIR: claudeDir, ...env };
   const procs = [];
   const sock = socketFor(sb.home);
   const x = {
-    sb, h, dir, log, sock, claudeDir, task, launch,
+    sb, h, dir, log, sock, claudeDir, task, launch, codexLaunch,
+    codexCompat: () => readJson(join(dir, "codex.json")),
+    codexFake: () => lines(codexLog),
     agent: () => readJson(join(dir, "agent.json")),
     compat: () => readJson(join(dir, "claude.json")),
     history: () => lines(join(dir, "history.jsonl")),
@@ -335,4 +347,100 @@ test("host: api conversation --follow prints the host's push events as the conve
   assert.ok(out.some((l) => l.type === "item" && l.item.streaming === true), "streamed text opens as a streaming item");
   assert.ok(out.some((l) => l.type === "text"), "and grows by text lines");
   assert.ok(out.every((l, i) => l.v === 1 && l.seq === i + 1));
+});
+
+// ---------------------------------------------------------------- Codex
+
+test("host codex: start, words, the history with session-prefixed ids, the seam, the hooks, and stop", async (t) => {
+  const x = setup(t);
+  const cfg = x.codexLaunch();
+  await x.startHost();
+  const events = [];
+  const sub = await x.client((e) => events.push(e));
+  await sub.call("subscribe", { refs: [ref] });
+  const c = await x.client();
+  const r = await c.call("start", { ref, harness: "codex" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.agent.harness, "codex");
+  assert.equal(r.agent.state, "idle");
+  const said = await c.call("say", { ref, text: "STREAM hello" });
+  assert.equal(said.how, "sent");
+  await until(() => x.agent()?.state === "idle" && x.history().some((e) => e.ev === "item" && e.item.kind === "turn" && e.item.phase === "end"));
+  const page = await c.call("history", { ref });
+  assert.equal(page.harness, "codex");
+  const user = page.items.find((i) => i.kind === "user");
+  assert.equal(user.id, said.uuid, "the owner's words keep the id they were sent with");
+  assert.equal(user.from, "owner");
+  const reply = page.items.find((i) => i.kind === "assistant");
+  assert.ok(reply.id.startsWith(`${cfg.session.slice(0, 8)}:`), reply.id);
+  // Streamed text went to subscribers under the item's own id, and the history logged the item once, finished.
+  const streamed = events.filter((e) => e.ev === "text");
+  assert.ok(streamed.length > 1 && streamed.every((e) => e.id === reply.id), JSON.stringify(streamed.slice(0, 2)));
+  assert.equal(streamed.map((e) => e.append).join(""), reply.text);
+  // The thread is remembered for a resume: on the launch file and on the task's session.
+  const thread = readJson(join(x.dir, "codex-launch.json")).thread;
+  assert.ok(thread);
+  assert.equal(readJson(join(x.sb.home, "_supervisors", "alpha", "tasks", "t1.json")).sessions[0].thread, thread);
+  // The hooks ran as for a tmux Codex worker: the prompt and the turn's end are on the task's status log.
+  const status = lines(join(x.sb.home, "_supervisors", "alpha", "status", "t1.jsonl"));
+  assert.ok(status.some((e) => e.ev === "busy") && status.some((e) => e.ev === "idle"), JSON.stringify(status.map((e) => e.ev)));
+  // The compat record points the Codex seam at the host: a delivery keeps rollcall's client id.
+  const rec = x.codexCompat();
+  assert.equal(rec.hosted, true);
+  assert.equal(rec.thread, thread);
+  assert.equal(rec.ctl, rec.sock);
+  const viaSeam = await request(rec.ctl, { op: "say", text: "through the seam", from: "rollcall" });
+  assert.equal(viaSeam.ok, true, JSON.stringify(viaSeam));
+  assert.ok(viaSeam.uuid.startsWith("rollcall-d-"));
+  await until(() => x.history().some((e) => e.ev === "item" && e.item.id === viaSeam.uuid));
+  await until(() => x.agent()?.state === "idle");
+  // Stop: the app server ends and the compat record goes.
+  assert.equal((await c.call("stop", { ref })).ok, true);
+  await until(() => x.agent()?.state === "stopped");
+  assert.equal(x.codexCompat(), null);
+  assert.ok(!x.agent().pid);
+});
+
+test("host codex: an approval is a saved request; the first answer wins; a mode change is refused", async (t) => {
+  const x = setup(t);
+  x.codexLaunch();
+  await x.startHost();
+  const c1 = await x.client();
+  const c2 = await x.client();
+  assert.equal((await c1.call("start", { ref, harness: "codex" })).ok, true);
+  await c1.call("say", { ref, text: "HOLD on" });
+  await until(() => x.agent() && x.history().some((e) => e.ev === "request"));
+  const req = x.history().find((e) => e.ev === "request").request;
+  assert.equal(req.kind, "permission");
+  assert.equal(req.tool, "Bash");
+  assert.match(req.id, /^rq-/);
+  const [a, b] = await Promise.all([c1.call("answer", { request: req.id, allow: true, by: "one" }), c2.call("answer", { request: req.id, allow: false, by: "two" })]);
+  const won = [a, b].filter((r) => r.ok);
+  assert.equal(won.length, 1, JSON.stringify([a, b]));
+  assert.equal([a, b].find((r) => !r.ok).error.code, "already-answered");
+  await until(() => x.codexFake().some((l) => l.in && l.in.result?.decision));
+  await until(() => x.agent()?.state === "idle");
+  const set = await c1.call("set", { ref, mode: "plan" });
+  assert.equal(set.ok, false);
+  assert.equal(set.error.code, "bad-payload");
+});
+
+test("host codex: park ends the app server; a message resumes the same thread", async (t) => {
+  const x = setup(t);
+  x.codexLaunch();
+  await x.startHost();
+  const c = await x.client();
+  assert.equal((await c.call("start", { ref, harness: "codex" })).ok, true);
+  await c.call("say", { ref, text: "first" });
+  await until(() => x.agent()?.state === "idle" && x.history().some((e) => e.ev === "item" && e.item.kind === "assistant"));
+  const thread = x.codexCompat().thread;
+  assert.equal((await c.call("park", { ref })).parked, true);
+  await until(() => x.agent()?.state === "parked");
+  assert.equal(x.codexCompat().thread, thread, "the seam stays while parked");
+  const woke = await c.call("say", { ref, text: "second" });
+  assert.equal(woke.how, "resumed");
+  await until(() => x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 2);
+  assert.ok(x.codexFake().some((l) => l.in?.method === "thread/resume" && l.in.params.threadId === thread), "resumed its own thread");
+  const sessions = x.history().filter((e) => e.ev === "session").map((e) => e.how);
+  assert.deepEqual(sessions, ["new", "resume"]);
 });

@@ -445,8 +445,8 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   if (last && !last.tmux && !last.endedAt) adapter(last).stopLegacy(last.id);
   model = modelOk(model) ? model : null;
   effort = effortOk(effort) ? effort : null;
-  // The agent host runs it (ROLLCALL_HOST=1, Claude Code only in this slice), and a resume goes back where it ran.
-  const hosted = harness === "claude" && (again ? !!again.hosted : hostOn());
+  // The agent host runs it (ROLLCALL_HOST=1), and a resume goes back where it ran.
+  const hosted = again ? !!again.hosted : hostOn();
   const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort, hosted });
   rmSync(dialogFlag(t.home, t.id), { force: true });
   launching(t, prompt, { fresh: session !== last?.id });
@@ -455,7 +455,7 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   if (hosted) {
     // The host sources the task's environment (the launch script's lines but its last, which starts the tmux worker).
     try { writeFileSync(join(store.workerDir(t.home, t.id), "host-env.sh"), `${readFileSync(script, "utf8").trimEnd().split("\n").slice(0, -1).join("\n")}\n`); } catch {}
-    const r = callSync("start", { ref: `${t.home}:${t.id}`, restart: true });
+    const r = callSync("start", { ref: `${t.home}:${t.id}`, restart: true, harness });
     if (!r.ok) return { ok: false, err: r.error?.message || "the agent host did not start the worker" };
   } else {
     if (!tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };

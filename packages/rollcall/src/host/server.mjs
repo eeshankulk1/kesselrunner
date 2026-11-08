@@ -4,7 +4,7 @@
 // front ends call and subscribe. Each agent also gets the control socket and record the stream worker had
 // (claude/live.mjs), so delivery, `task tell`, answers and away mode reach it unchanged.
 import { randomBytes, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,9 @@ import { pidAlive } from "../proc.mjs";
 import * as store from "../store.mjs";
 import { recordClaude } from "../usage.mjs";
 import { startClaude } from "../claude/stream.mjs";
+import { killServer } from "../codex/session.mjs";
+import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
+import { startCodexAgent } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, backfill, historyFile } from "./history.mjs";
 
@@ -28,6 +31,14 @@ export const parkMs = () => msEnv("ROLLCALL_HOST_PARK_MS", 3600_000);
 
 const err = (code, message) => ({ ok: false, error: { code, message } });
 const hex = (n) => randomBytes(n).toString("hex");
+
+const HARNESSES = new Set(["claude", "codex"]);
+const NAME = { claude: "Claude Code", codex: "Codex" };
+/** The launch file the harness adapter wrote for an agent (claude-launch.json, codex-launch.json). */
+const launchOf = (h, id, harness) => (harness === "codex" ? codexLaunchFile(h, id) : launchFile(h, id));
+const mtime = (f) => { try { return statSync(f).mtimeMs; } catch { return -1; } };
+/** Which harness a start without one means: the newer launch file. */
+const newerLaunch = (h, id) => (mtime(codexLaunchFile(h, id)) > mtime(launchFile(h, id)) ? "codex" : "claude");
 
 let logPath = null;
 export function log(line) {
@@ -94,6 +105,7 @@ class Agent {
   /** agent.json, the compat record, and a `state` event. */
   persist() {
     this.rec.pid = this.proc?.pid ?? null;
+    this.rec.serverSock = this.proc?.harness === "codex" ? this.proc.sock : null;
     this.rec.host = process.pid;
     this.rec.at = Date.now();
     writeJson(this.file, this.rec);
@@ -101,7 +113,7 @@ class Agent {
     if (this.rec.state === "stopped" || !this.ctl) rmSync(recFile, { force: true });
     else {
       const prompt = [...this.hist.open.values()][0] ?? null;
-      const compat = { pid: process.pid, child: this.proc?.pid ?? null, sock: this.ctl, ctl: this.ctl, home: this.h, task: this.id, session: this.rec.session, view: "chat", switching: null, busy: this.rec.state === "running", turnAt: this.rec.turnAt, prompt, at: Date.now(), hosted: true, state: this.rec.state };
+      const compat = { pid: process.pid, child: this.proc?.pid ?? null, sock: this.ctl, ctl: this.ctl, home: this.h, task: this.id, session: this.rec.session, view: "chat", switching: null, busy: this.rec.state === "running", turnAt: this.rec.turnAt, prompt, at: Date.now(), hosted: true, state: this.rec.state, ...(this.rec.harness === "codex" ? { thread: this.rec.thread ?? null, turn: this.proc?.turn ?? null } : {}) };
       writeJson(recFile, compat);
     }
     store.pokeWatcher(this.h);
@@ -162,15 +174,16 @@ class Agent {
   }
 
   /** Starts the agent's process on its launch file: a new session, or its last one resumed. */
-  async start({ prompt = null, restart = false } = {}) {
+  async start({ prompt = null, restart = false, harness = null } = {}) {
+    harness = HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
     if (this.proc && restart) {
       // supervisor.mjs launch wrote a launch file: the same session running takes its first prompt as words; another
-      // session (a handoff, a fresh start) replaces the process.
-      const cfg = readJson(launchFile(this.h, this.id));
-      if (cfg?.session && cfg.session === this.rec.session) {
+      // session (a handoff, a fresh start, another harness) replaces the process.
+      const cfg = readJson(launchOf(this.h, this.id, harness));
+      if (cfg?.session && cfg.session === this.rec.session && harness === this.rec.harness) {
         let first = "";
         if (cfg.prompt) { try { first = readFileSync(cfg.prompt, "utf8"); } catch {} }
-        writeJson(launchFile(this.h, this.id), { ...cfg, resume: true, prompt: null });
+        writeJson(launchOf(this.h, this.id, harness), { ...cfg, ...(harness === "claude" ? { resume: true } : {}), prompt: null });
         if (first.trim()) this.send(first, [], "rollcall");
         return { ok: true, agent: this.state(), already: true };
       }
@@ -178,31 +191,46 @@ class Agent {
     }
     if (this.proc) return { ok: true, agent: this.state(), already: true };
     if (this.starting) return this.starting;
-    this.starting = this._start({ prompt }).finally(() => { this.starting = null; });
+    this.starting = this._start({ prompt, harness }).finally(() => { this.starting = null; });
     return this.starting;
   }
 
-  async _start({ prompt }) {
-    const cfg = readJson(launchFile(this.h, this.id));
-    if (!cfg?.session || !cfg.bin) return err("not-found", `${this.ref} has no Claude launch file`);
+  async _start({ prompt, harness }) {
+    const file = launchOf(this.h, this.id, harness);
+    const cfg = readJson(file);
+    if (!cfg?.session || !cfg.bin) return err("not-found", `${this.ref} has no ${NAME[harness]} launch file`);
     await this.listen();
-    const resume = !!cfg.resume;
+    // Codex resumes the thread its launch names; Claude Code the session its launch says exists.
+    const resume = harness === "codex" ? !!cfg.thread : !!cfg.resume;
     if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(resume ? null : cfg.session);
-    this.rec.harness = "claude";
+    this.rec.harness = harness;
     this.rec.session = cfg.session;
     this.rec.model = cfg.model ?? null;
     this.rec.mode = cfg.mode ?? null;
-    this.hist.append({ ev: "session", session: cfg.session, harness: "claude", how: resume ? "resume" : "new" });
+    this.hist.append({ ev: "session", session: cfg.session, harness, how: resume ? "resume" : "new" });
     broadcast(this.ref, "session", { session: cfg.session, how: resume ? "resume" : "new" });
     let first = "";
     if (cfg.prompt) { try { first = readFileSync(cfg.prompt, "utf8"); } catch {} }
-    writeJson(launchFile(this.h, this.id), { ...cfg, resume: true, prompt: null });
+    const launch = { ...cfg, ...(harness === "claude" ? { resume: true } : {}), prompt: null };
+    writeJson(file, launch);
     const envFile = join(this.dir, "host-env.sh");
     this.ending = null;
-    this.proc = startClaude({ cfg, resume, envFile, env: childEnv(), on: (e) => this.onEvent(e), log: (l) => log(`${this.ref}: ${l}`) });
-    log(`${this.ref}: started ${resume ? "resumed" : "new"} session ${cfg.session} (pid ${this.proc.pid})`);
+    const on = (e) => { if (this.proc === proc || !proc) this.onEvent(e); };
+    let proc = null;
+    if (harness === "codex") {
+      try { proc = await startCodexAgent({ h: this.h, id: this.id, cfg: launch, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) }); }
+      catch (e) {
+        this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `Codex did not start. A message tries again.\n${e.message}` });
+        if (this.rec.state !== "stopped") this.setState("parked");
+        return err("failed", e.message);
+      }
+      this.rec.thread = proc.thread;
+      if (first.trim()) await proc.baseline; // so a quick first turn's files are that turn's, not turn 0's
+    } else proc = startClaude({ cfg, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
+    this.proc = proc;
+    log(`${this.ref}: started ${resume ? "resumed" : "new"} ${harness} session ${cfg.session} (pid ${this.proc.pid})`);
     this.setState("idle");
-    for (const q of this.queued) this.proc.say(q.text, q.attachments ?? [], q.uuid); // words a dead process never took
+    for (const q of this.queued) Promise.resolve(this.proc.say(q.text, q.attachments ?? [], q.uuid)).catch(() => {}); // words a dead process never took
     if (first.trim()) this.send(first, [], "rollcall");
     if (prompt?.trim()) this.send(prompt, [], "rollcall");
     if (this.queued.length) this.setState("running");
@@ -210,10 +238,18 @@ class Agent {
   }
 
   send(text, attachments, from, uuid = randomUUID()) {
+    if (this.proc.idFor) uuid = this.proc.idFor(from, uuid);
     const q = { uuid, text, at: Date.now(), from, attachments };
     this.queued.push(q);
     broadcast(this.ref, "item", { item: { id: uuid, at: q.at, kind: "user", text, images: [], from, queued: true } });
-    this.proc.say(text, attachments, uuid);
+    const proc = this.proc;
+    // Codex takes words over its protocol, which can refuse them: then they leave the queue, and the chat says so.
+    Promise.resolve(proc.say(text, attachments, uuid)).catch((e) => {
+      this.queued = this.queued.filter((x) => x.uuid !== uuid);
+      this.item({ id: `host-refused:${hex(6)}`, at: Date.now(), kind: "system", text: `These words did not go in: ${e.message}` });
+      if (this.proc === proc && this.rec.state === "running" && !proc.turn) this.setState("idle");
+      else this.persist();
+    });
     if (this.rec.state !== "running") { this.rec.turnAt = Date.now(); this.setState("running"); }
     return uuid;
   }
@@ -240,13 +276,15 @@ class Agent {
   }
 
   async set({ model = null, mode = null } = {}) {
+    if (mode && this.rec.harness === "codex") return err("bad-payload", "a Codex worker keeps the permission mode it started with");
     if (mode && !SET_MODES.has(mode)) return err("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
     if (!model && !mode) return err("bad-payload", "set takes a model or a mode");
     const done = {};
     if (model) {
       if (this.proc) { const r = await this.proc.setModel(model).catch((e) => ({ error: e.message })); if (r?.error) return err("failed", r.error); }
-      const cfg = readJson(launchFile(this.h, this.id));
-      if (cfg) writeJson(launchFile(this.h, this.id), { ...cfg, model });
+      // A running Codex session remembers it in its launch file itself.
+      const cfg = readJson(launchOf(this.h, this.id, this.rec.harness));
+      if (cfg && !(this.proc && this.rec.harness === "codex")) writeJson(launchOf(this.h, this.id, this.rec.harness), { ...cfg, model });
       this.rec.model = model;
       done.model = model;
     }
@@ -329,6 +367,7 @@ class Agent {
   onEvent(e) {
     switch (e.type) {
       case "init":
+        if (this.rec.harness !== "claude") return;
         if (e.session && e.session !== this.rec.session) {
           this.rec.session = e.session;
           const cfg = readJson(launchFile(this.h, this.id));
@@ -349,6 +388,9 @@ class Agent {
         broadcast(this.ref, "text", { id: e.id, kind: e.kind, append: e.append, parent: e.parent ?? null });
         return;
       }
+      case "turn-start":
+        if (this.rec.state !== "running") { this.rec.turnAt = Date.now(); this.setState("running"); } else this.persist();
+        return;
       case "taken":
         this.queued = this.queued.filter((q) => q.uuid !== e.uuid);
         if (this.rec.state !== "running") { this.rec.turnAt = Date.now(); this.setState("running"); }
@@ -356,13 +398,20 @@ class Agent {
       case "turn-end":
         this.streaming.clear();
         if (e.context) recordContext(this, e.context);
+        if (this.rec.harness === "codex") {
+          // Codex starts no turn for words steered in as one ended: they are gone, rather than shown waiting for good.
+          this.rec.turnAt = null;
+          this.setState("idle");
+          if (this.queued.length) setTimeout(() => { if (this.rec.state === "idle" && this.queued.length) { this.queued = []; this.persist(); } }, 3000).unref();
+          return;
+        }
         this.rec.turnAt = this.queued.length ? Date.now() : null;
         this.setState(this.queued.length ? "running" : "idle");
         return;
       case "request": {
         const id = `rq-${hex(6)}`;
-        const input = e.req.input && typeof e.req.input === "object" ? e.req.input : {};
-        const p = promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null });
+        const input = e.input ?? (e.req.input && typeof e.req.input === "object" ? e.req.input : {});
+        const p = e.prompt ? { ...e.prompt, id } : promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null });
         const request = { ...p, ref: this.ref, session: this.rec.session };
         this.pending.set(id, { rid: e.rid, input, prompt: p });
         this.hist.append({ ev: "request", request });
@@ -388,7 +437,7 @@ class Agent {
         if (how === "handoff") return; // a new process starts at once
         if (how === "stop") { this.setState("stopped"); return; }
         if (how !== "park" && e.code !== 0) {
-          this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `Claude Code stopped (exit ${e.code}). A message brings it back.${e.err ? `\n${e.err}` : ""}` });
+          this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `${NAME[this.rec.harness] ?? "The agent"} stopped (exit ${e.code}). A message brings it back.${e.err ? `\n${e.err}` : ""}` });
         }
         this.setState("parked");
         return;
@@ -439,6 +488,8 @@ async function restore() {
       const a = new Agent(h, id);
       agents.set(a.ref, a);
       if (rec.state === "running" || rec.state === "idle") {
+        // A Codex agent's app server outlives a host killed outright: it goes, by the pid and socket on the record.
+        if (rec.harness === "codex") { killServer(rec.pid, rec.serverSock); if (rec.serverSock) rmSync(rec.serverSock, { force: true }); }
         a.item({ id: `host-restart:${hex(6)}`, at: Date.now(), kind: "system", text: "The host restarted, which ended this agent's process. A message brings it back." });
         a.rec.state = "parked";
         a.rec.parkedAt = Date.now();
@@ -486,7 +537,7 @@ async function handle(req, c) {
       case "hello": return { ok: true, pid: process.pid, version: VERSION, interface: INTERFACE };
       case "list": return { ok: true, agents: [...agents.values()].filter((a) => a.rec.state).map((a) => a.state()) };
       case "state": return { ok: true, agent: need().state() };
-      case "start": return await need().start({ prompt: typeof req.prompt === "string" ? req.prompt : null, restart: req.restart === true });
+      case "start": return await need().start({ prompt: typeof req.prompt === "string" ? req.prompt : null, restart: req.restart === true, harness: req.harness ?? null });
       case "say": return await need().say(req);
       case "interrupt": return await need().interrupt();
       case "set": return await need().set(req);
