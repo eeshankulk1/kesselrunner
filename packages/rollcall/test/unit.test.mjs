@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSy
 import { tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { asked, asksText, promptAuthor, sameWords } from "../src/asked.mjs";
+import { asked, asksText, describe, promptAuthor, sameWords } from "../src/asked.mjs";
 import { dialogFlag, dialogUp, settleDialog } from "../src/delivery.mjs";
 import { branch, locate, normalizeRemote, repoKey } from "../src/git.mjs";
 import { globToRegExp, matchScope } from "../src/glob.mjs";
@@ -14,7 +14,7 @@ import { pidAlive, sameProcess, startOf } from "../src/proc.mjs";
 import { isAlive, isHolding } from "../src/session.mjs";
 import { HOME_NAME } from "../src/store.mjs";
 import { CHARACTERS, SHIPS, idOf, nameOf, pickName, running, taskOfQuestion } from "../src/supervisor.mjs";
-import { draftIn } from "../src/tmux.mjs";
+import { draftIn, watching } from "../src/tmux.mjs";
 import { git, sandbox } from "./helpers.mjs";
 
 test("normalizeRemote collapses ssh, scp and https forms of one repo", () => {
@@ -235,6 +235,12 @@ test("what a worker's open prompt asks: the newest call with no result, its own 
   assert.equal(asksText({ type: "elicitation_dialog", message: "Pick a repo" }), 'a question from one of its tools ("Pick a repo")');
   assert.equal(asksText({ type: "permission_prompt", message: "Claude needs your permission to use Bash" }), 'a permission prompt ("Claude needs your permission to use Bash")');
   assert.equal(asksText(null), "a permission prompt");
+  // A worker's own question left open in its window is the owner's to answer, not to approve.
+  const q = describe({ name: "AskUserQuestion", input: { questions: [{ question: "Where should\nit build?", options: [] }] } });
+  assert.equal(asksText(q), 'a question for you ("Where should it build?")');
+  assert.equal(asksText({ tool: "AskUserQuestion", what: null }), "a question for you");
+  assert.ok(watching([{ window: "@1", focused: false }, { window: "@2", focused: true }], "@2"));
+  assert.ok(!watching([{ window: "@1", focused: false }, { window: "@2", focused: true }], "@1"), "a terminal that only shows it is no one watching");
 });
 
 test("settleDialog: a flag stays while a call waits, however long its dialog stays open, and goes when none does", (t) => {

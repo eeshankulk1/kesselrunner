@@ -201,6 +201,22 @@ async function terminal(w, h) {
   return p;
 }
 
+const HAS_PYTHON = spawnSync("python3", ["-c", "import pty"], { stdio: "ignore" }).status === 0;
+
+/**
+ * A terminal on window `name` of home h's session that has lost the focus, as a Cockpit tab the owner is not on: a
+ * real tty (python's pty, since a control-mode client takes no keys) that reports focus-out once attached. tmux
+ * counts a terminal focused until it says otherwise.
+ */
+async function unfocused(w, h, name) {
+  const py = "import os,pty,sys,time\npid,fd=pty.fork()\nif pid==0: os.execvp('tmux',sys.argv[1:])\ntime.sleep(0.5)\nos.write(fd,b'\\x1b[O')\nwhile True:\n  try:\n    if not os.read(fd,4096): break\n  except OSError: break\n";
+  const p = spawn("python3", ["-c", py, "tmux", "-L", w.socket, "attach-session", "-t", `=sv-${h}:=${name}`], { stdio: "ignore", env: { ...w.sb.env, TERM: "xterm-256color" } });
+  w.terminals.push(p);
+  const rows = () => w.tmux("list-clients", "-F", "#{window_name}\t#{client_flags}").split("\n").filter((l) => l.startsWith(`${name}\t`));
+  await until(() => rows().some((l) => !l.split("\t")[1].split(",").includes("focused")), { timeout: 20_000 });
+  return p;
+}
+
 /** A sandbox with a supervisor alpha and one task, its own tmux server, and the fake claude. */
 function world(t, { words = "make the header professional" } = {}) {
   const { sb, claude, socket, tmux, terminals } = server(t);
@@ -686,6 +702,30 @@ test("a worker's AskUserQuestion becomes the task's question, and the supervisor
   assert.deepEqual(queue(w), []);
   look(w);
   assert.doesNotMatch(news(w), /asks the owner/);
+});
+
+test("a worker's question goes to the picker while a terminal only shows its window, and opens there while the owner is on it", { skip: (!HAS_TMUX && "tmux is not installed") || (!HAS_PYTHON && "python3 is not installed") }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  w.sup.env = { ...w.sup.env, ROLLCALL_KEY_QUIET_MS: "1" }; // a terminal's attach counts as a key
+  const asks = () => w.claude.lines().filter((l) => "ask" in l).map((l) => l.ask);
+
+  // The Cockpit app keeps a terminal on each task it opened; the owner is in another one (t19's question, 2026-11-07).
+  await unfocused(w, "alpha", "t1");
+  w.sup.prompt("@t1 ask");
+  await until(() => asks().length === 1, { timeout: 20_000 });
+  assert.equal(JSON.parse(asks()[0]).hookSpecificOutput.permissionDecision, "deny", "it went to the owner's picker");
+  assert.equal(w.task().state, "needs-you");
+  assert.equal(w.sup.cli(["task", "set", "t1", "--state", "working"]).code, 0);
+
+  // A terminal with the focus on it: the owner is there, so the question opens in the window.
+  await terminal(w, "alpha");
+  w.tmux("select-window", "-t", "=sv-alpha:=t1");
+  w.sup.prompt("@t1 ask");
+  await until(() => asks().length === 2, { timeout: 20_000 });
+  assert.equal(asks()[1], "", "left to Claude Code: it opens right there");
+  assert.equal(w.task().state, "working");
 });
 
 test("a home has one watcher: a second stands down at once, one from before this kind gives way, and a name with no home is refused", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {

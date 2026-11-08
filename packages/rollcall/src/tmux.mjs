@@ -150,8 +150,11 @@ export const supervisorTab = (h, { parked = false } = {}) => ({ tab: parked ? `$
 let clientList = null;
 function allClients() {
   if (clientList && Date.now() - clientList.at < LISTING_MS) return clientList.rows;
-  const r = tmux(["list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_id}\t#{client_activity}"]);
-  const rows = r.ok ? r.out.split("\n").filter(Boolean).map((l) => { const [name, session, window, activity] = l.split("\t"); return { name, session, window, activity: Number(activity) * 1000 || 0 }; }) : [];
+  const r = tmux(["list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_id}\t#{client_activity}\t#{client_flags}"]);
+  const rows = r.ok ? r.out.split("\n").filter(Boolean).map((l) => {
+    const [name, session, window, activity, flags = ""] = l.split("\t");
+    return { name, session, window, activity: Number(activity) * 1000 || 0, focused: flags.split(",").includes("focused") };
+  }) : [];
   clientList = { at: Date.now(), rows };
   return rows;
 }
@@ -240,6 +243,20 @@ export function viewed(h, task) {
   const w = windowOf(h, task);
   return !!w && allClients().some((c) => c.window === w.id);
 }
+
+/**
+ * Whether the owner is looking at the task's window now: a terminal shows it and has the focus. The Cockpit app
+ * keeps a terminal attached to every task it has opened, so one that shows a window is not enough: t19's question
+ * stayed in its window, unseen, while the owner was in the supervisor's. tmux counts a terminal focused until the
+ * terminal says it lost the focus, so one that never reports focus still counts (rollcall turns focus-events on).
+ */
+export function watched(h, task) {
+  const w = windowOf(h, task);
+  return !!w && watching(allClients(), w.id);
+}
+
+/** Whether one of `clients` (allClients' rows) shows window `id` with the focus. */
+export const watching = (clients, id) => clients.some((c) => c.window === id && c.focused);
 
 /**
  * The command that shows the task's window in a terminal: a grouped tmux session of its own (so two tabs
