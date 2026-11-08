@@ -309,3 +309,30 @@ test("host: with ROLLCALL_HOST=1 a task worker starts in the host, and the old s
   assert.equal(workerState(task).stopped, true);
   assert.equal(x.compat(), null, "a stopped agent has no record: nothing reaches it");
 });
+
+test("host: api conversation --follow prints the host's push events as the conversation's lines", async (t) => {
+  const x = setup(t);
+  const cfg = x.launch();
+  x.task({ sessions: [{ id: cfg.session, at: Date.now(), endedAt: null, tmux: false, hosted: true }] });
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  const out = [];
+  const f = spawn(process.execPath, [BIN, "api", "conversation", ref, "--follow"], { env: x.sb.env, stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => { try { f.kill("SIGKILL"); } catch {} });
+  let buf = "";
+  f.stdout.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { out.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } });
+  await until(() => out.some((l) => l.type === "page"));
+  assert.equal(out[0].type, "page");
+  assert.equal(out[0].view, "chat");
+  const said = await c.call("say", { ref, text: "TOOL go" });
+  await until(() => out.some((l) => l.type === "prompt" && l.prompt));
+  const p = out.find((l) => l.type === "prompt" && l.prompt).prompt;
+  await c.call("answer", { request: p.id, allow: true });
+  await until(() => out.some((l) => l.type === "item" && l.item.kind === "turn" && l.item.phase === "end"));
+  assert.ok(out.some((l) => l.type === "item" && l.item.id === said.uuid && l.item.queued === false), "the words, taken");
+  assert.ok(out.some((l) => l.type === "prompt" && l.prompt === null), "the prompt closed");
+  assert.ok(out.some((l) => l.type === "item" && l.item.streaming === true), "streamed text opens as a streaming item");
+  assert.ok(out.some((l) => l.type === "text"), "and grows by text lines");
+  assert.ok(out.every((l, i) => l.v === 1 && l.seq === i + 1));
+});
