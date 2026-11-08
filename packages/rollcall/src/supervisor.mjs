@@ -20,6 +20,7 @@ import * as tmux from "./tmux.mjs";
 import { openBlocker, resetAt } from "./trouble.mjs";
 import { adapter, effortOk, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
 import { MODES, modelOk } from "./harness/claude.mjs";
+import { inChat } from "./claude/live.mjs";
 
 /** A worker's environment names its task, so its own `rollcall task ...` commands need no home. */
 export const TASK_ENV = "ROLLCALL_TASK";
@@ -547,7 +548,7 @@ export function deliverWords(t, text, { record, mode = null }) {
     if (!enqueue(t, "words", text)) return { ok: false, why: "the task store stayed busy: your words are on its record, so say them again" };
     const r = flush(t, w);
     // The watcher hears of the queue at once, and may have typed them first.
-    if (r.typed || waiting(t.home, t.id).every((x) => x.typedAt)) return { ok: true, how: "typed" };
+    if (r.typed || waiting(t.home, t.id).every((x) => x.typedAt)) return { ok: true, how: r.how ?? "typed" };
     return { ok: true, how: "held", why: r.err ? `typing into its pane failed (${r.err}), so rollcall tries again` : whyHeld(t, w) };
   }
   const r = launch(t, { prompt: text, resume: true, mode: mode ?? w.mode, model: w.model, effort: w.effort });
@@ -713,7 +714,9 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       if (t.wait) setWait(h, id, null);
       // A delivery of rollcall's has its receipt; any other prompt waits for the transcript to say whose it is.
       const ours = received(t, p.prompt);
-      if (!ours.length) noteTyped(t, p);
+      // In the chat view every prompt came through rollcall (a front end's words are on the record already): no key
+      // in the window typed it.
+      if (!ours.length && !inChat(h, id)) noteTyped(t, p);
       const said = [];
       const cap = capDue(h, id, p.session_id);
       if (cap?.level === "soft") { heardSoft(h, id, p.session_id); said.push(softText(t, cap.pct)); }
@@ -810,7 +813,8 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // task's record, where they find it when they are back. A terminal that only shows it (the Cockpit app keeps one
       // on each task) is not the owner watching.
       const away = isAway();
-      if (!away && tmux.watched(h, id)) return null;
+      // A worker in the chat view has no picker of its own on any screen: its question is always the task's.
+      if (!away && tmux.watched(h, id) && !inChat(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);

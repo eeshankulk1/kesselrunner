@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import { ACTIONS, COMING, runAction } from "./api-actions.mjs";
 import { INTERFACE, USAGE, VERSION, attachInfo, snapshot } from "./api.mjs";
 import { stream } from "./api-stream.mjs";
+import { follow, readPage, resolveTarget } from "./conversation.mjs";
 import { taskEnv } from "./supervisor.mjs";
 
-const VERBS = ["version", "snapshot", "stream", "do", "attach"];
+const VERBS = ["version", "snapshot", "stream", "do", "attach", "conversation"];
 
 /** `ctx`: the CLI's { say, whoAmI }. Returns the exit code. */
 export async function apiCommand(args, ctx) {
@@ -35,6 +36,22 @@ async function run(args, ctx, json) {
     case "stream":
       await stream({ home: opt("--home") ?? null, client: opt("--client") ?? null, notifies: has("--notifies") });
       return 0;
+    case "conversation": {
+      const before = opt("--before") ?? null;
+      const limit = opt("--limit");
+      const client = opt("--client") ?? null;
+      const following = has("--follow");
+      const ref = rest[0];
+      if (!ref) return error("bad-payload", "usage: rollcall api conversation <home>[:<task>] [--before <cursor>] [--limit <n>] [--follow] [--client <name>]", 2);
+      if (limit !== undefined && !(Number(limit) > 0)) return error("bad-payload", "--limit takes a number above 0", 2);
+      const t = resolveTarget(ref);
+      if (!t.ok) return error(t.code, t.message);
+      if (following) { await follow(ref, process.stdout, { limit: limit ? Number(limit) : undefined, client }); return 0; }
+      const page = readPage(t, { before, limit: limit ? Number(limit) : undefined });
+      if (!page.ok) return error(page.error.code, page.error.message);
+      ctx.say(JSON.stringify(page));
+      return 0;
+    }
     case "attach": {
       const client = opt("--client") ?? "frontend";
       const resume = has("--resume");

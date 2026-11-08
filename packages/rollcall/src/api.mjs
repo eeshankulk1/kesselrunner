@@ -26,6 +26,7 @@ import * as tmux from "./tmux.mjs";
 import * as trouble from "./trouble.mjs";
 import { tokensOf, usageOf, when } from "./usage.mjs";
 import { usageMoves, view } from "./watch.mjs";
+import { viewOf } from "./claude/live.mjs";
 
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
 export const INTERFACE = 1;
@@ -56,9 +57,11 @@ export const refOf = (t) => `${t.home}:${t.id}`;
 // ---------------------------------------------------------------- the snapshot
 
 /** A worker as a front end draws it, or null when the task never had one (or its session ended). */
-function workerView(w) {
+function workerView(w, t) {
   if (!w) return null;
   return {
+    // Where it runs (claude/live.mjs): the chat (stream mode) or the terminal, a switch waiting, the prompt open in the chat.
+    ...(t ? viewOf(t.home, t.id) : { view: "terminal", switching: null, prompt: null }),
     session: w.session, alive: w.alive, busy: w.busy, parked: !!w.parked, stopped: !!w.stopped, legacy: !!w.legacy,
     dialog: w.dialog ? { since: w.dialog, asks: w.asks, text: asksText(w.asks) } : null,
     context: w.context === null ? null : { pct: w.context, tokens: w.tokens, size: w.size },
@@ -114,7 +117,7 @@ export function taskView(t, now = Date.now(), v = view(t, now)) {
     tokens: tokensOf(t),
     stage: t.stage ?? null,
     wait: t.wait ? { ...t.wait, label: trouble.waitLabel(t.wait, now) } : null,
-    worker: workerView(w),
+    worker: workerView(w, t),
     terminal: { window: !!win, alive: !!win?.alive },
     files: store.filesDir(t.home, t.id),
     createdAt: t.createdAt ?? null, updatedAt: t.updatedAt ?? null,
@@ -141,6 +144,7 @@ function supervisorView(h, now) {
     feed: (store.readHomeFile(h, "feed") ?? []).slice(-20).map((e) => ({ at: e.at, task: e.task ? `${h}:${e.task}` : null, text: e.text, report: e.report ?? null })),
     reminders: (store.readHomeFile(h, "reminders") ?? []).map((r) => ({ at: r.at, text: r.text })),
     openTasks: store.listTasks(h).filter(isOpen).length,
+    ...viewOf(h, null),
   };
 }
 
@@ -270,4 +274,4 @@ export function attachInfo(ref, { client = "frontend", resume = null } = {}) {
   };
 }
 
-const workerViewFor = (t) => workerView(view(t).w);
+const workerViewFor = (t) => workerView(view(t).w, t);

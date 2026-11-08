@@ -342,6 +342,9 @@ const KEYED_MS = 30_000;
  * Claude Code's own "limit has reset, continue" must not reach a worker as the owner's words.
  */
 function keyed(h, text, now) {
+  // A line from a front end's composer (a chat-view supervisor's) is the owner's as much as a key press.
+  const app = store.readHomeFile(h, "app-line");
+  if (app && now - app.at < KEYED_MS && sameWords(app.text, text)) return true;
   if (!tmux.windowOf(h, h)?.alive) return !FRAMED.test(text);
   tmux.forget(h);
   return now - tmux.lastUsed(h, h) < KEYED_MS;
