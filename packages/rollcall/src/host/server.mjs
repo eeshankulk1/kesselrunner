@@ -88,7 +88,9 @@ class Agent {
     this.rec = rec ?? { ref: this.ref, home: h, task: this.id, harness: "claude", state: null, session: null, since: Date.now(), turnAt: null, parkedAt: null, model: null, mode: null };
     this.proc = null;
     this.pending = new Map(); // request id -> { rid, input, prompt }
-    this.queued = []; // words sent, not taken yet: { uuid, text, at, from, attachments }
+    // Words sent, not taken yet: { uuid, text, at, from, attachments }. Those held while open in a terminal are also on
+    // the record (rec.held), so a host restart keeps them; they leave it when they go to a process (_start).
+    this.queued = Array.isArray(this.rec.held) ? this.rec.held.filter((q) => q?.uuid && typeof q.text === "string") : [];
     this.streaming = new Map(); // item id -> a streamed item not finished yet
     this.ending = null; // "park" | "stop" while the process is asked to end
     this.parkTimer = null;
@@ -242,6 +244,7 @@ class Agent {
     } else proc = startClaude({ cfg, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
     this.proc = proc;
     log(`${this.ref}: started ${resume ? "resumed" : "new"} ${harness} session ${cfg.session} (pid ${this.proc.pid})`);
+    this.rec.held = null; // they go to the process just below: a later restart must not send them again
     this.setState("idle");
     for (const q of this.queued) Promise.resolve(this.proc.say(q.text, q.attachments ?? [], q.uuid)).catch(() => {}); // words a dead process never took
     if (first.trim()) this.send(first, [], "rollcall");
@@ -278,6 +281,7 @@ class Agent {
       // Open in a terminal: the words wait, and go in when the terminal closes (closeTerminal).
       const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
       this.queued.push(q);
+      this.rec.held = this.queued.map(({ uuid, text, at, from, attachments }) => ({ uuid, text, at, from, attachments }));
       broadcast(this.ref, "item", { item: { id: q.uuid, at: q.at, kind: "user", text, images: [], from: q.from, queued: true } });
       this.persist();
       return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
@@ -395,6 +399,7 @@ class Agent {
   stop() {
     for (const id of [...this.hist.open.keys()]) this.closeRequest(id, "cancelled", "stop");
     this.queued = [];
+    this.rec.held = null;
     if (!this.proc) { this.setState("stopped"); return true; }
     void this.endProcess("stop");
     return true;

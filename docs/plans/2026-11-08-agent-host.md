@@ -250,7 +250,9 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   `host-env.sh` when the task has one (a session that never ran gets `--session-id`, `-n` and its first prompt, as the
   stream worker's terminal view did); or `codex resume <thread>`. The agent is `terminal` (`send: "hold"`).
 - Meanwhile: `say` holds the words (`how: "held"`, shown queued) and they go in when the terminal closes; `interrupt`
-  and `start` are refused with the reason; `park` does nothing; the idle timer does not run.
+  and `start` are refused with the reason; `park` does nothing; the idle timer does not run. Held words also sit on
+  `agent.json` (`held`, each with its uuid), so a restarted host shows and sends them; they leave it in the same write
+  that hands them to the new process, so a later restart never sends them twice.
 - On exit (`terminal-done`, or the connection closing): the host appends what the terminal added that the history
   lacks, in order, the agent is `parked`, and held words start it. A Claude session's items come from its transcript
   (`history.mjs catchUp`). `codex resume` writes no journal, so a Codex agent's come from the thread itself

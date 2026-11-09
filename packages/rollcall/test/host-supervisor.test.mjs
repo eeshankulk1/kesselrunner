@@ -3,7 +3,8 @@
 // interrupt, read the chat) reach a hosted worker with no tmux call at all, and the terminal escape hatch shows the
 // agent as `terminal`, holds words sent meanwhile, and picks up the terminal's turns into the history once it closes:
 // a Claude session's from its transcript, a Codex thread's from the thread itself; a host restarted meanwhile watches
-// the terminal while it runs, or reads it at once when it is gone, with no turn lost or doubled.
+// the terminal while it runs, or reads it at once when it is gone, with no turn lost or doubled, and keeps the words
+// held meanwhile, sent once.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -204,6 +205,45 @@ test("host escape hatch: a host restarted while the terminal runs watches it, an
   assert.equal(texts(x, "terminal: from the terminal").length, 1);
   const page = await c.call("history", { ref });
   assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
+});
+
+test("host escape hatch: words held while the terminal runs survive a host restart, and go in once when it closes", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  const h1 = await x.startHost();
+  let c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  const held = await c.call("say", { ref, text: "held across" });
+  assert.equal(held.how, "held");
+  assert.deepEqual(x.agent().held.map((q) => q.uuid), [held.uuid], "the held words, on the record");
+  h1.kill("SIGKILL");
+  await h1.exited;
+  const h2 = await x.startHost();
+  c = await x.client();
+  // The new host still shows the words queued, with the uuid the client already saw.
+  const st = (await c.call("state", { ref })).agent;
+  assert.equal(st.state, "terminal");
+  assert.deepEqual(st.queued.map((q) => [q.uuid, q.text]), [[held.uuid, "held across"]]);
+  // The terminal ends: its turn is read, then the held words go in, as that same item.
+  term.kill("SIGKILL");
+  await until(() => texts(x, "done: held across").length, { timeout: 8000 });
+  assert.equal(x.inputs().filter((m) => m.uuid === held.uuid).length, 1, "sent to the process once, under its uuid");
+  assert.equal(x.agent().held, null, "off the record once sent");
+  await until(() => x.agent()?.state === "idle");
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => [i.text, i.text === "held across" ? i.id : null]), [["before", null], ["from the terminal", null], ["held across", held.uuid]]);
+  // A restart after delivery sends nothing again.
+  await c.call("shutdown");
+  await h2.exited;
+  await x.startHost();
+  c = await x.client();
+  assert.deepEqual((await c.call("state", { ref })).agent.queued, []);
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal(x.inputs().filter((m) => m.uuid === held.uuid).length, 1);
+  assert.equal(texts(x, "done: held across").length, 1);
 });
 
 test("host escape hatch: a terminal that ends on its own after a restart tells the new host, which reads it once", async (t) => {
