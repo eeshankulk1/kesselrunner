@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BIN, until } from "./helpers.mjs";
@@ -448,7 +448,7 @@ test("host supervisor tools: start, tell, wait, interrupt and chat reach a hoste
   mkdirSync(bin, { recursive: true });
   const tmuxLog = join(x.sb.root, "tmux-calls.log");
   writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${tmuxLog}'\nexit 1\n`, { mode: 0o755 });
-  const env = { ROLLCALL_HOST: "1", PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir };
+  const env = { PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir };
   const saved = { ...process.env };
   Object.assign(process.env, x.sb.env, env);
   t.after(async () => {
@@ -500,14 +500,14 @@ test("host supervisor tools: start, tell, wait, interrupt and chat reach a hoste
   assert.equal(calls, "", `tmux calls for a hosted worker:\n${calls}`);
 });
 
-test("host supervisor: under the gate it starts and parks through the host, with no window", async (t) => {
+test("host supervisor: a hosted one starts and parks through the host, with no window", async (t) => {
   const x = supervisorSetup(t);
   const bin = join(x.sb.root, "fake-bin");
   mkdirSync(bin, { recursive: true });
   const tmuxLog = join(x.sb.root, "tmux-calls.log");
   writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${tmuxLog}'\nexit 1\n`, { mode: 0o755 });
   const saved = { ...process.env };
-  Object.assign(process.env, x.sb.env, { ROLLCALL_HOST: "1", PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
+  Object.assign(process.env, x.sb.env, { PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
   t.after(async () => {
     const { call } = await import("../src/host/client.mjs");
     await call("shutdown", {}, { start: false });
@@ -526,4 +526,62 @@ test("host supervisor: under the gate it starts and parks through the host, with
   let calls = "";
   try { calls = readFileSync(tmuxLog, "utf8"); } catch {}
   assert.equal(calls, "", `tmux calls for a hosted supervisor:\n${calls}`);
+});
+
+test("runtime: a terminal supervisor's task and window go to tmux and never touch the host", async (t) => {
+  // Home alpha with no runtime file: falcon's or /supervisor's crew.
+  const x = setup(t, { hosted: false });
+  const bin = join(x.sb.root, "fake-bin");
+  mkdirSync(bin, { recursive: true });
+  const tmuxLog = join(x.sb.root, "tmux-calls.log");
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${tmuxLog}'\nexit 0\n`, { mode: 0o755 });
+  const saved = { ...process.env };
+  Object.assign(process.env, x.sb.env, { PATH: `${bin}:${process.env.PATH}`, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
+  t.after(() => { for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); });
+  const store = await import("../src/store.mjs");
+  const { hostDir, runtimeOf, socketPath } = await import("../src/host/client.mjs");
+  const { launch, workerState } = await import("../src/supervisor.mjs");
+  const { startWindow } = await import("../src/window.mjs");
+  assert.equal(runtimeOf("alpha"), "terminal");
+  launch(store.readTask("alpha", "t1"), { prompt: "the brief" });
+  startWindow("alpha", { session: randomUUID(), cwd: x.sb.main, resume: false });
+  const task = store.readTask("alpha", "t1");
+  assert.equal(task.sessions.at(-1)?.hosted, undefined, "a tmux session");
+  assert.equal(workerState(task).hosted, undefined);
+  assert.match(readFileSync(tmuxLog, "utf8"), /new-window|new-session|respawn/, "tmux ran the worker and the supervisor");
+  // The worker's launch is the plain CLI's: no launch file for the host, no agent, no host process or socket.
+  assert.equal(existsSync(join(x.sb.home, "_supervisors", "alpha", "workers", "t1", "claude-launch.json")), false);
+  assert.equal(existsSync(join(x.sb.home, "_supervisors", "alpha", "workers", "t1", "agent.json")), false);
+  assert.equal(existsSync(join(x.sb.home, "_supervisors", "alpha", "workers", "alpha", "claude-launch.json")), false);
+  assert.equal(existsSync(hostDir()), false, "no host was started");
+  assert.equal(existsSync(socketPath()), false);
+  assert.match(readFileSync(join(x.sb.home, "_supervisors", "alpha", "workers", "t1", "launch.sh"), "utf8"), /--session-id .*the brief|prompt\.txt/);
+});
+
+test("runtime: `rollcall host new` makes a hosted crew the snapshot names; `host end` stops it", async (t) => {
+  const x = setup(t, { hosted: false });
+  const env = { ...x.sb.env, KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir };
+  t.after(() => { spawnSync(process.execPath, [BIN, "host", "stop"], { env, encoding: "utf8" }); });
+  const run = (args) => { const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: "utf8", cwd: x.sb.root }); return { code: r.status, out: (() => { try { return JSON.parse(r.stdout.trim().split("\n").at(-1)); } catch { return r.stdout + r.stderr; } })() }; };
+  const made = run(["host", "new", "--cwd", x.sb.main, "--name", "hoth"]);
+  assert.equal(made.code, 0, JSON.stringify(made.out));
+  assert.deepEqual([made.out.ok, made.out.home, made.out.runtime], [true, "hoth", "host"]);
+  assert.equal(run(["host", "new", "--cwd", x.sb.main, "--name", "hoth"]).out.error.code, "refused", "a taken name");
+  const agent = () => readJson(join(x.sb.home, "_supervisors", "hoth", "workers", "hoth", "agent.json"));
+  await until(() => agent()?.state === "idle", { timeout: 20_000 });
+  assert.equal(agent().session, made.out.session);
+  const hist = lines(join(x.sb.home, "_supervisors", "hoth", "workers", "hoth", "history.jsonl"));
+  assert.equal(hist.find((e) => e.ev === "item" && e.item.kind === "user")?.item.text, "/supervisor hoth");
+  const snap = run(["api", "snapshot"]).out;
+  assert.deepEqual(Object.fromEntries(snap.supervisors.map((s) => [s.name, s.runtime])), { alpha: "terminal", hoth: "host" });
+  // falcon leaves a hosted crew to cockpit.
+  const { TMUX: _inTmux, ...outside } = env;
+  const falcon = spawnSync(process.execPath, [join(BIN, "..", "falcon.mjs"), "resume", "hoth"], { env: outside, encoding: "utf8" });
+  assert.notEqual(falcon.status, 0);
+  assert.match(falcon.stderr + falcon.stdout, /agent host/);
+  const ended = run(["host", "end", "hoth"]);
+  assert.equal(ended.code, 0, JSON.stringify(ended.out));
+  assert.deepEqual(ended.out.stopped, ["hoth"]);
+  await until(() => agent()?.state === "stopped");
+  assert.equal(run(["host", "end", "alpha"]).out.error.code, "not-found", "a terminal crew is not the host's to end");
 });

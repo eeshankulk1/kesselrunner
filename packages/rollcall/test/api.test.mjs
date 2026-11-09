@@ -98,6 +98,8 @@ test("api snapshot holds every top-level section and a task's panel fields", (t)
   assert.equal(s.sessions[0].mainCheckout, true);
   assert.equal(s.sessions[0].state, "working");
 
+  // A crew started in the terminal (falcon, /supervisor) says so: no chat, its agents are terminals.
+  assert.equal(s.supervisors.find((x) => x.name === "alpha")?.runtime, "terminal");
   const task = s.tasks.find((x) => x.ref === "alpha:t1");
   assert.ok(task);
   assert.equal(task.name, "yoda");

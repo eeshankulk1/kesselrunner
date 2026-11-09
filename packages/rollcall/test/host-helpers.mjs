@@ -16,12 +16,14 @@ export const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")
 export const lines = (f) => { try { return readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 
 /** A sandbox with home alpha and task t1 (worktree: the repo), a fake Claude launch file, and a host to start. */
-export function setup(t, { env = {}, codexThreads = false } = {}) {
+export function setup(t, { env = {}, codexThreads = false, hosted = true } = {}) {
   const sb = sandbox(t);
   const h = "alpha";
   const dir = join(sb.home, "_supervisors", h, "workers", "t1");
   mkdirSync(dir, { recursive: true });
   mkdirSync(join(sb.home, "_supervisors", h, "tasks"), { recursive: true });
+  // A hosted crew, as `rollcall host new` records it (host/client.mjs hostedHome): the host runs only these.
+  if (hosted) writeFileSync(join(sb.home, "_supervisors", h, "runtime.json"), JSON.stringify({ runtime: "host", at: Date.now() }));
   const taskFile = join(sb.home, "_supervisors", h, "tasks", "t1.json");
   const task = (patch = {}) => writeFileSync(taskFile, JSON.stringify({ id: "t1", home: h, title: "Host test", state: "working", worktree: sb.main, repo: { main: sb.main, name: "repo", key: "repo" }, sessions: [], ...patch }));
   task();

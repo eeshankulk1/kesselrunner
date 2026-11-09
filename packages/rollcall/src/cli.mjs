@@ -32,6 +32,7 @@ import { closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs
 import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskCommand, visibleTasks } from "./task.mjs";
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
+import { hostedHome } from "./host/client.mjs";
 
 const USAGE = `rollcall - awareness for parallel agent sessions on one machine
 
@@ -491,10 +492,15 @@ function supervise(args) {
   }
   store.writeGlobal({ ...g, supervisor: { home: h, at: g.supervisor?.home === h ? g.supervisor.at : Date.now(), skill: skillStamp() ?? undefined } });
   ensureWatcher(h);
-  say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; its workers run in tmux (session ${tmux.sessionName(h)}), its chips in the status line.`);
-  if (!tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
-  else if (tmux.inside() && tmux.windowOf(h, h)) say(`  Tabs: each task gets a tab in the bar at the bottom of this terminal. The owner clicks one to switch to that worker and clicks ${h} to come back; /attach t3 switches too.`);
-  else say(`  Tabs: this supervisor runs outside falcon, so /attach t3 opens a terminal tab per task, and news reaches it with the owner's next line, since nothing can type into this terminal. For tabs in one terminal, the owner quits this session (/exit) and runs \`falcon resume ${h}\` in a terminal tab.`);
+  if (hostedHome(h)) {
+    // A crew cockpit made: it and its workers run in the agent host, and the owner follows them in cockpit's chat.
+    say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; it and its workers run in the agent host (no tmux windows), and the owner follows them in cockpit. Drive workers with start.mjs, task tell, task chat, task wait and task interrupt.`);
+  } else {
+    say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; its workers run in tmux (session ${tmux.sessionName(h)}), its chips in the status line.`);
+    if (!tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
+    else if (tmux.inside() && tmux.windowOf(h, h)) say(`  Tabs: each task gets a tab in the bar at the bottom of this terminal. The owner clicks one to switch to that worker and clicks ${h} to come back; /attach t3 switches too.`);
+    else say(`  Tabs: this supervisor runs outside falcon, so /attach t3 opens a terminal tab per task, and news reaches it with the owner's next line, since nothing can type into this terminal. For tabs in one terminal, the owner quits this session (/exit) and runs \`falcon resume ${h}\` in a terminal tab.`);
+  }
   const open = store.listTasks(h).filter(isOpen);
   const legacy = open.filter((t) => workerState(t)?.legacy);
   say(open.length ? `  ${open.length} open task${open.length === 1 ? "" : "s"}: rollcall task list` : "  no open tasks");

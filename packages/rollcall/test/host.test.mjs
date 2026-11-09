@@ -210,10 +210,10 @@ test("host: only one runs per store", async (t) => {
   assert.equal((await c.call("hello")).ok, true);
 });
 
-test("host: with ROLLCALL_HOST=1 a task worker starts in the host, and the old seam drives it", async (t) => {
+test("host: a hosted crew's task worker starts in the host, and the seam drives it", async (t) => {
   const x = setup(t);
   const saved = { ...process.env };
-  Object.assign(process.env, x.sb.env, { ROLLCALL_HOST: "1", KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
+  Object.assign(process.env, x.sb.env, { KESSELRUNNER_CLAUDE_BIN: FAKE, FAKE_CLAUDE_LOG: x.log, CLAUDE_CONFIG_DIR: x.claudeDir });
   t.after(async () => {
     const { call } = await import("../src/host/client.mjs");
     await call("shutdown", {}, { start: false });
@@ -233,7 +233,7 @@ test("host: with ROLLCALL_HOST=1 a task worker starts in the host, and the old s
   const w = workerState(task);
   assert.equal(w.hosted, true);
   assert.equal(w.alive, true);
-  // rollcall's words go through the stream worker's seam (claude/live.mjs), unchanged.
+  // rollcall's words go through the agent's seam (claude/live.mjs).
   const typed = adapter("claude").type(task, "more words");
   assert.equal(typed.ok, true, typed.err);
   await until(() => x.history().filter((e) => e.ev === "item" && e.item.kind === "assistant").length === 2);
