@@ -50,7 +50,7 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
     for (const d of ["accept", "decline"]) assert.match(decisions, new RegExp(`"${d}"`), `${f} takes ${d}`);
   }
   for (const p of ["permissions", "scope"]) assert.ok(p in read("PermissionsRequestApprovalResponse.json").properties, `a permissions answer carries ${p}`);
-  // The chat view (codex/items.mjs, codex/worker.mjs): streamed text, the plan, the thread items it maps and their
+  // A hosted Codex agent (codex/items.mjs, codex/session.mjs): streamed text, the plan, the thread items it maps and their
   // fields, a resumed thread's saved history, the session-wide approvals, images in a message, a turn's model.
   for (const m of ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "turn/plan/updated"]) assert.ok(notes.has(m), `notification ${m}`);
   const v2 = read("codex_app_server_protocol.v2.schemas.json").definitions;

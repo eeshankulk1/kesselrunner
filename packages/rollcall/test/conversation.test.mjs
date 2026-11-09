@@ -1,17 +1,13 @@
 // Done when: a Claude Code transcript folds into the chat contract's items (ids stable, tool results filling their
 // call, subagents, todos, compaction, turns with their time), the huge lines it skips by their first bytes never
-// matter, the stream-mode worker's live file shows text still streaming and messages sent while busy, a page
-// pages back by its cursor, `api conversation` resolves a task and the Falcon, and a follow prints the page, then
-// each new item, appended text, prompt and view, and starts over when the transcript is replaced.
+// matter, and a page pages back by its cursor. The agent host folds its stream and backfills a task's history
+// with this reader (host/history.mjs).
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { createFolder, follow, foldTranscript, matchTurns, overlayItems, patchOf, readPage, summaryOf } from "../src/conversation.mjs";
-import { BIN, cleanEnv } from "./helpers.mjs";
+import { createFolder, foldTranscript, matchTurns, patchOf, readPage, summaryOf } from "../src/conversation.mjs";
 
 const S = "11111111-2222-3333-4444-555555555555";
 const T0 = Date.parse("2026-11-08T10:00:00.000Z");
@@ -104,18 +100,6 @@ test("summaries and patches", () => {
   assert.equal(patchOf("Bash", { command: "x" }), null);
 });
 
-test("the live file shows streaming text and queued messages until the transcript has them; turns.jsonl gives a turn's tokens", () => {
-  const f = createFolder();
-  for (const o of TURN.slice(0, 8)) f.add(o);
-  const live = { session: S, at: T0, items: [{ id: "msg_1:1", kind: "assistant", text: "Looki" }, { id: "msg_9:0", kind: "assistant", text: "Hel" }], queued: [{ uuid: "src-q1", text: "q", at: T0 }, { uuid: "u-new", text: "next", at: T0, from: "app" }] };
-  assert.deepEqual(overlayItems(f, live).map((x) => x.id), ["msg_9:0", "src-q1", "u-new"]);
-  assert.deepEqual(overlayItems(f, live)[0], { id: "msg_9:0", at: T0, kind: "assistant", text: "Hel", streaming: true });
-  assert.equal(overlayItems(f, live)[2].from, "app");
-  assert.equal(overlayItems(f, { ...live, session: "other" }).length, 0);
-  const m = matchTurns([{ id: "e1", at: T0 }, { id: "e2", at: T0 + 60_000 }], [{ at: T0 + 61_000, ms: 5, tokens: { input: 1, output: 2, context: 3 } }]);
-  assert.deepEqual([...m.keys()], ["e2"]);
-});
-
 /** A folder with a transcript of `n` turns, a worker dir, and the target for it. */
 function fixture(n = 0) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "rollcall-conv-")));
@@ -128,9 +112,13 @@ function fixture(n = 0) {
   return { root, dir, transcript, target: { ok: true, ref: "alpha:t1", harness: "claude", dir, session: S, cwd: "/w", transcript } };
 }
 
-test("a page is the last items; its cursor reads the page before it; the record gives view and prompt", () => {
+test("turns.jsonl lines match the nearest turn end within 30 s, each once", () => {
+  const m = matchTurns([{ id: "e1", at: T0 }, { id: "e2", at: T0 + 60_000 }], [{ at: T0 + 61_000, ms: 5, tokens: { input: 1, output: 2, context: 3 } }]);
+  assert.deepEqual([...m.keys()], ["e2"]);
+});
+
+test("a page is the last items; its cursor reads the page before it; turns.jsonl gives a turn end its time and tokens", () => {
   const { dir, target } = fixture(5);
-  writeFileSync(join(dir, "claude.json"), JSON.stringify({ pid: process.pid, session: S, view: "chat", prompt: { id: "p1", kind: "permission" } }));
   writeFileSync(join(dir, "turns.jsonl"), `${JSON.stringify({ at: T0 + 42_000, ms: 1500, tokens: { input: 10, output: 20, context: 30 }, error: null, session: S })}\n`);
   const p = readPage(target, { limit: 6 });
   assert.equal(p.ok, true);
@@ -140,8 +128,6 @@ test("a page is the last items; its cursor reads the page before it; the record 
   assert.equal(p.items.at(-1).ms, 1500);
   assert.equal(p.more, true);
   assert.equal(p.cursor, p.items[0].id);
-  assert.equal(p.view, "chat");
-  assert.equal(p.prompt.id, "p1");
   assert.equal(p.session, S);
   const older = readPage(target, { limit: 6, before: p.cursor });
   assert.equal(older.items.at(-1).id, "u3");
@@ -150,8 +136,6 @@ test("a page is the last items; its cursor reads the page before it; the record 
   assert.equal(first.cursor, null);
   assert.equal(first.items[0].id, "turn-start:u0");
   assert.equal(readPage(target, { before: "nope" }).error.code, "not-found");
-  writeFileSync(join(dir, "claude.json"), "{}");
-  assert.equal(readPage(target).view, "terminal");
 });
 
 test("a subagent's own messages come under it from its file next to the transcript", () => {
@@ -164,101 +148,6 @@ test("a subagent's own messages come under it from its file next to the transcri
   const p = readPage(target);
   assert.deepEqual(p.items.map((x) => [x.id, x.parent ?? null]), [["turn-start:u1", null], ["u1", null], ["tu_ag", null], ["tu_in", "tu_ag"]]);
   assert.equal(p.items[2].children, 1);
-});
-
-/** Lines a follow wrote, parsed. */
-const linesOf = (buf) => buf.split("\n").filter(Boolean).map((l) => JSON.parse(l));
-async function until(fn, ms = 3000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { const v = fn(); if (v) return v; await new Promise((r) => setTimeout(r, 20)); }
-  assert.fail("timed out");
-}
-
-test("a follow prints the page, then new items, appended text, prompts, views, and a reset when the transcript is replaced", async () => {
-  const { dir, transcript, target } = fixture(1);
-  process.env.ROLLCALL_CONVERSATION_BEAT_MS = "30";
-  process.env.ROLLCALL_CONVERSATION_GRACE_MS = "100";
-  const out = new PassThrough();
-  let text = "";
-  out.on("data", (d) => { text += d; });
-  const ac = new AbortController();
-  const done = follow(target, out, { signal: ac.signal, signals: false });
-  const seen = () => linesOf(text);
-  await until(() => seen().length >= 1);
-  assert.equal(seen()[0].type, "page");
-  assert.equal(seen()[0].v, 1);
-  assert.equal(seen()[0].items.length, 4);
-
-  // A new prompt with an answer streaming, then the answer landing in the transcript.
-  appendFileSync(transcript, `${JSON.stringify(user("u9", 50, "more"))}\n`);
-  await until(() => seen().some((l) => l.item?.id === "u9"));
-  assert.deepEqual(seen().slice(1).map((l) => l.item?.id), ["turn-start:u9", "u9"], "the page's items are not sent again");
-  writeFileSync(join(dir, "stream.live.json"), JSON.stringify({ session: S, at: T0, items: [{ id: "msg_9:0", kind: "assistant", text: "Hel" }], queued: [] }));
-  await until(() => seen().some((l) => l.item?.id === "msg_9:0" && l.item.streaming));
-  writeFileSync(join(dir, "stream.live.json"), JSON.stringify({ session: S, at: T0, items: [{ id: "msg_9:0", kind: "assistant", text: "Hello" }], queued: [] }));
-  await until(() => seen().some((l) => l.type === "text" && l.id === "msg_9:0" && l.append === "lo"));
-  appendFileSync(transcript, `${JSON.stringify(asst("a9", 51, "msg_9", { type: "text", text: "Hello there" }))}\n`);
-  await until(() => seen().some((l) => l.item?.id === "msg_9:0" && l.item.streaming === false && l.item.text === "Hello there"));
-
-  // A partial line waits for its end.
-  const tool = JSON.stringify(asst("a10", 52, "msg_10", { type: "tool_use", id: "tu_x", name: "Bash", input: { command: "make" } }));
-  appendFileSync(transcript, tool.slice(0, 20));
-  await new Promise((r) => setTimeout(r, 100));
-  assert.ok(!seen().some((l) => l.item?.id === "tu_x"));
-  appendFileSync(transcript, `${tool.slice(20)}\n`);
-  await until(() => seen().some((l) => l.item?.id === "tu_x" && l.item.state === "running"));
-  appendFileSync(transcript, `${JSON.stringify(result("r10", 53, "tu_x", "built"))}\n`);
-  await until(() => seen().some((l) => l.item?.id === "tu_x" && l.item.state === "done"));
-
-  // The record: a prompt opens, the view changes.
-  writeFileSync(join(dir, "claude.json"), JSON.stringify({ pid: process.pid, session: S, view: "chat", switching: null, prompt: { id: "p1", kind: "permission" } }));
-  await until(() => seen().some((l) => l.type === "prompt" && l.prompt?.id === "p1"));
-  assert.ok(seen().some((l) => l.type === "view" && l.view === "chat"));
-
-  // The transcript replaced (shorter): reset, then a fresh page.
-  writeFileSync(transcript, `${JSON.stringify(user("u0", 0, "prompt 0"))}\n`);
-  await until(() => seen().some((l) => l.type === "reset"));
-  await until(() => seen().filter((l) => l.type === "page").length === 2);
-  const seqs = seen().map((l) => l.seq);
-  assert.deepEqual(seqs, seqs.map((_, i) => i + 1));
-  ac.abort();
-  await done;
-});
-
-test("api conversation resolves a task's worker session and the Falcon's own; a Codex task reads its worker's journal", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "rollcall-conv-cli-")));
-  const home = join(root, "home");
-  const config = join(root, "claude");
-  const env = cleanEnv({ ROLLCALL_HOME: home, CLAUDE_CONFIG_DIR: config, ROLLCALL_WATCHER: "0", ROLLCALL_GC: "0" });
-  const tasks = join(home, "_supervisors", "alpha", "tasks");
-  mkdirSync(tasks, { recursive: true });
-  writeFileSync(join(tasks, "t1.json"), JSON.stringify({ id: "t1", home: "alpha", title: "x", worktree: "/w/x", sessions: [{ id: S, at: T0, endedAt: null }] }));
-  writeFileSync(join(tasks, "t2.json"), JSON.stringify({ id: "t2", home: "alpha", title: "y", harness: "codex", sessions: [{ id: "th", harness: "codex", at: T0 }] }));
-  const proj = join(config, "projects", "-w-x");
-  mkdirSync(proj, { recursive: true });
-  writeFileSync(join(proj, `${S}.jsonl`), TURN.map((o) => `${JSON.stringify(o)}\n`).join(""));
-  const sup = "99999999-2222-3333-4444-555555555555";
-  writeFileSync(join(home, "_supervisors", "alpha", "falcon.json"), JSON.stringify({ session: sup, cwd: "/w/x" }));
-  writeFileSync(join(proj, `${sup}.jsonl`), `${JSON.stringify({ ...user("fu", 0, "/supervisor alpha"), sessionId: sup })}\n`);
-  const run = (...args) => { const r = spawnSync(process.execPath, [BIN, "api", ...args], { encoding: "utf8", env }); return { code: r.status, out: JSON.parse(r.stdout) }; };
-
-  const p = run("conversation", "alpha:yoda", "--limit", "3");
-  assert.equal(p.code, 0, JSON.stringify(p.out));
-  assert.equal(p.out.ref, "alpha:t1");
-  assert.equal(p.out.session, S);
-  assert.equal(p.out.items.length, 3);
-  assert.equal(p.out.view, "terminal");
-  assert.equal(p.out.more, true);
-  const f = run("conversation", "alpha");
-  assert.equal(f.out.items.at(-1).text, "/supervisor alpha");
-  // A Codex task: its worker's journal (codex/items.mjs), an empty page while it has none.
-  assert.deepEqual([run("conversation", "alpha:t2").out.harness, run("conversation", "alpha:t2").out.items], ["codex", []]);
-  const workers = join(home, "_supervisors", "alpha", "workers", "t2");
-  mkdirSync(workers, { recursive: true });
-  writeFileSync(join(workers, "codex-th.jsonl"), `${JSON.stringify({ id: "u1", at: T0, kind: "user", text: "hi", images: [], from: "owner", queued: false })}\n`);
-  assert.deepEqual(run("conversation", "alpha:t2").out.items.map((x) => x.text), ["hi"]);
-  assert.equal(run("conversation", "alpha:t9").out.error.code, "not-found");
-  assert.ok(run("version").out.verbs.includes("conversation"));
 });
 
 test("a queued_command attachment is read whichever key comes first on its line", () => {

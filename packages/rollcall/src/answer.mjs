@@ -10,6 +10,7 @@ import { deliverWords, holderOf, label, nameOf, taskOfQuestion } from "./supervi
 import * as tmux from "./tmux.mjs";
 import { ownerSaid } from "./task.mjs";
 import { record as liveRecord, send as sendToWorker } from "./claude/live.mjs";
+import { hostedHome } from "./host/client.mjs";
 
 /**
  * A pick as its worker reads it: its question's header, then the answer. Words of the owner's own under
@@ -124,10 +125,9 @@ export function answerFromFrontEnd(h, id, { qid, answers = null, answer = null, 
  * whether it closed one.
  */
 export function closeFalconPicker(h, by) {
-  // A chat-view supervisor asks in its prompt, not a picker on a screen: that prompt is answered as declined, with why.
-  const rec = liveRecord(h, null);
-  if (rec?.view === "chat") {
-    const p = rec.prompt;
+  // A hosted supervisor asks in its request, not a picker on a screen: that request is answered as declined, with why.
+  if (hostedHome(h)) {
+    const p = liveRecord(h, null)?.prompt;
     if (p?.kind !== "question" || !p.questions?.length) return false;
     const tasks = new Set();
     for (const x of p.questions) {

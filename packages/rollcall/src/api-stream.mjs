@@ -138,8 +138,7 @@ export function stream({ home = null, client = null, notifies = false, out = pro
     };
     let builtAt = 0;
     const soon = (_, file) => {
-      // A stream-mode worker's live text (stream.live.json) changes many times a second and is the conversation's, not the snapshot's.
-      if (timer || ended || (file && (!RELEVANT.test(String(file)) || String(file).endsWith(".live.json")))) return;
+      if (timer || ended || (file && !RELEVANT.test(String(file)))) return;
       timer = setTimeout(look, Math.max(settleMs(), builtAt + gapMs() - Date.now()));
     };
     let watcher = null;

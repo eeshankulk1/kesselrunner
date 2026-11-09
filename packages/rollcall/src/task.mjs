@@ -69,6 +69,9 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
                                          --model and --effort: its workers run on these instead of the harness's own)
   rollcall task list [--all] [--json]    this supervisor's open tasks (--all: finished ones too)
   rollcall task show <id|here> [--json]  one task: the owner's words, notes, sessions, output
+  rollcall task chat <id> [--before <cursor>] [--limit <n>] [--json]   a page of the worker's chat, newest last
+  rollcall task interrupt <id>           the worker's turn stops, as the owner's Esc would
+  rollcall task wait <id> [--timeout <minutes>]   until a hosted worker's turn ends or it asks something
   rollcall task set <id|here> [--state working|needs-you|pr-open|queued|landed|closed] [--question "<q>"]
                     [--pr <url>] [--title "<t>"] [--kind build|discuss]
                                          a worker's report; needs-you reaches its supervisor, the rest its owner
@@ -1127,6 +1130,10 @@ async function spotlight(args, ctx) {
 
 const COMMANDS = {
   new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, decisions, stage, "wait-for": waitFor,
+  // The supervisor's tools on a worker (task-agent.mjs): through the agent host for a hosted one.
+  chat: async (a, c) => (await import("./task-agent.mjs")).chatCmd(a, c, resolve),
+  interrupt: async (a, c) => { notWorker("interrupt", c); return (await import("./task-agent.mjs")).interruptCmd(a, c, (id, cx) => { const t = resolve(id, cx); mayWrite(t, cx.whoAmI(), cx); return t; }); },
+  wait: async (a, c) => { notWorker("wait", c); return (await import("./task-agent.mjs")).waitCmd(a, c, resolve); },
   comment: addComment, comments: commentsCommand,
   setup: inTask("setup"), run: inTask("run"), ports: inTask("ports"), archive, restore, spotlight,
   words: (a, c) => addText(a, c, "words"),

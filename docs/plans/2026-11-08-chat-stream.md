@@ -1,12 +1,19 @@
 ---
-status: done
-absorbed-into: packages/rollcall/API.md, packages/rollcall/README.md, docs/architecture.md
+status: superseded
+superseded-by: docs/plans/2026-11-08-agent-host.md
 date: 2026-11-08
 decided-with-owner: 2026-11-08 (cockpit task t21 "Chat view": stream mode over reading the CLI's log, the real CLI on a switch, the Falcon in stream mode in this build, one question in one place)
 covers: "The rollcall side of the chat view: a stream-mode Claude worker and Falcon, Codex workers in the chat, the conversation read for front ends, answering live moments from a front end, and the switch to and from the real CLI"
 ---
 
 # Chat stream (rollcall side)
+
+> **Superseded (2026-11-09).** The owner chose two runtimes kept apart: crews started in the terminal run in tmux
+> with the real CLIs, as before this plan, and cockpit's crews run in the agent host
+> (`2026-11-08-agent-host.md`). What this plan built inside tmux windows is gone: the stream worker
+> (`rollcall claude-worker`), the plain-text pane, the chat/terminal switch (`task.switch`), `ROLLCALL_STREAM`,
+> `ROLLCALL_WORKER_VIEW`, `stream.live.json`, the per-chat follow processes and `api conversation` for tmux workers.
+> The facts about Claude Code's stream mode below still hold: the host speaks that protocol.
 
 The interface contract is cockpit's `chat-contract.md` (supervisor executor's files, t22), written into
 `packages/rollcall/API.md` as this lands. The plan it serves is cockpit `docs/plans/2026-11-08-chat-view.md`.

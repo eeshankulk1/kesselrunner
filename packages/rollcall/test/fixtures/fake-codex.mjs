@@ -16,6 +16,11 @@
 //   THINK    thinks first (a reasoning summary, streamed)
 //   STREAM   streams its reply in pieces, 100 ms apart
 // thread/resume answers with the turns in $FAKE_CODEX_HISTORY (a JSON file), as a thread's saved history.
+// With $FAKE_CODEX_THREADS (a folder) the threads are saved there, as Codex saves its own: every finished turn goes in
+// <folder>/<thread>.json, thread/resume answers with them, and so does thread/read on stdio. `resume <thread>` (the
+// real CLI in a terminal) with $FAKE_CODEX_TERMINAL_TURN ("<words>") adds one turn to the saved thread and exits 0
+// after $FAKE_CODEX_TERMINAL_MS (default 300), or on SIGTERM. $FAKE_CODEX_TERMINAL_BUSY_MS: that turn runs that long
+// (saved in progress, then finished).
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join as joinPath } from "node:path";
@@ -26,7 +31,29 @@ const log = (x) => { if (process.env.FAKE_CODEX_LOG) appendFileSync(process.env.
 
 if (args[0] === "--version") { console.log("codex-cli 0.0.0-fake"); process.exit(0); }
 if (args[0] === "login") { console.log("Logged in using ChatGPT"); process.exit(0); }
-if (args[0] === "--remote") {
+const threadsDir = process.env.FAKE_CODEX_THREADS;
+const savedTurns = (id) => { try { return JSON.parse(readFileSync(joinPath(threadsDir, `${id}.json`), "utf8")); } catch { return []; } };
+const saveTurn = (id, turn) => { if (!threadsDir) return; mkdirSync(threadsDir, { recursive: true }); writeFileSync(joinPath(threadsDir, `${id}.json`), JSON.stringify([...savedTurns(id), turn])); };
+const seconds = () => Math.floor(Date.now() / 1000);
+
+if (args[0] === "resume") {
+  log({ argv: args, pid: process.pid });
+  const words = process.env.FAKE_CODEX_TERMINAL_TURN;
+  if (words) {
+    const thread = args[1];
+    const id = `tu-${savedTurns(thread).length + 1}`;
+    const user = { type: "userMessage", id: `u-${id}`, content: [{ type: "text", text: words }] };
+    const done = { id, status: "completed", startedAt: seconds(), completedAt: seconds(), items: [user, { type: "agentMessage", id: `a-${id}`, text: `terminal: ${words}` }] };
+    const busy = Number(process.env.FAKE_CODEX_TERMINAL_BUSY_MS);
+    if (busy > 0) {
+      // The turn runs for that long: saved in progress, then finished in place.
+      saveTurn(thread, { id, status: "inProgress", startedAt: seconds(), items: [user] });
+      setTimeout(() => { writeFileSync(joinPath(threadsDir, `${thread}.json`), JSON.stringify([...savedTurns(thread).filter((t) => t.id !== id), { ...done, completedAt: seconds() }])); log({ turnDone: id }); }, busy);
+    } else saveTurn(thread, done);
+  }
+  process.on("SIGTERM", () => { log({ sigterm: true, pid: process.pid }); process.exit(0); });
+  setTimeout(() => process.exit(0), Number(process.env.FAKE_CODEX_TERMINAL_MS) || 300);
+} else if (args[0] === "--remote") {
   log({ ui: args });
   process.on("SIGTERM", () => process.exit(0));
   setInterval(() => {}, 1 << 30);
@@ -50,6 +77,12 @@ function serve(path) {
   let reqN = 1000;
   const thread = { id: "th-1", turn: null, cwd: null };
   const waiting = new Map();
+  const turnItems = new Map(); // turn id -> { at, items } for the saved thread
+  const saved = (turnId, status, extra = []) => {
+    const t = turnItems.get(turnId);
+    turnItems.delete(turnId);
+    if (t) saveTurn(thread.id, { id: turnId, status, startedAt: t.at, completedAt: seconds(), items: [...t.items, ...extra] });
+  };
   const broadcast = (m) => { for (const c of clients) c.send(m); };
   const notify = (method, params) => broadcast({ method, params });
 
@@ -114,10 +147,12 @@ function serve(path) {
     if (thread.turn !== turnId) return; // interrupted meanwhile
     thread.turn = null;
     if (/LIMIT/.test(text)) {
+      saved(turnId, "failed");
       notify("turn/completed", { threadId: thread.id, turn: { id: turnId, status: "failed", error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" } } });
       return;
     }
     notify("item/completed", { threadId: thread.id, turnId, item: { type: "agentMessage", id: `a-${turnId}`, text: reply } });
+    saved(turnId, "completed", [{ type: "agentMessage", id: `a-${turnId}`, text: reply }]);
     notify("turn/completed", { threadId: thread.id, turn: { id: turnId, status: "completed" } });
   }
 
@@ -135,6 +170,7 @@ function serve(path) {
         thread.cwd = p.cwd ?? thread.cwd;
         let turns = [];
         try { turns = JSON.parse(readFileSync(process.env.FAKE_CODEX_HISTORY, "utf8")); } catch {}
+        if (threadsDir) { turns = savedTurns(p.threadId); turnN = turns.length; }
         return reply({ thread: { id: p.threadId, turns } });
       }
       case "thread/read": return reply({ thread: { id: thread.id, turns: thread.turn ? [{ id: thread.turn, status: "inProgress" }] : [] } });
@@ -145,6 +181,7 @@ function serve(path) {
         const turnId = await play(text);
         reply({ turn: { id: turnId, status: "inProgress" } });
         const said = { type: "userMessage", id: `u-${turnId}`, clientId: p.clientUserMessageId ?? null, content: [{ type: "text", text }] };
+        turnItems.set(turnId, { at: seconds(), items: [said] });
         notify("item/started", { threadId: thread.id, turnId, item: said });
         setTimeout(() => notify("item/completed", { threadId: thread.id, turnId, item: said }), 5);
         notify("account/rateLimits/updated", { rateLimits: { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } });
@@ -161,6 +198,7 @@ function serve(path) {
         const turnId = thread.turn;
         thread.turn = null;
         reply({});
+        saved(turnId, "interrupted");
         return notify("turn/completed", { threadId: thread.id, turn: { id: turnId, status: "interrupted" } });
       }
       default:
@@ -224,6 +262,7 @@ function serveStdio() {
       const m = JSON.parse(buf.slice(0, i));
       buf = buf.slice(i + 1);
       if (m.method === "initialize") send({ id: m.id, result: {} });
+      else if (m.method === "thread/read") send({ id: m.id, result: { thread: { id: m.params?.threadId, turns: m.params?.includeTurns ? savedTurns(m.params?.threadId) : [] } } });
       else if (m.method === "account/rateLimits/read") send({ id: m.id, result: { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } } } });
       else if (m.id !== undefined) send({ id: m.id, error: { code: -32601, message: "no" } });
     }

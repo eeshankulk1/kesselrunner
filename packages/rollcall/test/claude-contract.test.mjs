@@ -1,7 +1,7 @@
-// What the stream-mode Claude worker (claude/worker.mjs) assumes about the real Claude Code, checked against the one
+// What the agent host (claude/stream.mjs) assumes about the real Claude Code in stream mode, checked against the one
 // installed, so a CLI update that moves under rollcall fails a test first. The first test is offline: the flags the
-// worker starts it with. The second runs one short turn on Haiku in a throwaway folder (a cent or so) and checks the
-// message shapes the worker and conversation.mjs read: it runs only with ROLLCALL_CLAUDE_CONTRACT=live. Both skip
+// host starts it with. The second runs one short turn on Haiku in a throwaway folder (a cent or so) and checks the
+// message shapes the host and conversation.mjs read: it runs only with ROLLCALL_CLAUDE_CONTRACT=live. Both skip
 // where no claude CLI is installed (CI).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -16,7 +16,7 @@ const claude = process.env.ROLLCALL_CLAUDE_CONTRACT === "0" ? null : bin();
 const real = !!claude && !/fake-claude/.test(claude) && spawnSync(claude, ["--version"], { stdio: "ignore", timeout: 15_000 }).status === 0;
 const live = real && process.env.ROLLCALL_CLAUDE_CONTRACT === "live";
 
-test("the installed Claude Code still takes the flags the stream worker starts it with", { skip: !real && "no claude CLI installed", timeout: 60_000 }, () => {
+test("the installed Claude Code still takes the stream-mode flags the agent host starts it with", { skip: !real && "no claude CLI installed", timeout: 60_000 }, () => {
   const help = spawnSync(claude, ["--help"], { encoding: "utf8", timeout: 30_000 }).stdout ?? "";
   for (const f of ["--print", "--input-format", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--replay-user-messages", "--permission-prompt-tool", "--session-id", "--resume", "--settings", "--permission-mode", "--model", "--effort", "--add-dir"]) {
     assert.ok(help.includes(f), `claude --help no longer mentions ${f}`);

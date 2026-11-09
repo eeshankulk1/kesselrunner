@@ -1,16 +1,16 @@
-// The Claude Code adapter: `rollcall claude-worker` in the task's tmux window (claude/worker.mjs), which runs Claude
-// Code with a session id fixed at launch and a settings file whose hooks report to the task (worker-hook), in one of
-// two views: the chat (Claude Code's stream mode, which front ends read and answer) or the terminal (the real CLI).
-// In the chat rollcall's words, interrupts and answers go through the worker's socket; in the terminal they go as
-// keys, as before: a bracketed paste and Enter (tmux.type), Esc to stop a turn. Its transcript lives under
-// ~/.claude/projects either way. ROLLCALL_STREAM=0 starts the plain CLI with no worker process around it.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// The Claude Code adapter: an interactive `claude` in the task's tmux window, started with a session id fixed at
+// launch and a settings file whose hooks report to the task (worker-hook). rollcall's words go in as a bracketed
+// paste and Enter (tmux.type), Esc stops a turn, and its transcript lives under ~/.claude/projects. A hosted
+// supervisor's task (host/client.mjs hostedHome) runs in the agent host instead: the same settings, plus the launch
+// file the host reads, and its words and interrupts go to the host.
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dialogFlag, keyQuietMs, received } from "../delivery.mjs";
 import * as live from "../claude/live.mjs";
+import { callSync, hostedHome } from "../host/client.mjs";
 import { launchLines } from "../checkout.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -51,6 +51,34 @@ export function trusted(t) {
   let config;
   try { config = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json"), "utf8")); } catch { return null; }
   return [t.repo?.main, t.worktree].some((d) => config.projects?.[d]?.hasTrustDialogAccepted === true);
+}
+
+/**
+ * Marks task `t`'s worktree as trusted, the way Claude Code records the owner's yes to its trust question
+ * (`projects[<folder>].hasTrustDialogAccepted` in its config), for the terminal escape hatch (`rollcall open`). A hosted
+ * agent never meets that question (stream mode skips it), so the escape hatch would be the first to ask, where Enter
+ * means "No, exit" and the CLI ends. Only a folder rollcall made: a task's worktree under its repo's
+ * `.claude/worktrees/`, or the one folder of tasks with no repo; never a folder the owner opened. The config is read
+ * again just before an atomic rename, and only that one key changes. true: written; false: not ours, or trusted
+ * already; null: the config could not be read or written (the CLI then asks, as before).
+ */
+export function trustWorktree(t) {
+  const dir = t?.worktree;
+  const main = t?.repo?.main;
+  const ours = !!dir && (main ? dir !== main && dir.startsWith(join(main, ".claude", "worktrees") + "/") : dir === store.machineFolder());
+  if (!ours || trusted(t) !== false) return false;
+  let file = join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json");
+  try {
+    file = realpathSync(file);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+    config.projects ??= {};
+    config.projects[dir] = { ...(config.projects[dir] ?? {}), hasTrustDialogAccepted: true };
+    const tmp = `${file}.rollcall-${process.pid}-${randomUUID().slice(0, 8)}`;
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: statSync(file).mode & 0o777 });
+    renameSync(tmp, file);
+    return true;
+  } catch { return null; }
 }
 
 /**
@@ -109,7 +137,7 @@ export function preamble(t, { browser = false, files = null } = {}) {
  * Writes the worker's launch files (its settings, the first prompt, the script its pane sources) for a new
  * session, or with `resume` its last one again (or the one `session` names). Returns { script, session }.
  */
-export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
+export function writeLaunch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null, hosted = false }) {
   const dir = store.workerDir(t.home, t.id);
   const last = t.sessions?.at(-1);
   const session = resume && last ? pick ?? last.id : randomUUID();
@@ -128,19 +156,6 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const files = store.filesDir(t.home, t.id);
   if (browser) mkdirSync(files, { recursive: true });
   const addDir = browser ? ` --add-dir ${q(files)}` : "";
-  if (live.streamOn()) {
-    // The worker process keeps the view it last showed (a front end's choice) across a resume.
-    const was = resume ? live.readJson(live.launchFile(t.home, t.id)) : null;
-    live.writeJson(live.launchFile(t.home, t.id), {
-      home: t.home, task: t.id, session, resume: !!resume, settings, cwd: t.worktree, bin: bin(),
-      prompt: prompt ? promptFile : null, mode: MODES.has(mode) ? mode : null, model: modelOk(model) ? model : null,
-      effort: effortOk(effort) ? effort : null, addDir: browser ? [files] : [], name: name ?? null,
-      // Stream mode (-p) skips Claude Code's trust question: a repo it has not trusted starts in the real CLI, which asks.
-      view: trusted(t) === false ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView(),
-    });
-    writeFileSync(script, `${[...preamble(t, { browser, files }), `${q(process.execPath)} ${q(BIN)} claude-worker ${q(t.home)} ${q(t.id)}`].join("\n")}\n`);
-    return { script, session };
-  }
   const lines = [
     ...preamble(t, { browser, files }),
     resume
@@ -148,6 +163,14 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
       : `${q(bin())} --session-id ${q(session)}${addDir} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
   ];
   writeFileSync(script, `${lines.join("\n")}\n`);
+  // The agent host reads this; its environment is the script's lines but its last (supervisor.mjs launch).
+  if (hosted) {
+    live.writeJson(live.launchFile(t.home, t.id), {
+      home: t.home, task: t.id, session, resume: !!resume, settings, cwd: t.worktree, bin: bin(),
+      prompt: prompt ? promptFile : null, mode: MODES.has(mode) ? mode : null, model: modelOk(model) ? model : null,
+      effort: effortOk(effort) ? effort : null, addDir: browser ? [files] : [], name: name ?? null,
+    });
+  }
   return { script, session };
 }
 
@@ -157,31 +180,29 @@ export function stopLegacy(session) {
 }
 
 /**
- * rollcall's words to the worker as its next prompt. In the chat they go through its stream (taken at once, or
- * queued into the running turn as words typed mid-turn are), and the worker taking them is the receipt. In the
- * terminal they are typed as the owner would: a bracketed paste, then Enter (which `before` may withhold).
+ * rollcall's words, typed as the owner would: a bracketed paste, then Enter (which `before` may withhold). A hosted
+ * worker takes them through the host (its control socket, or the host's own `say`, which starts the host and wakes
+ * the worker on its session); taken is the receipt, and files the owner attached go in as attachments.
  */
 export function type(t, text, opts) {
-  if (!live.inChat(t.home, t.id)) return tmux.type(t.home, t.id, text, opts);
-  // Files the owner attached ride as a last line (live.withAttachments): in the chat the images go in as images.
+  if (!hostedHome(t.home)) return tmux.type(t.home, t.id, text, opts);
   const { body, attachments } = live.attachmentsIn(String(text));
-  const r = live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" });
-  if (!r.ok) return { ok: false, err: r.err ?? "the worker refused" };
+  const r = live.record(t.home, t.id)
+    ? live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" })
+    : (({ ok, how, error }) => ({ ok, how, err: error?.message }))(callSync("say", { ref: `${t.home}:${t.id}`, text: body, attachments, from: "rollcall" }));
+  if (!r.ok) return { ok: false, err: r.err ?? "the agent host refused" };
   received(t, String(text));
   return { ok: true, how: r.how };
 }
 
-/** Stops the worker's turn: the stream's interrupt in the chat, Esc in the terminal. */
-export function interrupt(t) {
-  if (!live.inChat(t.home, t.id)) return tmux.interrupt(t.home, t.id);
-  return live.send(t.home, t.id, { op: "interrupt" }).ok === true;
-}
+/** Esc: Claude Code stops its turn (a hosted worker's turn stops through the host). */
+export const interrupt = (t) => (hostedHome(t.home) ? callSync("interrupt", { ref: `${t.home}:${t.id}` }).interrupted === true : tmux.interrupt(t.home, t.id));
 
 /**
  * Typing goes into Claude Code's prompt box: never while a dialog is open (Enter would answer it), nor while the
  * owner just pressed a key in the window (it would land in what they are typing).
  */
-export const takesTyping = (t, w, now = Date.now()) => live.inChat(t.home, t.id) || (!w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs());
+export const takesTyping = (t, w, now = Date.now()) => hostedHome(t.home) || (!w.dialog && now - tmux.lastUsed(t.home, t.id) >= keyQuietMs());
 
 /** The worker session's transcript, as its hooks reported it. */
 export const transcriptOf = (w) => (w?.session ? store.readGlobal(w.session)?.transcript ?? null : null);

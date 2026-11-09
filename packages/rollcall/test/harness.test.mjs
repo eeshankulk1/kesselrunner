@@ -181,7 +181,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   task = store.readTask(h, "t1");
   enqueue(task, "words", "APPROVE now");
   store.withHomeLock(h, () => { const items = store.readHomeFile(h, "outbox-t1"); items[0].typedAt = Date.now(); items[0].tries = 1; store.writeHomeFile(h, "outbox-t1", items); });
-  assert.deepEqual(codex.type(task, "APPROVE now"), { ok: true, how: "sent" });
+  assert.deepEqual(codex.type(task, "APPROVE now"), { ok: true });
   assert.equal(store.readHomeFile(h, "outbox-t1"), null, "delivered");
   const sent = lines().findLast((l) => l.in?.method === "turn/start")?.in.params;
   assert.match(sent.clientUserMessageId, /^rollcall-d-/);
@@ -196,7 +196,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   // decline carries no reason), and on the held list. No dialog opens.
   const away = await mod("away.mjs");
   away.setAway(true, "test");
-  assert.deepEqual(codex.type(store.readTask(h, "t1"), "APPROVE later"), { ok: true, how: "sent" });
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "APPROVE later"), { ok: true });
   await until(() => lines().some((l) => l.in?.result?.decision === "decline"), "the declined approval");
   await until(() => lines().some((l) => l.in?.method === "turn/steer" && JSON.stringify(l.in.params.input).includes("held for them")), "the hold note, steered in");
   assert.deepEqual(away.heldView().map((x) => [x.ref, x.harness, x.tool, x.summary, x.reason]), [[`${h}:t1`, "codex", "Bash", "rm -rf build", "clean the build"]]);
@@ -205,7 +205,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   away.setAway(false, "test");
 
   // A question goes to the owner's picker: the task turns needs-you, and the worker hears where it went.
-  assert.deepEqual(codex.type(store.readTask(h, "t1"), "ASK please"), { ok: true, how: "sent" });
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "ASK please"), { ok: true });
   await until(() => store.readTask(h, "t1").state === "needs-you", "needs-you");
   assert.equal(store.readTask(h, "t1").ask.questions[0].question, "Ship it?");
   const answer = await until(() => lines().find((l) => l.in?.result?.answers?.q1)?.in.result.answers.q1.answers[0], "the answer to request_user_input");
@@ -221,7 +221,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   await until(() => status().some((e) => e.ev === "idle" && e.last === "done: the owner typed this"), "the owner's turn's end");
 
   // The usage limit: the task waits on it, until the plan resets.
-  assert.deepEqual(codex.type(store.readTask(h, "t1"), "LIMIT"), { ok: true, how: "sent" });
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "LIMIT"), { ok: true });
   // Codex's own blocker: the Claude supervisor's news does not pause for it, and the wait ends when Codex resets.
   const wait = await until(() => store.readTask(h, "t1").wait?.on === "usage-codex" && store.readTask(h, "t1").wait, "the Codex usage wait");
   assert.ok(wait.until > Date.now() + 3600_000, "its reset time came from Codex");
@@ -231,7 +231,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   assert.equal((await mod("usage.mjs")).usageOf().codex.primary.pct, 100, "the limits read at the failure are on the meter");
 
   // An interrupt stops the running turn.
-  assert.deepEqual(codex.type(store.readTask(h, "t1"), "SLOW one"), { ok: true, how: "sent" });
+  assert.deepEqual(codex.type(store.readTask(h, "t1"), "SLOW one"), { ok: true });
   await until(() => codex.workerRecord(h, "t1")?.turn, "the slow turn");
   assert.equal(codex.interrupt(store.readTask(h, "t1")), true);
   await until(() => !codex.workerRecord(h, "t1")?.turn, "the interrupt");

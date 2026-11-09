@@ -1,8 +1,8 @@
-// A Codex worker's conversation as the chat's items (API.md "Items"), the same shapes conversation.mjs folds out of a
-// Claude transcript. The worker (codex/worker.mjs) hears every item of its thread from its app server, in either view,
-// and writes each one, mapped here, as a line of its journal (`codex-<session>.jsonl` in its folder): a later line
-// with the same id replaces the item (a command's result arrived). Text that streams now goes to stream.live.json, as
-// a Claude worker's does. A journal missing when a worker resumes a thread is written from the thread's saved history
+// A hosted Codex agent's conversation as the chat's items (API.md "Items"), the same shapes conversation.mjs folds out
+// of a Claude transcript. The agent (codex/session.mjs) hears every item of its thread from its app server and writes
+// each one, mapped here, as a line of its journal (`codex-<session>.jsonl` in its folder): a later line with the same
+// id replaces the item (a command's result arrived). Text that streams now goes to the host's subscribers only. A
+// journal missing when an agent resumes a thread is written from the thread's saved history
 // (thread/resume's turns), whose item ids differ from the live ones: the journal only ever holds one or the other.
 import { cutInput, cutText, oneLine, summaryOf } from "../conversation.mjs";
 import { isAbsolute, relative } from "node:path";

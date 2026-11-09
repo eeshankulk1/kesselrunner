@@ -10,6 +10,7 @@ import * as store from "./store.mjs";
 import { ensureWatcher, holderOf, label, park, parkDue, parkSupervisorAfterMs, parkingOn, workerState } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
 import { parkWindow } from "./window.mjs";
+import { hostedHome } from "./host/client.mjs";
 
 /**
  * Supervisor `h`, when it parks now: { h, session, quiet (ms since its conversation last moved) }, else null.
@@ -17,6 +18,8 @@ import { parkWindow } from "./window.mjs";
  * no terminal on its window has been used since. Its tasks do not hold it: news brings it back.
  */
 export function supervisorDue(h, now = Date.now()) {
+  // The host parks a supervisor it runs on its own timer (ROLLCALL_HOST_PARK_MS): no window to read here.
+  if (hostedHome(h)) return null;
   if (!parkingOn()) return null;
   // Only a supervisor falcon runs in rollcall's tmux: one in a terminal tab of its own is the owner's to close.
   if (!tmux.windowOf(h, h)?.alive) return null;

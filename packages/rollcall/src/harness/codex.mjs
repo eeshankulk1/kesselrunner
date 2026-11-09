@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import * as live from "../claude/live.mjs";
 import { received } from "../delivery.mjs";
+import { callSync, hostedHome } from "../host/client.mjs";
 import { pidAlive } from "../proc.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -89,7 +90,7 @@ export function modelFor({ model = null, effort = null } = {}, env = process.env
 export const launchFile = (h, id) => join(store.workerDir(h, id), "codex-launch.json");
 /** The running worker's own record: { pid, sock, session, thread, turn (the turn running now, or null), at }. */
 export const stateFile = (h, id) => join(store.workerDir(h, id), "codex.json");
-/** The worker's journal of the chat's items for rollcall session `session` (codex/items.mjs). */
+/** The chat's items for rollcall session `session` (codex/items.mjs), journaled by a hosted Codex agent. */
 export const journalFile = (h, id, session) => join(store.workerDir(h, id), `codex-${String(session).replace(/[^\w-]/g, "")}.jsonl`);
 export function workerRecord(h, id) {
   try { return JSON.parse(readFileSync(stateFile(h, id), "utf8")); } catch { return null; }
@@ -112,14 +113,9 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const files = store.filesDir(t.home, t.id);
   mkdirSync(files, { recursive: true });
   const on = modelFor({ model, effort });
-  // A resumed worker keeps the view it last had (or the one a switch asked for while none ran); a new one starts in
-  // the chat while a front end follows rollcall (claude/live.mjs defaultView).
-  let was = null;
-  if (resume) { try { was = JSON.parse(readFileSync(launchFile(t.home, t.id), "utf8")); } catch {} }
-  const view = !live.streamOn() ? "terminal" : live.VIEWS.includes(was?.view) ? was.view : live.defaultView();
   writeFileSync(launchFile(t.home, t.id), JSON.stringify({
     home: t.home, task: t.id, session, thread, name, cwd: t.worktree, prompt: prompt ? promptFile : null,
-    model: on.model, effort: on.effort, mode, view, ...policyFor(mode), writableRoots: writableRoots(t), bin: bin(),
+    model: on.model, effort: on.effort, mode, ...policyFor(mode), writableRoots: writableRoots(t), bin: bin(),
     // Codex's question tool runs outside plan mode only behind this flag (under development in 0.146).
     questions: store.envFlag("ROLLCALL_CODEX_QUESTIONS") !== false,
   }, null, 2));
@@ -143,12 +139,14 @@ function send(t, args, input) {
  * owner's half-written words in the UI stay theirs. `before` is for keystrokes; there are none here.
  */
 export function type(t, text) {
-  // A worker with a control socket takes the words itself (codex/worker.mjs say), in either view: the chat shows them
-  // waiting until Codex takes them, and the files the owner attached go in, images as images.
-  if (live.record(t.home, t.id)) {
+  // A hosted worker (a hosted supervisor's task) takes the words through the host: files the owner attached go in,
+  // images as images.
+  if (hostedHome(t.home)) {
     const { body, attachments } = live.attachmentsIn(String(text));
-    const r = live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" });
-    if (!r.ok) return { ok: false, err: r.err ?? "the worker refused" };
+    const r = live.record(t.home, t.id)
+      ? live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" })
+      : (({ ok, how, error }) => ({ ok, how, err: error?.message }))(callSync("say", { ref: `${t.home}:${t.id}`, text: body, attachments, from: "rollcall" }));
+    if (!r.ok) return { ok: false, err: r.err ?? "the agent host refused" };
     received(t, String(text));
     return { ok: true, how: r.how };
   }
@@ -159,7 +157,7 @@ export function type(t, text) {
 }
 
 /** Stops the worker's running turn (turn/interrupt). */
-export const interrupt = (t) => (live.record(t.home, t.id) ? live.send(t.home, t.id, { op: "interrupt" }).ok === true : send(t, ["interrupt"]).ok);
+export const interrupt = (t) => (hostedHome(t.home) ? callSync("interrupt", { ref: `${t.home}:${t.id}` }).interrupted === true : send(t, ["interrupt"]).ok);
 
 /** Words go through the protocol, never into the UI's input box: the worker takes them once its thread runs. */
 export function takesTyping(t) {

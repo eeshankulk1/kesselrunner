@@ -144,8 +144,8 @@ export function flush(t, w, now = Date.now()) {
   if (!due.length) return { ...quiet, lost };
   // A dialog that opens in the moment between paste and Enter must not get that Enter.
   const r = workerAdapter(t).type(t, due.map((x) => x.text).join("\n\n"), { before: () => !dialogUp(h, id) });
-  // A stream-mode worker says how it took them: `sent` (a turn starts) or `queued` (into the running turn).
-  if (r.ok) return { typed: due.length, err: null, lost, how: r.how ?? null };
+  // A hosted worker says how it took them: `sent` (a turn starts) or `queued` (into the running turn).
+  if (r.ok) return { typed: due.length, err: null, lost, ...(r.how ? { how: r.how } : {}) };
   const ids = due.map((x) => x.id);
   edit(h, OUTBOX(id), (all) => ({ items: all.map((x) => (ids.includes(x.id) ? { ...x, typedAt: null, tries: x.tries - 1, sends: x.sends - 1 } : x)) }));
   return { typed: 0, err: r.err || "tmux refused", lost };

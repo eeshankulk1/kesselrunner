@@ -1,12 +1,12 @@
 // The front-end interface: one versioned way in for every front end (the cockpit Mac and iOS apps, scripts), over
-// the same state and the same code the terminal Falcon uses. Six verbs, JSON out:
+// the same state and the same code the terminal Falcon uses. Four verbs, JSON out:
 //   rollcall api version                     the interface version and what it offers
 //   rollcall api snapshot [--home <h>]       everything a front end draws, as one document
 //   rollcall api stream [--home <h>] [--client <name>] [--notifies]
 //                                            the snapshot, then each change as one JSON line, until stopped
 //   rollcall api do <action> [<json> | -]    every action the Falcon can take (api-actions.mjs)
 //   rollcall api attach <home>[:<task>]      what a front end runs to show that session's real terminal
-//   rollcall api conversation <ref> [--follow] a worker's (or the Falcon's) conversation as items (conversation.mjs)
+//   rollcall api conversation <ref> [--follow] a hosted crew's agent's history as items (host/conversation.mjs)
 // The contract is API.md beside this package's README; a breaking change bumps INTERFACE. rollcall stays daemonless:
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
 import { readFileSync } from "node:fs";
@@ -27,7 +27,7 @@ import * as tmux from "./tmux.mjs";
 import * as trouble from "./trouble.mjs";
 import { tokensOf, usageOf, when } from "./usage.mjs";
 import { usageMoves, view } from "./watch.mjs";
-import { viewOf } from "./claude/live.mjs";
+import { runtimeOf as crewRuntime } from "./host/client.mjs";
 
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
 export const INTERFACE = 1;
@@ -40,7 +40,7 @@ export const VERSION = (() => { try { return JSON.parse(readFileSync(new URL("..
 
 export const USAGE = `  rollcall api version | snapshot [--home <h>] | stream [--home <h>] [--client <name>] [--notifies]
               | do <action> [<json> | -] | attach <home>[:<task>] [--client <name>] [--resume]
-              | conversation <home>[:<task>] [--before <cursor>] [--limit <n>] [--follow] [--client <name>]
+              | conversation <home>[:<task>] [--before <cursor>] [--limit <n>] [--follow]
                                          the front-end interface (JSON): what a front end draws, its changes,
                                          every action, and its terminals (API.md)`;
 
@@ -59,11 +59,9 @@ export const refOf = (t) => `${t.home}:${t.id}`;
 // ---------------------------------------------------------------- the snapshot
 
 /** A worker as a front end draws it, or null when the task never had one (or its session ended). */
-function workerView(w, t) {
+function workerView(w) {
   if (!w) return null;
   return {
-    // Where it runs (claude/live.mjs): the chat (stream mode) or the terminal, a switch waiting, the prompt open in the chat.
-    ...(t ? viewOf(t.home, t.id) : { view: "terminal", switching: null, prompt: null }),
     session: w.session, alive: w.alive, busy: w.busy, parked: !!w.parked, stopped: !!w.stopped, legacy: !!w.legacy,
     dialog: w.dialog ? { since: w.dialog, asks: w.asks, text: asksText(w.asks) } : null,
     context: w.context === null ? null : { pct: w.context, tokens: w.tokens, size: w.size },
@@ -119,7 +117,7 @@ export function taskView(t, now = Date.now(), v = view(t, now)) {
     tokens: tokensOf(t),
     stage: t.stage ?? null,
     wait: t.wait ? { ...t.wait, label: trouble.waitLabel(t.wait, now) } : null,
-    worker: workerView(w, t),
+    worker: workerView(w),
     terminal: { window: !!win, alive: !!win?.alive },
     files: store.filesDir(t.home, t.id),
     createdAt: t.createdAt ?? null, updatedAt: t.updatedAt ?? null,
@@ -146,7 +144,9 @@ function supervisorView(h, now) {
     feed: (store.readHomeFile(h, "feed") ?? []).slice(-20).map((e) => ({ at: e.at, task: e.task ? `${h}:${e.task}` : null, text: e.text, report: e.report ?? null })),
     reminders: (store.readHomeFile(h, "reminders") ?? []).map((r) => ({ at: r.at, text: r.text })),
     openTasks: store.listTasks(h).filter(isOpen).length,
-    ...viewOf(h, null),
+    // Where the crew runs: "host" (made by a front end in the agent host: a chat, through the host's socket) or
+    // "terminal" (falcon or /supervisor: tmux windows and the real CLIs).
+    runtime: crewRuntime(h),
   };
 }
 
@@ -276,4 +276,4 @@ export function attachInfo(ref, { client = "frontend", resume = null } = {}) {
   };
 }
 
-const workerViewFor = (t) => workerView(view(t).w, t);
+const workerViewFor = (t) => workerView(view(t).w);

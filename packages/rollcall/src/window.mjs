@@ -6,11 +6,13 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { pidAlive } from "./proc.mjs";
 import { BIN, P, currentSession } from "./session.mjs";
 import * as store from "./store.mjs";
 import { noBrowser, statusLine } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
-import { VIEWS, defaultView, launchFile, readJson, streamOn, writeJson } from "./claude/live.mjs";
+import { launchFile, writeJson } from "./claude/live.mjs";
+import { agentRecord, callSync, hostedHome } from "./host/client.mjs";
 
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
@@ -137,32 +139,17 @@ export function writeWindow(h, back, { prompt = null } = {}) {
     store.writeHomeFile(h, "sent", { text: prompt, at: Date.now() });
     first = ` "$(cat ${q(promptFile)})"`;
   }
-  const bin = process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude";
-  const claude = q(bin);
+  const claude = q(process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude");
   const t = (args) => `tmux -L ${q(tmux.SOCKET())} ${args}`;
-  // The supervisor runs under the stream worker (claude/worker.mjs) as a task's worker does: in the chat view a front
-  // end reads and answers it, and its window shows a plain text view with Enter for the real CLI.
-  let run = back.resume
-    ? `${claude} --resume ${q(back.session)} --settings ${q(settings)}${first}`
-    : `${claude} --session-id ${q(back.session)} --settings ${q(settings)} -n ${q(h)} ${q(`/supervisor ${h}`)}`;
-  if (streamOn()) {
-    const text = back.resume ? prompt : `/supervisor ${h}`;
-    if (text && !back.resume) writeFileSync(promptFile, text);
-    const was = back.resume ? readJson(launchFile(h, null)) : null;
-    writeJson(launchFile(h, null), {
-      home: h, task: null, session: back.session, resume: !!back.resume, settings, cwd: back.cwd, bin,
-      prompt: text ? promptFile : null, mode: null, model: null, effort: null, addDir: [], name: h,
-      view: VIEWS.includes(was?.view) ? was.view : defaultView(),
-    });
-    run = `${q(process.execPath)} ${q(BIN)} claude-worker ${q(h)}`;
-  }
   const lines = [
     `# falcon: supervisor ${h}'s tmux window sources this file.`,
     "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_PROJECT_DIR CLAUDE_ENV_FILE ROLLCALL_SESSION ROLLCALL_TASK",
     ...envExports(),
     `cd ${q(back.cwd)} || exit 1`,
     "started=$(date +%s)",
-    run,
+    back.resume
+      ? `${claude} --resume ${q(back.session)} --settings ${q(settings)}${first}`
+      : `${claude} --session-id ${q(back.session)} --settings ${q(settings)} -n ${q(h)} ${q(`/supervisor ${h}`)}`,
     "code=$?",
     `if [ "$code" -ne 0 ] && [ $(( $(date +%s) - started )) -lt 15 ]; then printf '\\n[falcon] Claude Code stopped (exit %s). Press Enter to close this tab.\\n' "$code"; read -r _; fi`,
     // Only the terminals on this window: one showing a worker stays where it is.
@@ -179,6 +166,7 @@ const shellRun = (script) => [process.env.SHELL || "/bin/zsh", "-lic", `. ${q(sc
 
 /** Starts `back` in the supervisor's window, first in its home's session (made when there is none). Returns tmux's { ok, err }. */
 export function startWindow(h, back, opts = {}) {
+  if (hostedHome(h)) return startHosted(h, back, opts);
   const script = writeWindow(h, back, opts);
   const r = tmux.runInWindow(h, h, back.cwd, shellRun(script), { first: true });
   if (r.ok) tmux.setTabs(h, new Map([[h, tmux.supervisorTab(h)]]));
@@ -191,6 +179,10 @@ export function startWindow(h, back, opts = {}) {
  * `idle` is how long its conversation had been quiet; `open` how many tasks are open. Returns tmux's { ok, err }.
  */
 export function parkWindow(h, { idle, open }) {
+  if (hostedHome(h)) {
+    const r = callSync("park", { ref: h });
+    return r.ok && r.parked ? { ok: true } : { ok: false, err: r.error?.message ?? "the agent host did not park it" };
+  }
   const parked = join(store.homeDir(h), "parked.sh");
   const m = Math.max(1, Math.round(idle / 60_000));
   const quiet = m < 60 ? `${m} minutes` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
@@ -208,4 +200,48 @@ export function parkWindow(h, { idle, open }) {
   const r = tmux.runInWindow(h, h, cwd && existsSync(cwd) ? cwd : homedir(), shellRun(parked), { first: true });
   if (r.ok) tmux.setTabs(h, new Map([[h, tmux.supervisorTab(h, { parked: true })]]));
   return r;
+}
+
+// ---------------------------------------------------------------- a supervisor the agent host runs
+
+/**
+ * Supervisor `h` when a front end made it in the agent host (host/client.mjs hostedHome): the host's state for its
+ * session (agent.json): running, idle, parked, stopped, terminal; parked once the host that ran it is gone. Else null.
+ */
+export function hostedSupervisor(h) {
+  if (!hostedHome(h)) return null;
+  const a = agentRecord(h, null);
+  if (!a?.state) return null;
+  return { ...a, state: a.state === "stopped" || pidAlive(a.host) ? a.state : "parked" };
+}
+
+/**
+ * Writes what the agent host starts a hosted supervisor from: its settings and `claude-launch.json` in its worker
+ * folder (`workers/<h>/`), the shape a task's Claude launch has. A new session starts on `/supervisor <h>`; a resumed
+ * one with `prompt`, or none (it waits for the owner).
+ */
+export function writeHostedLaunch(h, back, { prompt = null } = {}) {
+  const dir = store.homeDir(h);
+  const settings = join(dir, "settings.json");
+  const promptFile = join(dir, "prompt.txt");
+  writeFileSync(settings, JSON.stringify(SUPERVISOR_SETTINGS(), null, 2));
+  store.writeHomeFile(h, "falcon", { session: back.session, cwd: back.cwd, at: Date.now() });
+  const text = back.resume ? prompt : `/supervisor ${h}`;
+  if (text) writeFileSync(promptFile, text);
+  if (back.resume && prompt) store.writeHomeFile(h, "sent", { text: prompt, at: Date.now() });
+  writeJson(launchFile(h, null), {
+    home: h, task: null, session: back.session, resume: !!back.resume, settings, cwd: back.cwd,
+    bin: process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude",
+    prompt: text ? promptFile : null, mode: null, model: null, effort: null, addDir: [], name: h,
+  });
+}
+
+/**
+ * Starts `back` for a hosted supervisor: its launch, then the host's `start` (`restart`, so a handoff's new session
+ * replaces the running one). Returns { ok, err, hosted }.
+ */
+function startHosted(h, back, opts = {}) {
+  writeHostedLaunch(h, back, opts);
+  const r = callSync("start", { ref: h, restart: true, harness: "claude" });
+  return r.ok ? { ok: true, hosted: true } : { ok: false, err: r.error?.message ?? "the agent host did not start the supervisor" };
 }

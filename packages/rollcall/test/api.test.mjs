@@ -71,7 +71,7 @@ test("api version names the interface, its verbs, every action and the ones comi
   assert.equal(v.interface, 1);
   assert.match(String(v.rollcall), /^\d+\.\d+\.\d+/);
   assert.deepEqual(v.verbs, ["version", "snapshot", "stream", "do", "attach", "conversation"]);
-  assert.deepEqual(Object.keys(v.actions).sort(), ["away.set", "blocker.clear", "check.log", "decision.answer", "held.allowAll", "held.answer", "pr.timeline", "prompt.answer", "question.answer", "repo.items", "review.comment", "review.comments", "review.send", "task.archive", "task.close", "task.diff", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.switch", "task.tell", "turn.diff", "turn.restore", "turns.list", "worker.set"]);
+  assert.deepEqual(Object.keys(v.actions).sort(), ["away.set", "blocker.clear", "check.log", "decision.answer", "held.allowAll", "held.answer", "pr.timeline", "prompt.answer", "question.answer", "repo.items", "review.comment", "review.comments", "review.send", "supervisor.end", "supervisor.new", "task.archive", "task.close", "task.diff", "task.interrupt", "task.move", "task.restore", "task.resume", "task.run", "task.spotlight", "task.start", "task.stop", "task.tell", "turn.diff", "turn.restore", "turns.list", "worker.set"]);
   for (const cli of Object.values(v.actions)) assert.equal(typeof cli, "string");
   assert.deepEqual(v.coming, {}, "plans A and C landed: nothing is still coming");
   const bad = owner(sb, ["api", "frobnicate"]);
@@ -98,6 +98,8 @@ test("api snapshot holds every top-level section and a task's panel fields", (t)
   assert.equal(s.sessions[0].mainCheckout, true);
   assert.equal(s.sessions[0].state, "working");
 
+  // A crew started in the terminal (falcon, /supervisor) says so: no chat, its agents are terminals.
+  assert.equal(s.supervisors.find((x) => x.name === "alpha")?.runtime, "terminal");
   const task = s.tasks.find((x) => x.ref === "alpha:t1");
   assert.ok(task);
   assert.equal(task.name, "yoda");

@@ -23,6 +23,7 @@ import { holderOf, nameOf, pickName } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
 import { decisionsOf } from "./task.mjs";
 import { view } from "./watch.mjs";
+import { hostedHome } from "./host/client.mjs";
 import { backText, comeBack, lastSession, startWindow, unparkHome } from "./window.mjs";
 
 const USAGE = `falcon - open a supervisor in this terminal tab, the way \`claude\` opens a session.
@@ -95,6 +96,8 @@ function reserve() {
  * another terminal is left alone: one process per conversation, so the owner quits it there first.
  */
 function open(h, again) {
+  // A crew cockpit started runs in the agent host, not in falcon's tmux: cockpit shows it.
+  if (hostedHome(h)) fail(`${h} runs in cockpit's agent host, not in a terminal: open it in cockpit (rollcall open ${h} runs its real CLI here).`);
   if (!tmux.windowOf(h, h)?.alive) {
     const holder = holderOf(h);
     if (holder) fail(`${h} is open in another terminal (session ${short(holder.id)}). Quit it there with /exit, then run ${again} again.`);
@@ -125,6 +128,7 @@ function attach(h) {
 export function supervisors(now = Date.now()) {
   const out = [];
   for (const h of store.listHomes()) {
+    if (hostedHome(h)) continue; // cockpit's crews (the agent host) are cockpit's to list
     const lock = store.readHomeFile(h, "lock");
     const f = store.readHomeFile(h, "falcon");
     if (!lock?.session && !f?.session) continue;

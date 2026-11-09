@@ -2,7 +2,7 @@
 
 One versioned way in for every front end: the cockpit Mac and iOS apps (written in Swift, which run the `rollcall` CLI), scripts, and the terminal Falcon's own actions. It covers what a front end draws (a snapshot), its changes (a stream), every action the Falcon can take, a worker's conversation as plain items (for a native chat), and what a front end runs to show a session's real terminal.
 
-The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-reads.mjs` (the review and ship reads), `src/conversation.mjs` (the conversation), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface), `src/away.mjs` (away mode and what it holds), `src/clients.mjs` (open front ends and the notices log) and `src/claude/` (the stream-mode Claude worker behind the chat view).
+The code: `src/api.mjs` (refs, the snapshot, attach), `src/api-stream.mjs` (the stream), `src/api-actions.mjs` (the actions), `src/api-reads.mjs` (the review and ship reads), `src/conversation.mjs` (transcripts folded into items), `src/api-cli.mjs` (the `rollcall api` verbs), `src/answer.mjs` (answers from any surface), `src/away.mjs` (away mode and what it holds), `src/clients.mjs` (open front ends and the notices log) `src/host/` (the agent host, cockpit's crews' runtime) and `src/claude/` (Claude Code's stream mode, as the host runs it).
 
 ```
 rollcall api version
@@ -10,12 +10,12 @@ rollcall api snapshot [--home <h>]
 rollcall api stream [--home <h>] [--client <name>] [--notifies]
 rollcall api do <action> [<json> | -]
 rollcall api attach <home>[:<task>] [--client <name>] [--resume]
-rollcall api conversation <ref> [--before <cursor>] [--limit <n>] [--follow] [--client <name>]
+rollcall api conversation <ref> [--before <cursor>] [--limit <n>] [--follow]
 ```
 
 ## Rules
 
-- **No daemon.** rollcall runs no server. A stream is a process the front end starts and stops. A front end that needs a server (to reach a phone, say) runs its own on top of these commands.
+- **No daemon in the terminal flow; cockpit's crews run in the host.** A crew started in the terminal (`falcon`, `/supervisor`) runs no daemon: its agents are tmux windows, and everything here is a command (a stream is a process the front end starts and stops). A crew cockpit starts (`supervisor.new`) runs in the agent host, the one long-lived process rollcall runs (see The agent host), which owns those agents and serves their state and chats over a socket. The two are kept apart: a front end shows a hosted crew as chats and a terminal crew as terminals (`attach`); `supervisor.runtime` says which.
 - **JSON out.** Every verb prints JSON on stdout. `snapshot` prints one line; each stream line is one JSON object; `version`, `do` and `attach` print indented JSON.
 - **One error shape.** A refusal prints `{ "ok": false, "error": { "code": "...", "message": "..." } }` and exits 1. A usage error (an unknown verb, a missing argument, a payload that is not JSON) exits 2 with the same shape.
 - **Times** are Unix milliseconds. **Paths** are absolute.
@@ -80,7 +80,7 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `feed` | array | The last 20 lines rollcall told the owner with no model turn: `{ at, task, text, report }`, `task` a ref or null, `report` a path or null |
 | `reminders` | array | `rollcall remind` lines not yet due: `{ at, text }` |
 | `openTasks` | number | Its open tasks |
-| `view`, `switching`, `prompt` | | Where it runs and its open prompt, as on a worker (below) |
+| `runtime` | `"host"` \| `"terminal"` | Where the crew runs: `host` (made by a front end with `supervisor.new`: it and its tasks are agents in the agent host, each with a chat) or `terminal` (falcon or `/supervisor`: tmux windows and the real CLIs; show them as terminals) |
 
 ### A task
 
@@ -142,17 +142,14 @@ Everything a front end draws, as one JSON document. `--home` keeps supervisors, 
 | `started` | bool \| null | Its session has started (false while it waits at the trust prompt) |
 | `lastWords`, `background` | \| null | Once idle: its last words, and the background work it left running |
 | `mode`, `model`, `effort` | string \| null | What it was launched with |
-| `view` | `"chat"` \| `"terminal"` | Where it runs now: the chat (Claude Code's stream mode, read with `conversation` and answered with `prompt.answer`) or the real CLI in its window (see The chat view) |
-| `switching` | `{ to, since }` \| null | A switch (`task.switch`) waits for its next quiet point: no turn running, no prompt open |
-| `prompt` | object \| null | The live moment open in the chat (below); always null in the terminal view, where `dialog` says what is open |
 
-**The prompt.** `{ id, at, kind, tool, input, summary, reason, questions, plan, relays, suggestions }`, open in a chat-view worker until answered.
+**A hosted agent's request.** `{ id, at, kind, tool, input, summary, reason, questions, plan, relays, suggestions }`, open until answered: the host's `request` events and `history` page, and `api conversation`'s `prompt`. A tmux worker has none: its `dialog` says what is open in its window.
 - `id`: what `prompt.answer` names. `kind`: `permission` (a tool needs approval), `plan` (ExitPlanMode: approve the plan) or `question` (the session's own AskUserQuestion).
 - `tool`, `input`, `summary`, `reason`: as a held item's (below), for any kind. `suggestions`: Claude Code's permission suggestions; `always: true` applies those that last for the session.
 - `questions`: for `question`, `{ question, header, multiSelect, options: [{ label, description }] }`. `plan`: for `plan`, the plan's markdown.
 - `relays`: on the Falcon's own question, when it relays a task's open question: `{ ref, question }` (the task and its question id). A front end shows that task's card for it and never a second one. Answering the task's question (`question.answer`) closes this prompt (declined, with a note to the Falcon that the answer went through); answering this prompt answers the task's question, as a pick in the Falcon's picker does.
-- A task worker's own question never opens a prompt: it is the task's `question`, in either view.
-- Away mode holds a chat-view worker's permission prompt exactly as a terminal one's: it becomes a held item, never a prompt.
+- A task worker's own question never opens a request: it is the task's `question`.
+- Away mode holds a hosted agent's permission request exactly as a tmux worker's dialog: it becomes a held item, never a request.
 
 **A session.** `{ id, repo: { key, name }, branch, checkout, mainCheckout, harness, state, since, intent, claim }`. `state` is `working`, `idle` or `stale`. `intent` is its claim or first prompt.
 
@@ -283,12 +280,13 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | Action | Payload | Result | The Falcon's way |
 |---|---|---|---|
 | `task.start` | `home`, `title` (up to 200), `words`, `repo` (a path) or `noRepo: true`; optional `type`, `kind`, `model`, `effort`, `base`, `slug`, `after` (ids), `notes` (strings), `until`, `ship`, `browser`, `hold`, `harness` (`claude` or `codex`), and one of `issue`, `pr` (a number or URL: then `title` and `words` are optional) or `branch` (then `words` is optional) | `task` (its ref), `started`, `trustPrompt`, `message`, `view` | `rollcall task new` + `start.mjs` |
-| `task.tell` | `task` (or a bare home: the Falcon itself, in the chat view), `text`, optional `attachments` (absolute paths, ten at most) | `delivered`, `how` (`typed`, `sent`, `queued`, `held`, `resumed`), `why`, `view` | `@luke <text>` |
+| `task.tell` | `task` (or a bare home: a hosted supervisor itself), `text`, optional `attachments` (absolute paths, ten at most; hosted crews only) | `delivered`, `how` (`typed`, `sent`, `queued`, `held`, `resumed`), `why`, `view` | `@luke <text>` |
 | `question.answer` | `task`, `question` (its id), `answers` (question text to answer) or `answer` (a single question) | `delivered`, `how`, `why`, `pickerClosed`, `view` | a pick in the Falcon's picker |
-| `task.interrupt` | `task` (or a bare home) | `interrupted`, `why` | `start.mjs <task> --interrupt` (Esc in its window, the stream's interrupt in the chat) |
-| `prompt.answer` | `task` (or a bare home), `prompt` (its id), and by kind: `permission`: `allow`, optional `why`, optional `always`; `plan`: `allow`, optional `why`, optional `mode` (`acceptEdits`, `default`); `question`: `answers` (question text to answer) | `answered`, `already`, `view` | the prompt in its window |
-| `worker.set` | `task` (or a bare home), `model` and/or `mode` (`default`, `acceptEdits`, `plan`: the modes Shift-Tab cycles; a mode lasts for the session, a model carries into a resume). A Codex task takes a Codex `model` only, from its next turn (a `mode` is `bad-payload`: it keeps the mode it started with) | `set`, `view` | `/model`, Shift-Tab in its window |
-| `task.switch` | `task` (or a bare home), `to` (`chat` or `terminal`) | `switched`, `pending`, `already`, `view` | Enter in its chat view's window |
+| `task.interrupt` | `task` (or a bare home: a hosted supervisor) | `interrupted`, `why` | `start.mjs <task> --interrupt` (Esc in its window; the host's interrupt for a hosted agent) |
+| `prompt.answer` | `task` (or a bare home), of a hosted crew; `prompt` (the request's id), and by kind: `permission`: `allow`, optional `why`, optional `always`; `plan`: `allow`, optional `why`, optional `mode` (`acceptEdits`, `default`); `question`: `answers` (question text to answer) | `answered`, `already`, `view` | the host's `answer` |
+| `worker.set` | `task` (or a bare home), of a hosted crew; `model` and/or `mode` (`default`, `acceptEdits`, `plan`: the modes Shift-Tab cycles; a mode lasts for the session, a model carries into a resume). A Codex task takes a Codex `model` only, from its next turn (a `mode` is `bad-payload`: it keeps the mode it started with) | `set`, `view` | the host's `set` |
+| `supervisor.new` | `cwd` (absolute), optional `name` (a free supervisor name; else the next free ship name) | `home`, `session`, `runtime` (`"host"`) | `rollcall host new --cwd <dir> [--name <h>]` |
+| `supervisor.end` | `home` (a hosted supervisor) | `stopped` (refs) | `rollcall host end <h>` |
 | `task.stop` | `task` | `stopped`, `why`, `view` | `start.mjs <task> --stop` |
 | `task.resume` | `task`, optional `why` (up to 300) | `resumed`, `trustPrompt`, `message`, `view` | `start.mjs <task> --resume "<why>"` |
 | `task.close` | `task`, optional `why` (up to 300) | `closed`, `already`, `view` | `rollcall task close <task> "<why>"` |
@@ -318,11 +316,11 @@ Notes on each:
 - `task.start` makes the task and its worktree, then starts its worker in the supervisor's permission mode; the call can take a minute or two. A task with `after` or `hold` is made but not started (`started: false`): rollcall starts it when it is free. `trustPrompt: true`: the worker waits on Claude Code's trust prompt for its repo, which the owner answers in its terminal (`attach`).
 - `task.tell` goes as the owner's own words, typed into the worker as its next prompt, the way an `@luke` line does. `held`: they wait on the worker's queue (a dialog is open, it is still starting, someone types in its window) and go in on their own; `why` says which. A task with no worker yet gets one, with the words in its brief (`delivered: false`, `why` says so). The supervisor hears of the words at its next turn.
 - `question.answer`: `answers` maps each open question's `question` text to its answer: an option's label, several labels joined with `", "` for a multi-select, or the owner's own words. The answer reaches the worker exactly as a pick in the Falcon's picker does; the worker cannot tell which surface answered. `pickerClosed`: the Falcon had a picker open on this question, and rollcall closed it.
-- `task.tell` in the chat view goes into the worker's stream: `sent` (a turn starts) or `queued` (it goes into the running turn, as words typed mid-turn do). Attachments ride as a last line naming them (`[Attached: /a.png, /b.txt]`), so either view gets them; in the chat, images also go in as images. With a bare home the words are the owner's line to the Falcon, as if typed into its prompt (an `@luke` line routes as it would there); it needs the Falcon in the chat view (`refused` otherwise: type in its terminal).
+- `task.tell` to a hosted agent goes in through the host: `sent` (a turn starts), `queued` (it goes into the running turn, as words typed mid-turn do), `resumed` (a parked agent woke on its session) or `held` (it is open in a terminal). Attachments ride as a last line naming them (`[Attached: /a.png, /b.txt]`), and images also go in as images; a terminal crew's task refuses them. With a bare home the words are the owner's line to a hosted supervisor, as if typed into its prompt; a terminal supervisor is `refused` (the owner types in its terminal).
 - `task.interrupt` stops the worker's turn; it keeps running.
 - `prompt.answer`: the first answer wins; the same prompt again answers `already: true`, an unknown id is `not-found`. `always: true` allows that kind of call for the rest of the session: it applies only the suggestions whose `destination` is `session`, never a rule written to a settings file. Only `allow: true` allows; anything else declines, a question's `answers` included. A `plan` approved with `mode` also sets the session's permission mode. A Codex worker's prompts are `permission` (a command, a file change, wider permissions, an MCP server's request) and, rarely, `question` (one that could not go to the task); `always` there is Codex's approval for the rest of the session. On a worker in the terminal view, `prompt.answer` and `worker.set` are `refused` with a message that says to switch.
-- `task.switch` moves a worker between the chat and the real CLI at its next quiet point, keeping its conversation (`--resume`): `switched` (now) or `pending` (it waits; `switching` shows it). A worker started before the chat view (the plain CLI in its window) is `refused`: stop and resume it. With no worker running, the view is kept for its next start (`pending: true`). A Codex worker keeps its thread through a switch: only Codex's own screen starts or stops. `interrupted: false` with a `why` when no worker runs.
 - `task.stop` ends the worker; the task stays open and nothing resumes it unasked.
+- `supervisor.new` makes a hosted crew: the home is recorded as hosted (`runtime.json`), its first session starts in the host on `/supervisor <h>`, and every task it starts runs in the host. A taken `name` is `refused`. `supervisor.end` stops its open tasks' agents, then its own (sessions saved: the owner's words to it, or `task.resume`, bring them back); a terminal crew is `not-found`. A terminal crew is never made or ended here: `falcon` and `/supervisor` own it.
 - `task.close`, `task.move` and `decision.answer` answer `already: true` when it was done before, so a repeat from a second front end is harmless.
 - `decision.answer`, like `rollcall task decisions done`, puts the answer on the deciding task's record and, when that task is open and has had a worker, delivers it to the worker as its next prompt, which wakes it: `delivered` and `how` as for `task.tell` (`typed`, `held`, `resumed`). A decision from no task, from a finished task, or from one whose worker never started gets `delivered: false, how: null`.
 - `away.set` with the value it has already answers `already: true` and changes nothing. Turning it off writes `away.last`.
@@ -369,11 +367,11 @@ What a front end runs to show a session's real terminal: a tmux client on rollca
 - `alive`: the window runs something other than a shell. `harness` says what runs there (`claude` or `codex`).
 - Errors: `bad-payload` (a malformed ref; exit 2 when the ref is missing), `not-found`, `unavailable` (no tmux), `failed` (the resume failed), `no-window`.
 
-## `rollcall api conversation <ref> [--before <cursor>] [--limit <n>] [--follow] [--client <name>]`
+## `rollcall api conversation <ref> [--before <cursor>] [--limit <n>] [--follow]`
 
-A worker's conversation as plain items, for a native chat: a task ref (`falcon:t3`, `falcon:luke`), or a bare home (`falcon`) for the Falcon's own. It reads the session's transcript, so both views and every resume show the same conversation, and in the chat view adds the reply text as it streams.
+A hosted agent's conversation as plain items, for a native chat: a hosted crew's task ref (`hoth:t3`), or its bare home (`hoth`) for the supervisor's own. It reads the host's one history of the agent (every session, the escape hatch's turns too), starting the host when it does not run. A terminal crew's ref is `not-found`: show it as a terminal (`attach`).
 
-Without `--follow` it prints one line, a page: `{ "ok": true, "ref", "session", "harness", "view", "items": [...], "cursor", "more", "prompt" }`: the last `--limit` items (200 by default), or with `--before <cursor>` the page before it. `cursor` is the id of the page's oldest item (null when `more` is false); an unknown cursor is `not-found`. Items under a subagent come right after it and do not count toward the limit.
+Without `--follow` it prints one line, a page: `{ "ok": true, "ref", "session", "harness", "items": [...], "cursor", "more", "prompt", "agent" }`: the last `--limit` items (200 by default), or with `--before <cursor>` the page before it. `cursor` is the id of the page's oldest item (null when `more` is false); an unknown cursor is `not-found`. `prompt` is the agent's first open request; `agent` its state in the host. Items under a subagent come right after it and do not count toward the limit.
 
 With `--follow` it prints the page (`type: "page"`), then one line per change until stopped, in `api stream`'s envelope (`v`, `seq`, `at`, `type`):
 
@@ -382,13 +380,12 @@ With `--follow` it prints the page (`type: "page"`), then one line per change un
 | `page` | the page's fields | First line, and after a `reset` |
 | `item` | `item` | A new item, or one replacing the item with the same `id` (a tool's result arrived, streamed text finished) |
 | `text` | `id`, `append` | Streamed text added to item `id` (an `assistant` or `thinking` item with `streaming: true`) |
-| `prompt` | `prompt` (or null) | The open prompt changed or closed |
-| `view` | `view`, `switching` | The view changed |
-| `reset` | | Start over: drop the items and take the next `page` line (a new session, a transcript rewritten, streamed text that never reached the transcript) |
+| `prompt` | `prompt` (or null) | The open request changed or closed |
+| `reset` | | Start over: drop the items and take the next `page` line (the host went away and the follow attached again) |
 | `heartbeat` | | Nothing for 15 s (`ROLLCALL_API_HEARTBEAT_MS`) |
 | `error` | `message` | Reading failed; the follow goes on |
 
-It ends as `api stream` does. Several follows at once are fine: each costs a file watch, not a model. A Codex task reads the same items from its worker's journal (below); a Codex worker started before the chat view wrote none until it is resumed.
+It ends as `api stream` does. Several follows at once are fine: each is one subscription on the host's socket. A front end may talk to the socket itself instead (The agent host).
 
 **Items.** Every item is `{ id, at, kind, ... }`, `id` stable across pages and follows, in the conversation's order.
 
@@ -404,15 +401,46 @@ It ends as `api stream` does. Several follows at once are fine: each costs a fil
 | `turn` | `phase` (`start`, `end`), and at the end `ms`, `tokens` `{ input, output, context }`, `error` (one line, when the turn failed) |
 | `system` | `text`: a note (a command's output, a background agent's notice) |
 
-## The chat view
+## The agent host
 
-A Claude worker, and the Falcon, runs as `rollcall claude-worker <home> [<task>]` in its window, in one view at a time. In the `chat` view it runs Claude Code in its stream mode (the one its SDK uses) with the owner's whole setup: hooks, skills, CLAUDE.md, MCP and subagents; a front end reads it with `conversation`, answers it with `prompt.answer` and talks to it with `task.tell`. Its window shows a plain text view of the chat, where Enter opens the real CLI, Esc stops the turn, and `y`/`n` (or a number, for a question) answer a prompt. In the `terminal` view the real CLI runs in its window, as before. A switch keeps the conversation and waits for a quiet point.
+Cockpit's crews run in the agent host: a supervisor made with `supervisor.new` (or `rollcall host new`), and every task it starts, Claude and Codex alike. A crew started in the terminal (`falcon`, `/supervisor`) never does: its supervisor and workers are tmux windows running the real CLIs, and nothing keeps the two kinds in step. The host is `rollcall host`, one long-lived process per store (`ROLLCALL_HOME`), with its lock, `host.json` and log in `<store>/_host/` and its socket at `rollcall-host-<8 hex of the store path's sha256>.sock` in the system temp folder. A client that needs it starts it (`host/client.mjs ensureHost`), detached, so it outlives the client. The design: `docs/plans/2026-11-08-agent-host.md`.
 
-A new worker starts in the chat while a front end follows rollcall (`api stream --client`), else in the terminal; `ROLLCALL_WORKER_VIEW` (`chat` or `terminal`) in settings `env` overrides that, and a resumed worker keeps the view it last had. A worker in a repo Claude Code has not trusted starts in the terminal, where the CLI asks (stream mode skips that question). `ROLLCALL_STREAM=0` starts the plain CLI with no worker process around it (no chat view), and keeps Codex workers in Codex's own screen.
+**The commands above for a hosted crew.** Its supervisor's snapshot says `runtime: "host"`; a task's `worker` reads as for a tmux worker (alive, busy, parked, stopped), its open request comes from the host (`history`, `subscribe`, `api conversation`). `task.tell`, `prompt.answer`, `task.interrupt`, `worker.set`, `task.stop` and `task.resume` reach it through the host; `attach` has no window to show (the escape hatch below is its terminal). `api conversation <ref>` reads the task's one history from the host, across every session; `--follow` prints the same `page`, `item`, `text`, `prompt` and `heartbeat` lines, needs no `reset` for a new session, and prints `reset` then `page` only after the host restarted.
 
-A Codex worker (`rollcall codex-worker <home> <task>`) has the same two views over one app server and one thread: in the chat view its window shows the same plain text view, and in the terminal view Codex's own screen attached to that server. In both it hears every item of its thread and writes the chat's items to its journal, `codex-<session>.jsonl` in its worker folder, one item per line (a later line with the same id replaces the item), with streaming text in `stream.live.json` as a Claude worker's; a resumed worker whose journal is missing writes it from the thread's saved history first. Codex's items map onto the same kinds: its messages, reasoning summaries, commands (`Bash`), file changes (`Edit`, with `patch`), MCP and other tool calls, spawned agents (`subagent`, with no children yet), its plan (`todos`), compactions and turns. Words, prompts, `worker.set` (model only) and the switch go through its control socket, as for a Claude worker. The starting view follows the same rule as a Claude worker's.
+**The socket.** Newline-delimited JSON. A call is `{ "id", "op", ... }`; its answer `{ "id", "ok": true, ... }` or `{ "id", "ok": false, "error": { "code", "message" } }`.
 
-**One question, one place.** In the chat, a worker's question is its task's `question` card, wherever it shows (the task's chat, the Falcon's chat, an inbox), and the Falcon's relay of it is a `prompt` with `relays`, never a second card. In the terminal, the CLI's own picker shows it, and a front end draws no card over a pane that shows that picker. Answering either closes the other.
+| `op` | Payload | Answer |
+|---|---|---|
+| `hello` | | `pid`, `version`, `interface` |
+| `list` | | `agents` |
+| `state` | `ref` | `agent` |
+| `start` | `ref`, optional `prompt`, `restart`, `harness` (`claude`, `codex`; else the newer launch file) | `agent`, `already` |
+| `say` | `ref`, `text`, optional `attachments` (paths, ten at most), `from` (`owner`, `rollcall`), `uuid` | `how` (`sent`, `queued`, `resumed`), `uuid` (the item's id) |
+| `interrupt` | `ref` | `interrupted` |
+| `answer` | `request`, optional `ref`, `by`, and by kind: `allow`, `why`, `always`, `mode`; `answers` | `answered`, `how` (`answered`, or `words` for a request whose process is gone) |
+| `set` | `ref`, `model` and/or `mode` (`default`, `acceptEdits`, `plan`) | `set` |
+| `park`, `stop` | `ref` | `parked`, `stopped` |
+| `history` | `ref`, optional `before`, `limit` (200) | `items`, `cursor`, `more`, `session`, `harness`, `agent`, `requests` |
+| `subscribe` | optional `refs` (every agent when absent) | `subscribed`, `agents`; then events on the same connection |
+| `open` | `ref` | `argv`: the command that opens the agent in a terminal (`rollcall open <ref>`), for a front end's own terminal, as `attach` gives tmux's |
+| `terminal` | `ref`, optional `pid` (the caller's process, which waits on the CLI) | `argv` (the real CLI on the agent's session), `cwd`, `unset` (variables to drop), `agent`. `rollcall open` sends it with its pid and holds the connection while the CLI runs |
+| `terminal-done` | `ref` | `closed`, `added` (items the terminal's session added to the history), `agent` |
+| `terminal-end` | `ref` | `closing` (false: no terminal open), `agent`. A front end done with the terminal: `rollcall open` ends the CLI once no turn runs, then closes it as `terminal-done` does; `refused` when no pid is on record |
+| `shutdown` | | the host parks every agent and exits |
+
+**An agent.** `{ ref, home, task, supervisor, harness, state, send, session, since, turnAt, parkedAt, model, mode, pid, requests, queued, terminal }`. `ref` is `home:task` for a task's worker, or the bare home for its supervisor (`supervisor: true`, `task: null`). `state` is `running` (a turn runs), `idle` (its process is up, no turn), `parked` (no process: the history and requests stay), `stopped`, or `terminal` (open in a terminal, below). `send` says what a message does now: `join` (goes into the running turn), `start` (starts a turn), `wake` (resumes the session, then delivers) or `hold` (waits until the terminal closes). An idle agent parks after `ROLLCALL_HOST_PARK_MS` (an hour), never with a request open or words waiting. The host's record of it is `agent.json` in the task's worker folder; the history is `history.jsonl` beside it.
+
+**Events.** `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }`: `state` (`agent`), `item` (`item`: new, or replacing the one with its `id`; words sent come first as a `queued: true` user item with the id `say` returned), `text` (`id`, `kind`, `append`, `parent`: streamed text on an item not finished yet), `request` (`request`), `closed` (`id`, `how`: `answered`, `cancelled` or `words`; `by`), `session` (`session`, `how`: `new` or `resume`).
+
+**Requests.** A question or permission prompt is a request: the prompt shape above plus `ref` and `session`, with an id of the host's own (`rq-...`) that survives a restart. The first answer wins; any later one hears `already-answered`. Claude Code cancelling it closes it (`cancelled`). An answer to a request whose process is gone (a crash, a host restart) wakes the agent on its session and delivers the answer as the owner's words (`how: "words"`), so the owner never meets a dead end.
+
+**Codex agents.** A hosted Codex agent runs its own `codex app-server` on a unix socket, one thread per session, with the same hooks, snapshots, usage-limit wait and context cap a tmux Codex worker has (`src/codex/session.mjs`; the tmux worker keeps its own loop and shares its protocol pieces), and a journal of its items. Its item ids carry the session's first 8 characters (`3f2a9c1d:item-4`); a user message keeps the id it was sent with. Approvals and questions are requests like Claude's. `worker.set` takes a model only (Codex keeps the permission mode it started with). Words steered in as a turn ended and never taken leave the queue after 3 s. Its seam is `codex.json`, with `ctl` and `thread`.
+
+**Supervisors.** A hosted supervisor's own session runs in the host, with no tmux window: `supervisor.new` starts it on `/supervisor <h>`, the watcher brings it back through the host (a handoff too), the host parks it on its own timer, and the watcher's news goes in through `say` (a parked supervisor wakes on its session). Its history is its own (`history.jsonl` in the home's own worker folder). Falcon refuses it (`falcon resume` names it as cockpit's) and leaves it out of its list. `supervisor.end` stops it and its workers. A question it asks that names a task's open question carries `relays: { ref, question }`: it is that task's request, so a front end shows the task's card, and it is answered once. Answered on the supervisor's request (`answer` with `answers`), the host passes it to the task as `question.answer` does, and Claude Code hears it was answered elsewhere (`how: "relayed"`). Answered on the task (`question.answer`), rollcall closes the supervisor's request through its seam. A second answer from either side hears `already-answered`.
+
+**The terminal escape hatch.** `rollcall open <ref>` runs the real CLI on the agent's own session in the caller's terminal: `claude --resume <session>` with the launch's settings, mode, model and effort (a session that never ran starts with `--session-id`, its name and its first prompt), or `codex resume <thread>`. The host ends its own process for the agent first and holds none while the CLI runs; the agent shows `terminal`. Meanwhile `say` answers `how: "held"` (the words wait, survive a host restart, and go in once when the terminal closes), `interrupt` and `start` are `refused`, `park` does nothing and the idle timer never runs. When the CLI exits (or the connection that opened it closes), the host appends what the terminal added that the history lacks, in order: a Claude session's items from its transcript, a Codex thread's new turns read from the thread itself (ids `<session prefix>:<turn>:<item>`). The agent is then `parked`, and held words wake it. A host restarted while the terminal runs keeps the agent `terminal` and watches the process that sent `terminal` (its `pid`); its end closes the terminal the same way, and so does `rollcall open` calling `terminal-done` on the new host. A terminal that closed while no host ran is read back when the host starts, and the agent is `parked`. Reading a terminal twice adds nothing, and neither does reading a turn the host ran itself (its transcript ends it under another id). A front end that runs its own terminal asks `open` for the argv. `terminal` on an agent is `{ at, closing }` while one is open (else null). `terminal-end` sets `closing` and sends SIGTERM to the `rollcall open` that runs it, which waits for a turn that started in the terminal to end, then ends the CLI with SIGTERM (Claude Code then ends cleanly with code 143, which `rollcall open` reports as 0); held words go in after the terminal's turn. A task's Claude worker is in a turn by its task's status log (an open dialog counts as no turn: nobody sees it), a Claude supervisor by its home's `turn` record (the owner's rollcall hooks write it at each prompt and Stop), a Codex agent by its thread (`thread/read` on a short-lived app server every 2 s: a turn `inProgress` that started in the terminal). Stream mode never asks Claude Code's trust question, so before the CLI opens on a task, the host marks the task's worktree trusted as Claude Code records the owner's yes (`hasTrustDialogAccepted` in `$CLAUDE_CONFIG_DIR/.claude.json`), only for folders rollcall made (under the repo's `.claude/worktrees/`, or the no-repo jobs folder); any other folder still asks.
+
+**Restart.** The host rebuilds itself from the `agent.json` files. An agent whose process went with the old host is `parked`, with a `system` item saying so; its open requests stay open. Nothing starts by itself.
 
 ## Several front ends at once
 
@@ -428,10 +456,11 @@ A Codex worker (`rollcall codex-worker <home> <task>`) has the same two views ov
 
 ## Contract tests
 
-- `test/conversation.test.mjs` (this package): transcripts folded into items, pages and cursors, the live overlay and a follow's lines.
-- `test/claude-worker.test.mjs` (this package): the stream-mode worker against a stand-in Claude Code: words in, queued words, prompts and their answers, interrupt, model and mode, the switch both ways, and the actions behind them.
-- `test/codex-chat.test.mjs` (this package): Codex items mapped onto the chat's, the journal and its history, and a Codex worker in the chat view against a stand-in Codex: words sent and queued, an approval prompt and its answer, the model for the next turn, the switch both ways, an interrupt, a resume that writes the journal from history. `test/codex-contract.test.mjs` checks the installed Codex still has every message and field this uses.
-- `test/claude-contract.test.mjs` (this package): the installed Claude Code still takes the stream worker's flags; with `ROLLCALL_CLAUDE_CONTRACT=live` it also runs one short Haiku turn and checks the message shapes the worker and the conversation read.
+- `test/host.test.mjs` (this package): the agent host against a stand-in Claude Code and Codex: start, words sent and queued, a request answered from two clients with the first winning, interrupt, park on idle and wake on a message, one history across a session change with earlier sessions backfilled, a restart keeping requests and history, the push lines, one host per store, a task worker started through `ROLLCALL_HOST=1` driven by the old seam, and a Codex agent's words, approvals (first answer wins), seam, hooks, park and resume of its thread. `test/host-supervisor.test.mjs`: a hosted supervisor's relayed question answered once from either side, the supervisor's tools (start, tell, wait, interrupt, chat) reaching a hosted worker with no tmux call, a supervisor started and parked through the host under the gate, and the escape hatch (terminal state, words held, a Claude terminal's and a Codex terminal's turns in the history, once, and a host restarted while a terminal runs or after it closed losing and doubling none, held words included; `terminal-end` waiting for a task's, a supervisor's and a Codex terminal's turn, and adding no second end to a turn the host ran).
+- `test/host-supervisor.test.mjs` (this package): hosted supervisors (`rollcall host new`, `host end`, `runtime` in the snapshot, falcon refusing one), relayed questions, the supervisor's tools on a hosted worker with no tmux call, the escape hatch, and a terminal supervisor's task and window going to tmux with no host started.
+- `test/conversation.test.mjs` (this package): transcripts folded into items, pages and cursors (the host's reader for its stream and its backfill).
+- `test/codex-items.test.mjs` (this package): Codex items mapped onto the chat's, history items and the journal folder, and the approval and image shapes a hosted Codex agent sends.
+- `test/claude-contract.test.mjs` (this package): the installed Claude Code still takes the stream-mode flags the host starts it with; with `ROLLCALL_CLAUDE_CONTRACT=live` it also runs one short Haiku turn and checks the message shapes the host and the conversation read.
 - `test/api.test.mjs` (this package): the contract a front end relies on: the version, the snapshot, the stream and its notices, the actions and their refusals, repeats, the first answer winning, who may call `do`, and attach. It runs with `npm test` here.
 - `test/away.test.mjs` (this package): away mode: a held permission request and its note, one notice per held item and question, no reminders, the switch and `last`, `held.answer` and its grant, `held.allowAll`, a decision's answer reaching its worker, and the stream's `away.changed` and `held.changed`. `test/harness.test.mjs` holds a Codex approval while away.
 - `test/supervisor.test.mjs` (kesselrunner's root): a scripted front-end client beside the terminal Falcon on a real tmux server, end to end: it starts a task, sees its question, answers it, tells the worker, attaches to its terminal and watches its PR land, while the Falcon shows the same task, answer and news.
