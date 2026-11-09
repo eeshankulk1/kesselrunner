@@ -13,8 +13,11 @@
 // Control requests: interrupt, set_model and set_permission_mode answer success. stdin's end: exit 0 once the
 // turn running is done.
 //
-// Without `-p` it is the real CLI in the terminal: prints a line and waits until SIGTERM (exit 0), or until its
-// parent is gone.
+// Without `-p` it is the real CLI in the terminal: prints a line and waits until SIGTERM (exit 143, as the real
+// one), or until its parent is gone.
+//
+// $FAKE_CLAUDE_TRANSCRIPT=1: stream mode writes each turn to the session's transcript as Claude Code does: the user
+// line under the uuid it was sent with, the reply, and a stop_hook_summary line whose uuid is not the result's.
 //
 // $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv }, { in } (every stdin line), { replayed }, { sigterm }.
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -26,6 +29,11 @@ const args = process.argv.slice(2);
 const log = (x) => { if (process.env.FAKE_CLAUDE_LOG) { try { appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ pid: process.pid, ...x })}\n`); } catch {} } };
 const argAfter = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const transcriptOf = (session) => {
+  const dir = join(process.env.CLAUDE_CONFIG_DIR, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"));
+  mkdirSync(dir, { recursive: true });
+  return join(dir, `${session}.jsonl`);
+};
 
 log({ argv: args });
 
@@ -34,17 +42,17 @@ if (!args.includes("-p")) {
   // $FAKE_CLAUDE_TERMINAL_TURN: one turn in the terminal ("<words>"), written to the session's transcript, then exit 0.
   if (process.env.FAKE_CLAUDE_TERMINAL_TURN) {
     const session = argAfter("--resume") ?? argAfter("--session-id");
-    const dir = join(process.env.CLAUDE_CONFIG_DIR, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"));
-    mkdirSync(dir, { recursive: true });
     const now = Date.now();
     const words = process.env.FAKE_CLAUDE_TERMINAL_TURN;
-    appendFileSync(join(dir, `${session}.jsonl`), [
+    appendFileSync(transcriptOf(session), [
       { type: "user", uuid: `tu-${now}`, timestamp: new Date(now).toISOString(), sessionId: session, message: { role: "user", content: words } },
       { type: "assistant", uuid: `ta-${now}`, timestamp: new Date(now + 1).toISOString(), sessionId: session, message: { id: `msg_t${now}`, role: "assistant", content: [{ type: "text", text: `terminal: ${words}` }] } },
+      ...(process.env.FAKE_CLAUDE_TRANSCRIPT ? [{ type: "system", subtype: "stop_hook_summary", uuid: `te-${now}`, timestamp: new Date(now + 2).toISOString(), sessionId: session }] : []),
     ].map((l) => JSON.stringify(l)).join("\n") + "\n");
     setTimeout(() => process.exit(0), Number(process.env.FAKE_CLAUDE_TERMINAL_MS) || 300);
   }
-  process.on("SIGTERM", () => { log({ sigterm: true }); process.exit(0); });
+  // Claude Code 2.1.319 ends cleanly on SIGTERM with code 143 (it prints how to resume the session first).
+  process.on("SIGTERM", () => { log({ sigterm: true }); process.exit(143); });
   // Its worker gone (killed in a test's cleanup), it goes too: nothing else would stop it.
   const parent = process.ppid;
   setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 200);
@@ -126,6 +134,14 @@ function stream() {
     const ms = Date.now() - t0;
     if (interrupted) out({ type: "result", subtype: "error_during_execution", is_error: true, ...base, duration_ms: ms, result: "Interrupted by the user", usage: { input_tokens: 20000, output_tokens: 42 }, modelUsage: { [model]: { contextWindow: 200000 } } });
     else out({ type: "result", subtype: "success", is_error: false, ...base, duration_ms: ms, result: said, usage: { input_tokens: 20000, output_tokens: 42 }, modelUsage: { [model]: { contextWindow: 200000 } } });
+    if (process.env.FAKE_CLAUDE_TRANSCRIPT) {
+      const at = (d) => new Date(t0 + d).toISOString();
+      appendFileSync(transcriptOf(session), [
+        { type: "user", uuid: first.uuid, timestamp: at(0), sessionId: session, message: { role: "user", content: words } },
+        { type: "assistant", uuid: randomUUID(), timestamp: at(1), sessionId: session, message: { id: mid, role: "assistant", model, content: [{ type: "text", text: said }] } },
+        { type: "system", subtype: "stop_hook_summary", uuid: randomUUID(), timestamp: at(ms + 2), sessionId: session },
+      ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+    }
     running = false;
     if (inbox.length) return turn(inbox.shift());
     if (ended) process.exit(0);

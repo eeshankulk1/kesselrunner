@@ -37,6 +37,19 @@ export async function terminalTurns({ h, id, cfg, thread, since = 0, has = () =>
   return lines.map((x) => ({ ...x, id: historyId(cfg.session, x.id) }));
 }
 
+/**
+ * Whether a turn a terminal started on Codex thread `thread` still runs (`status: "inProgress"`), by `thread/read` on
+ * a short-lived app server, as terminalTurns reads it; null when that cannot be read. A turn that started before
+ * `since` (ms, when the terminal opened) never counts: one the host's own process left unfinished stays in progress.
+ */
+export async function terminalTurnRunning({ cfg, thread, since = 0, envFile = null, env = process.env }) {
+  const [cmd, args] = commandOf(cfg.bin, ["app-server"], envFile);
+  try {
+    const r = await once(cmd, "thread/read", { threadId: thread, includeTurns: true }, { env, args, timeoutMs: 10_000 });
+    return (r?.thread?.turns ?? []).some((t) => t?.status === "inProgress" && Number.isFinite(t.startedAt) && t.startedAt * 1000 >= since - 1000);
+  } catch { return null; }
+}
+
 /** Starts the session; resolves to the runtime host/server.mjs drives (rejects when the thread does not start). */
 export async function startCodexAgent({ h, id, cfg, envFile = null, env = process.env, on, log }) {
   // A unix socket path has room for ~100 bytes: the system temp folder, not the store.

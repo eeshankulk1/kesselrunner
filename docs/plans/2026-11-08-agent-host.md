@@ -276,9 +276,16 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   That command ends the CLI with SIGTERM once no turn runs, then closes as above, so held words go in after the
   terminal's turn and nothing is cut off. Mid-turn means the task's status log (written by the launch settings'
   hooks, which the terminal's CLI runs too) shows a turn that started after the terminal opened and has not ended; an
-  open dialog counts as no turn, since nobody sees the terminal to answer it. A supervisor's session and a Codex
-  thread write no such log, so theirs close at once. A terminal with no pid on record (a front end that sent
-  `terminal` itself) is `refused`.
+  open dialog counts as no turn, since nobody sees the terminal to answer it. A Claude supervisor writes no such log:
+  its home's `turn` record says instead (`{ session, idle, at }`, which the owner's rollcall hooks write at each
+  prompt and Stop, watch.mjs markTurn), counted for the agent's own session from the terminal's opening. A Codex
+  thread is asked itself: `thread/read` on a short-lived app server, every 2 s while it waits, and a turn
+  `inProgress` that started after the terminal opened is a turn (one the host's process left unfinished never
+  counts). Claude Code 2.1.319 shuts down cleanly on that SIGTERM and exits 143; `rollcall open` reports 0 for an
+  end it asked for. A terminal with no pid on record (a front end that sent `terminal` itself) is `refused`.
+- Reading a Claude terminal back never doubles a turn the host ran: stream mode ended it under its `result` line's
+  id, which the transcript lacks (it ends the turn with `stop_hook_summary` or `turn_duration` under its own uuid), so
+  the end of a turn whose start the history holds is the history's own (history.mjs catchUp).
 - **Trust.** Stream mode skips Claude Code's trust question, so a hosted agent's worktree may never have been
   trusted, and the real CLI asks there, where Enter means "No, exit". Before it answers `terminal` for a task, the
   host marks the task's worktree trusted the way Claude Code records the owner's yes

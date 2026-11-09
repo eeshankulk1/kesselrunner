@@ -252,9 +252,78 @@ test("host escape hatch: terminal-end with no turn running closes the terminal a
   await until(() => x.agent()?.state === "terminal");
   await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
   assert.equal((await c.call("terminal-end", { ref })).closing, true);
-  assert.equal(await term.exited, 0);
+  assert.equal(await term.exited, 0, "the CLI's 143 on the SIGTERM asked for is a clean close");
   await until(() => x.agent()?.state === "parked");
   assert.equal(texts(x, "terminal: from the terminal").length, 1);
+});
+
+test("host escape hatch: reading the transcript back adds no second end to a turn the host ran", async (t) => {
+  // Claude Code's transcript ends the host's turn under another id than stream mode's result (stop_hook_summary).
+  const x = setup(t, { env: { FAKE_CLAUDE_TRANSCRIPT: "1", FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  assert.equal((await c.call("terminal-end", { ref })).closing, true);
+  assert.equal(await term.exited, 0);
+  await until(() => x.agent()?.state === "parked");
+  const turns = x.history().filter((e) => e.ev === "item" && e.item.kind === "turn" && !e.item.parent).map((e) => e.item.phase);
+  assert.deepEqual(turns, ["start", "end", "start", "end"], "one start and one end for each turn");
+  assert.equal(texts(x, "done: before").length, 1);
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+});
+
+test("host escape hatch: terminal-end waits for a supervisor's turn, by its home's turn record", async (t) => {
+  const x = supervisorSetup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  const cfg = x.supLaunch();
+  await x.startHost();
+  const c = await x.client();
+  assert.equal((await c.call("start", { ref: "alpha" })).ok, true);
+  await c.call("say", { ref: "alpha", text: "before" });
+  await until(() => x.supAgent()?.state === "idle");
+  const term = spawn(process.execPath, [BIN, "open", "alpha"], { env: x.hostEnv, stdio: "ignore" });
+  const exited = new Promise((r) => term.on("exit", (code) => r(code)));
+  t.after(() => { try { term.kill("SIGKILL"); } catch {} });
+  await until(() => x.supAgent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  // The owner's rollcall hooks mark the supervisor's turn at its prompt (watch.mjs markTurn).
+  const turn = join(x.sb.home, "_supervisors", "alpha", "turn.json");
+  writeFileSync(turn, JSON.stringify({ session: cfg.session, idle: false, at: Date.now() }));
+  assert.equal((await c.call("say", { ref: "alpha", text: "while open" })).how, "held");
+  assert.equal((await c.call("terminal-end", { ref: "alpha" })).closing, true);
+  await new Promise((res) => setTimeout(res, 1000));
+  assert.equal(x.supAgent().state, "terminal", "mid-turn: the CLI keeps running");
+  assert.ok(!x.fake().some((l) => l.sigterm), "the CLI was not stopped mid-turn");
+  writeFileSync(turn, JSON.stringify({ session: cfg.session, idle: true, at: Date.now() }));
+  assert.equal(await exited, 0);
+  assert.ok(x.fake().some((l) => l.sigterm), "the CLI heard SIGTERM");
+  await until(() => x.supHistory().some((e) => e.ev === "item" && e.item.text === "done: while open"), { timeout: 8000 });
+});
+
+test("host escape hatch: terminal-end waits for a Codex terminal's turn, by its thread", async (t) => {
+  const x = setup(t, { codexThreads: true });
+  x.codexLaunch();
+  await x.startHost();
+  const c = await x.client();
+  assert.equal((await c.call("start", { ref, harness: "codex" })).ok, true);
+  await c.call("say", { ref, text: "before" });
+  await until(() => x.agent()?.state === "idle" && texts(x, "done: before").length);
+  const term = openTerminal(t, x, { FAKE_CODEX_TERMINAL_TURN: "from the terminal", FAKE_CODEX_TERMINAL_BUSY_MS: "3500", FAKE_CODEX_TERMINAL_MS: "60000" });
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.codexFake().find((l) => l.argv?.[0] === "resume"));
+  assert.equal((await c.call("say", { ref, text: "while open" })).how, "held");
+  assert.equal((await c.call("terminal-end", { ref })).closing, true);
+  await until(() => x.codexFake().some((l) => l.turnDone), { timeout: 8000 });
+  assert.ok(!x.codexFake().some((l) => l.sigterm), "the CLI was not stopped mid-turn");
+  assert.equal(await term.exited, 0);
+  assert.ok(x.codexFake().some((l) => l.sigterm), "the CLI heard SIGTERM once the turn ended");
+  await until(() => texts(x, "done: while open").length, { timeout: 8000 });
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
 });
 
 test("host escape hatch: a worktree rollcall made is marked trusted before the CLI opens; the owner's folders are not", async (t) => {

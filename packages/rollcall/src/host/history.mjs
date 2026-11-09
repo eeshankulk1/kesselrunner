@@ -151,5 +151,23 @@ export function addNew(hist, session, items) {
  * its transcript holds that the history does not, appended in order. Returns them.
  */
 export async function catchUp(hist, where) {
-  return addNew(hist, where.session, await sessionItems(where));
+  return addNew(hist, where.session, withoutKnownEnds(hist, await sessionItems(where)));
+}
+
+/**
+ * A turn the host ran itself ended with the id of stream mode's `result` line, which the transcript never holds: its
+ * `turn_duration` line gives the same turn's end another id. So the end of a turn whose start the history holds already
+ * is the history's own, unless the history lacks one (the host died mid-turn).
+ */
+function withoutKnownEnds(hist, items) {
+  let known = null; // the history's position of the start of the turn being read, when it holds that start
+  return items.filter((x) => {
+    if (x.kind !== "turn" || x.parent) return true;
+    if (x.phase === "start") { known = hist.index.has(x.id) ? hist.index.get(x.id) : null; return true; }
+    if (x.phase !== "end" || known === null || hist.index.has(x.id)) return true;
+    const later = hist.items.slice(known + 1);
+    known = null;
+    const next = later.findIndex((y) => y.kind === "turn" && y.phase === "start" && !y.parent);
+    return !(next < 0 ? later : later.slice(0, next)).some((y) => y.kind === "turn" && y.phase === "end" && !y.parent);
+  });
 }

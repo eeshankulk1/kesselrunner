@@ -19,7 +19,8 @@
 // With $FAKE_CODEX_THREADS (a folder) the threads are saved there, as Codex saves its own: every finished turn goes in
 // <folder>/<thread>.json, thread/resume answers with them, and so does thread/read on stdio. `resume <thread>` (the
 // real CLI in a terminal) with $FAKE_CODEX_TERMINAL_TURN ("<words>") adds one turn to the saved thread and exits 0
-// after $FAKE_CODEX_TERMINAL_MS (default 300).
+// after $FAKE_CODEX_TERMINAL_MS (default 300), or on SIGTERM. $FAKE_CODEX_TERMINAL_BUSY_MS: that turn runs that long
+// (saved in progress, then finished).
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join as joinPath } from "node:path";
@@ -41,8 +42,16 @@ if (args[0] === "resume") {
   if (words) {
     const thread = args[1];
     const id = `tu-${savedTurns(thread).length + 1}`;
-    saveTurn(thread, { id, status: "completed", startedAt: seconds(), completedAt: seconds(), items: [{ type: "userMessage", id: `u-${id}`, content: [{ type: "text", text: words }] }, { type: "agentMessage", id: `a-${id}`, text: `terminal: ${words}` }] });
+    const user = { type: "userMessage", id: `u-${id}`, content: [{ type: "text", text: words }] };
+    const done = { id, status: "completed", startedAt: seconds(), completedAt: seconds(), items: [user, { type: "agentMessage", id: `a-${id}`, text: `terminal: ${words}` }] };
+    const busy = Number(process.env.FAKE_CODEX_TERMINAL_BUSY_MS);
+    if (busy > 0) {
+      // The turn runs for that long: saved in progress, then finished in place.
+      saveTurn(thread, { id, status: "inProgress", startedAt: seconds(), items: [user] });
+      setTimeout(() => { writeFileSync(joinPath(threadsDir, `${thread}.json`), JSON.stringify([...savedTurns(thread).filter((t) => t.id !== id), { ...done, completedAt: seconds() }])); log({ turnDone: id }); }, busy);
+    } else saveTurn(thread, done);
   }
+  process.on("SIGTERM", () => { log({ sigterm: true, pid: process.pid }); process.exit(0); });
   setTimeout(() => process.exit(0), Number(process.env.FAKE_CODEX_TERMINAL_MS) || 300);
 } else if (args[0] === "--remote") {
   log({ ui: args });

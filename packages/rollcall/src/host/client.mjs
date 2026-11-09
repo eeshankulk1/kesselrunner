@@ -124,18 +124,35 @@ export function agentRecord(h, id) {
 }
 
 const END_POLL_MS = 300;
+const CODEX_POLL_MS = 2000; // each look at a Codex thread starts an app server
 
 /**
- * Whether the CLI in a terminal is in a turn, by its task's status log (the launch settings' hooks write it): a turn
- * that started after `since` (when the terminal opened) with no end after it. A dialog open in the turn (a permission prompt, a question) counts
- * as no turn: nobody sees the terminal to answer it, and the session resumes past it. A supervisor's session and a
- * Codex thread write no such log, so they never count as in a turn.
+ * Whether the CLI in a terminal is in a turn that started after `since` (when the terminal opened), with no end after
+ * it. A Claude task's worker: by its task's status log (the launch settings' hooks write it); a dialog open in the turn
+ * (a permission prompt, a question) counts as no turn: nobody sees the terminal to answer it, and the session resumes
+ * past it. A Claude supervisor: by its home's `turn` record, which the owner's rollcall hooks write at each prompt and
+ * Stop (watch.mjs markTurn). A Codex agent: midTurn says false; codexMidTurn reads its thread.
  */
 export function midTurn(agent, since) {
-  if (!agent?.task || agent.harness === "codex") return false;
+  if (!agent || agent.harness === "codex") return false;
+  if (!agent.task) {
+    const turn = store.readHomeFile(agent.home, "turn");
+    return !!turn && turn.session === agent.session && turn.idle === false && (turn.at ?? 0) >= since;
+  }
   if (existsSync(dialogFlag(agent.home, agent.task))) return false;
   const last = store.readStatus(agent.home, agent.task).filter((e) => (e.at ?? 0) >= since && ["busy", "idle", "exit"].includes(e.ev)).at(-1);
   return last?.ev === "busy";
+}
+
+/** Whether a Codex agent's terminal (`codex resume`) runs a turn it started after `since`, by the thread itself. */
+export async function codexMidTurn(agent, since, env = process.env) {
+  const { launchFile } = await import("../harness/codex.mjs");
+  const { terminalTurnRunning } = await import("./codex.mjs");
+  const cfg = readJson(launchFile(agent.home, agent.task));
+  const thread = agentRecord(agent.home, agent.task)?.thread ?? cfg?.thread;
+  if (!cfg?.bin || !thread) return false;
+  const envFile = join(store.workerDir(agent.home, agent.task), "host-env.sh");
+  return (await terminalTurnRunning({ cfg, thread, since, envFile: existsSync(envFile) ? envFile : null, env })) === true;
 }
 
 /**
@@ -158,31 +175,39 @@ export async function openCommand([ref] = [], { say = (s) => process.stderr.writ
     const quiet = () => {};
     process.on("SIGINT", quiet);
     let child = null;
-    let ending = null;
+    let ending = null; // the timer of the wait for the turn to end
+    let asked = false; // this command sent the CLI SIGTERM
     const spawnedAt = Date.now();
     // SIGTERM (the host's `terminal-end`: a front end is done with this terminal) ends the CLI once no turn runs.
     const end = () => {
       if (ending) return;
       const opened = r.agent?.terminal?.at ?? spawnedAt;
+      const codex = r.agent?.harness === "codex";
       let told = false;
-      ending = setInterval(() => {
-        if (!child || child.exitCode !== null) return;
-        if (midTurn(r.agent, opened)) {
-          if (!told) say("\r\nrollcall: this terminal closes when the turn ends; the chat carries on from there.\r");
-          told = true;
-          return;
+      const look = async () => {
+        if (child && child.exitCode === null) {
+          if (codex ? await codexMidTurn(r.agent, opened, env) : midTurn(r.agent, opened)) {
+            if (!told) say("\r\nrollcall: this terminal closes when the turn ends; the chat carries on from there.\r");
+            told = true;
+          } else if (child.exitCode === null) {
+            asked = true;
+            child.kill("SIGTERM");
+            return;
+          }
         }
-        clearInterval(ending);
-        child.kill("SIGTERM");
-      }, END_POLL_MS);
+        if (ending) ending = setTimeout(look, codex ? CODEX_POLL_MS : END_POLL_MS);
+      };
+      ending = setTimeout(look, 0);
     };
     process.on("SIGTERM", end);
     const code = await new Promise((resolve) => {
       child = spawn(r.argv[0], r.argv.slice(1), { cwd: r.cwd ?? undefined, stdio: "inherit", env });
       child.on("error", (e) => { say(`rollcall: ${e.message}`); resolve(1); });
-      child.on("exit", (n, sig) => resolve(n ?? (sig ? 1 : 0)));
+      // Claude Code ends on the SIGTERM sent here with code 143, after a clean shutdown: a close asked for, not a failure.
+      child.on("exit", (n, sig) => resolve(asked && (n === 143 || sig === "SIGTERM") ? 0 : n ?? (sig ? 1 : 0)));
     });
-    clearInterval(ending);
+    clearTimeout(ending);
+    ending = null;
     process.off("SIGTERM", end);
     process.off("SIGINT", quiet);
     // The host that opened it may have restarted meanwhile: the one running now reads the terminal's turns.
