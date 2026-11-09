@@ -1,6 +1,5 @@
-// One Codex session on its own app server: the one copy of the code that drives Codex, used by both the tmux worker
-// (codex/worker.mjs, which adds the pane's views, the live file and its control socket) and the agent host
-// (host/codex.mjs). startCodex starts `codex app-server` on a unix socket, starts the task's thread (or resumes it),
+// One Codex session on its own app server, for the agent host (host/codex.mjs); the tmux worker (codex/worker.mjs)
+// shares its protocol pieces (the dialog, approval and question shapes) and keeps its own loop. startCodex starts `codex app-server` on a unix socket, starts the task's thread (or resumes it),
 // writes the chat's items to the journal (`codex-<session>.jsonl`, codex/items.mjs) and turns the protocol into events.
 //
 // The protocol stands in for Claude Code's hooks: each event below goes through supervisor.workerHook as the hook

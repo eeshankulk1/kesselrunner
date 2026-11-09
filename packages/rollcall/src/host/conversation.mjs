@@ -1,18 +1,16 @@
-// `rollcall api conversation <ref>` for a task the agent host runs: its page from the host's history, and with
-// --follow the host's push events printed as the same lines (`page`, `item`, `text`, `prompt`, `heartbeat`, `error`)
-// a follow of a stream worker printed. The history spans every session, so a new session needs no `reset`.
+// `rollcall api conversation <ref>` for an agent the host runs (a hosted crew's supervisor or task): its page from
+// the host's history, and with --follow the host's push events printed as lines (`page`, `item`, `text`, `prompt`,
+// `heartbeat`, `error`). The history spans every session, so a new session needs no `reset`.
 import * as store from "../store.mjs";
-import { agentRecord, call, ensureHost } from "./client.mjs";
+import { call, ensureHost, hostedHome } from "./client.mjs";
 
 const INTERFACE = 1;
 
-/** Whether `ref` names a task whose worker the host runs (its last session is hosted). */
+/** Whether `ref` names a hosted crew's supervisor (`falcon`) or one of its tasks (`falcon:t3`). */
 export function hostedRef(ref) {
   const m = /^([a-z][a-z0-9-]{0,23})(?::([A-Za-z0-9._-]+))?$/.exec(String(ref ?? ""));
-  if (!m) return false;
-  // A supervisor the host runs (or ran): its own history.
-  if (!m[2]) return !!agentRecord(m[1], null)?.state;
-  return !!store.readTask(m[1], m[2])?.sessions?.at(-1)?.hosted;
+  if (!m || !hostedHome(m[1])) return false;
+  return !m[2] || !!store.readTask(m[1], m[2]);
 }
 
 const pageOf = (r) => ({

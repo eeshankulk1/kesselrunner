@@ -13,18 +13,18 @@ import { parseRef, refOf, taskView } from "./api.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
 import { deliverWords, holderOf, hostedTask, label, workerState } from "./supervisor.mjs";
-import { callSync } from "./host/client.mjs";
-import { supervisorHosted } from "./window.mjs";
+import { callSync, hostedHome } from "./host/client.mjs";
+import { endCrew, newCrew } from "./host/crew.mjs";
+import { SET_MODES } from "./claude/stream.mjs";
+import * as live from "./claude/live.mjs";
+import { modelOk } from "./harness/claude.mjs";
+import { models as codexModels } from "./harness/codex.mjs";
 import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
 import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
 import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { closeBlocker } from "./trouble.mjs";
-import { NAMES as HARNESS_NAMES, harnessName, harnessOf, workerAdapter } from "./harness/index.mjs";
-import { modelOk } from "./harness/claude.mjs";
-import { launchFile as codexLaunchFile, models as codexModels } from "./harness/codex.mjs";
-import { SET_MODES } from "./claude/worker.mjs";
-import * as live from "./claude/live.mjs";
+import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
 const START_FILE = process.env.ROLLCALL_START_FILE || fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
@@ -114,7 +114,7 @@ function targetOf(p) {
   const t = taskOf(p);
   return { h: t.home, id: t.id, t };
 }
-/** The target's view after an action: the task's, or the supervisor's own. */
+/** The target's view after an action: the task's, or null for the supervisor itself. */
 const viewAfter = (x) => (x.t ? fresh(x.t) : null);
 
 /** Files a front end attached: absolute paths that exist, ten at most. */
@@ -129,11 +129,12 @@ function attachmentsOf(p) {
   return p.attachments;
 }
 
-/** The chat view's worker for an action that needs its stream: refused, with the way to the chat, when it runs in the terminal. */
-function chatWorker(x, what) {
+/** A hosted crew's running agent, for an action only the agent host serves: refused for a terminal crew's. */
+function hostedAgent(x, what) {
+  const who = x.t ? label(x.t) : `supervisor ${x.h}`;
+  if (!hostedHome(x.h)) refuse("refused", `${who} runs in a terminal (tmux), not the agent host: ${what} there`);
   const rec = live.record(x.h, x.id);
-  if (!rec) refuse("refused", `${x.t ? label(x.t) : `supervisor ${x.h}`} has no worker running in the chat view: ${what} needs it`);
-  if (rec.view !== "chat") refuse("refused", `${x.t ? label(x.t) : `supervisor ${x.h}`} runs in the terminal view: switch it to the chat (task.switch) to ${what} here, or do it in its terminal`);
+  if (!rec) refuse("refused", `${who} has no agent running in the host: ${what} needs one`);
   return rec;
 }
 
@@ -184,15 +185,16 @@ export const ACTIONS = {
       const x = targetOf(p);
       const said = str(p, "text").trim();
       if (!said) refuse("bad-payload", "text is required");
-      const text = live.withAttachments(said, attachmentsOf(p));
-      // The owner's line to the supervisor itself (its chat's composer): into its stream, as a line they typed.
+      const files = attachmentsOf(p);
+      if (files.length && !hostedHome(x.h)) refuse("refused", "attachments go to a hosted crew's agents only");
+      const text = live.withAttachments(said, files);
+      // The owner's line to a hosted supervisor itself (its chat's composer): through the host, as a line they typed.
       if (!x.t) {
-        chatWorker(x, "send it words");
-        store.writeHomeFile(x.h, "app-line", { text: said, at: Date.now(), client });
+        if (!hostedHome(x.h)) refuse("refused", `supervisor ${x.h} runs in a terminal: the owner types to it there`);
         const { body, attachments } = live.attachmentsIn(text);
-        const r = live.send(x.h, null, { op: "say", text: body, attachments, from: "owner" });
-        if (!r.ok) refuse("failed", r.err ?? "the supervisor did not take the words");
-        return { delivered: true, how: r.how, why: null, view: null };
+        const r = callSync("say", { ref: x.h, text: body, attachments, from: "owner" });
+        if (!r.ok) refuse("failed", r.error?.message ?? "the supervisor did not take the words");
+        return { delivered: true, how: r.how ?? null, why: null, view: null };
       }
       const t = x.t;
       if (!isOpen(t) && !t.sessions?.length) refuse("refused", `${label(t)} is ${t.state} and never had a worker`);
@@ -215,43 +217,44 @@ export const ACTIONS = {
     },
   },
 
-  // Esc in the worker's window (or the stream's interrupt in the chat): its turn stops, as the owner's Esc would.
+  // Esc in the worker's window: its turn stops, as the owner's Esc would.
   "task.interrupt": {
     cli: "start.mjs <task> --interrupt",
     run(p) {
       const x = targetOf(p);
-      // A worker or supervisor the agent host runs has no window: the host stops its turn.
-      if (x.t ? hostedTask(x.t) : supervisorHosted(x.h)) {
+      // A hosted crew's agent (a task's or the supervisor's own) has no window: the host stops its turn.
+      if (hostedHome(x.h)) {
         const r = callSync("interrupt", { ref: x.t ? `${x.h}:${x.id}` : x.h });
         return r.ok ? { interrupted: r.interrupted === true } : { interrupted: false, why: r.error?.message };
       }
-      const w = tmux.windowOf(x.h, x.id ?? x.h);
+      if (!x.t) refuse("bad-payload", "task is a task ref like falcon:t3");
+      const t = x.t;
+      const w = tmux.windowOf(t.home, t.id);
       if (!w?.alive) return { interrupted: false, why: "its worker is not running" };
-      if (!x.t) return { interrupted: live.inChat(x.h, null) ? live.send(x.h, null, { op: "interrupt" }).ok === true : tmux.interrupt(x.h, x.h) };
-      return { interrupted: workerAdapter(x.t).interrupt(x.t) };
+      return { interrupted: tmux.interrupt(t.home, t.id) };
     },
   },
 
-  // An answer to the live moment open in a chat-view worker: a permission prompt, a plan to approve, a question.
+  // An answer to a hosted agent's open request: a permission prompt, a plan to approve, a question (host/server.mjs).
   "prompt.answer": {
     cli: "the prompt in the worker's window",
     run(p, client) {
       const x = targetOf(p);
       const id = str(p, "prompt", { max: 200 });
-      chatWorker(x, "answer its prompt");
+      hostedAgent(x, "answer its prompt");
       for (const k of ["allow", "always"]) if (p[k] !== undefined && typeof p[k] !== "boolean") refuse("bad-payload", `${k} is true or false`);
       if (p.answers !== undefined && (typeof p.answers !== "object" || p.answers === null || Array.isArray(p.answers))) refuse("bad-payload", "answers maps each question to its answer");
       if (p.mode !== undefined && !["acceptEdits", "default"].includes(p.mode)) refuse("bad-payload", "mode is acceptEdits or default");
       const why = str(p, "why", { required: false, max: 2000 });
       const r = live.send(x.h, x.id, { op: "answer", prompt: id, allow: typeof p.allow === "boolean" ? p.allow : null, why, always: p.always === true, mode: p.mode ?? null, answers: p.answers ?? null, by: client });
-      if (r.code === "not-found") refuse("not-found", `no prompt ${id} in that worker`);
+      if (r.code === "not-found") refuse("not-found", `no prompt ${id} in that agent`);
       if (r.code === "bad-payload") refuse("bad-payload", r.err);
-      if (!r.ok) refuse("failed", r.err ?? "the worker did not take the answer");
+      if (!r.ok) refuse("failed", r.err ?? "the agent did not take the answer");
       return { answered: !!r.answered, already: !!r.already, view: viewAfter(x) };
     },
   },
 
-  // The model or permission mode of a chat-view worker, changed in its running session (as /model or Shift-Tab would).
+  // The model or permission mode of a hosted agent, changed in its running session (as /model or Shift-Tab would).
   "worker.set": {
     cli: "/model or Shift-Tab in the worker's window",
     run(p) {
@@ -264,35 +267,34 @@ export const ACTIONS = {
       if (codex && !codexModels.ok(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
       if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
-      chatWorker(x, "change its model or mode");
+      hostedAgent(x, "change its model or mode");
       const r = live.send(x.h, x.id, { op: "set", model, mode });
-      if (!r.ok) refuse("failed", r.err ?? "the worker refused");
+      if (!r.ok) refuse("failed", r.err ?? "the agent refused");
       return { set: r.set ?? {}, view: viewAfter(x) };
     },
   },
 
-  // Moves a worker between the chat (stream mode) and the real CLI, at its next quiet point, keeping its session.
-  "task.switch": {
-    cli: "Enter in the worker's chat view; task.switch back",
+  // A new hosted crew: a supervisor in the agent host, working in `cwd` (host/crew.mjs). Its tasks run there too.
+  "supervisor.new": {
+    cli: "rollcall host new [--cwd <dir>] [--name <h>]",
     run(p) {
-      const x = targetOf(p);
-      const to = str(p, "to", { max: 20 });
-      if (!live.VIEWS.includes(to)) refuse("bad-payload", `to is ${live.VIEWS.join(" or ")}`);
-      const codex = !!x.t && harnessOf(x.t) === "codex";
-      const rec = live.record(x.h, x.id);
-      if (!rec) {
-        // Nothing runs it under the stream worker: a worker started before the chat view, or none running now. The
-        // view is kept for its next start.
-        if (tmux.windowOf(x.h, x.id ?? x.h)?.alive && to === "chat") refuse("refused", "its worker runs the plain CLI, started before the chat view: stop it and resume it (task.stop, task.resume) to bring it back in the chat");
-        const f = codex ? codexLaunchFile(x.h, x.id) : live.launchFile(x.h, x.id);
-        const was = live.readJson(f);
-        if (was?.view === to) return { switched: false, pending: false, already: true, view: viewAfter(x) };
-        live.writeJson(f, { ...(was ?? {}), view: to });
-        return { switched: false, pending: true, already: false, view: viewAfter(x) };
-      }
-      const r = live.send(x.h, x.id, { op: "switch", to });
-      if (!r.ok) refuse("failed", r.err ?? "the worker refused");
-      return { switched: !!r.switched, pending: !!r.pending, already: !!r.already, view: viewAfter(x) };
+      const cwd = str(p, "cwd", { max: 4096 });
+      if (!cwd.startsWith("/")) refuse("bad-payload", "cwd is an absolute path");
+      const name = str(p, "name", { required: false, max: 24 });
+      const r = newCrew({ cwd, name: name ?? null });
+      if (!r.ok) refuse(r.code, r.err);
+      return { home: r.home, session: r.session, runtime: r.runtime };
+    },
+  },
+
+  // Ends a hosted crew: its workers and its supervisor stop, their sessions saved.
+  "supervisor.end": {
+    cli: "rollcall host end <h>",
+    run(p) {
+      const h = str(p, "home", { max: 24 });
+      const r = endCrew(h);
+      if (!r.ok) refuse(r.code, r.err);
+      return { stopped: r.stopped };
     },
   },
 

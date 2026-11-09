@@ -1,23 +1,15 @@
-// `rollcall api conversation <ref>`: a worker's (or the Falcon's) conversation as plain JSON items, for a front end
-// that draws it as a chat. One reader for every view: it folds Claude Code's transcript (the CLI and stream mode
-// write the same one) into the contract's items, then lays the stream-mode worker's live file over it (text still
-// streaming, messages sent while busy) and its turns.jsonl (a turn's time and tokens). With --follow it watches
-// those files and prints each change as a line, with the same envelope as `api stream`. A Codex worker writes the same
-// items to its own journal as it hears them (codex/items.mjs), so a Codex task reads that file the same way.
+// A Claude transcript (or a Codex journal) folded into the chat's items (API.md "Items"): the agent host's own
+// folder for the stream it runs (claude/stream.mjs createFolder), and the reader that backfills a hosted task's
+// history with its earlier sessions (host/history.mjs). turns.jsonl gives a turn end its time and tokens.
 //
 // Transcripts are large (tens of MB, mostly the whole API request on `api-request*` lines), so a line is judged by
-// its first bytes and only the kept ones are parsed. Items follow the contract in chat-contract.md ("Items").
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, watch, writeFileSync } from "node:fs";
+// its first bytes and only the kept ones are parsed.
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { INTERFACE, parseRef, refOf } from "./api.mjs";
-import { registerClient, unregisterClient } from "./clients.mjs";
 import { createJournalFolder } from "./codex/items.mjs";
-import { journalFile as codexJournal } from "./harness/codex.mjs";
-import { harnessOf, sessionHarness } from "./harness/index.mjs";
 import { P } from "./session.mjs";
 import * as store from "./store.mjs";
-import { lastSession } from "./window.mjs";
 
 const INPUT_CUT = 2000;
 const RESULT_CUT = 100_000;
@@ -370,44 +362,6 @@ export function transcriptFor(id, cwd = null) {
  * message }. A task's current (or last) worker session, or with a bare home the supervisor's own. `transcript` is the
  * file the items come from (a Codex worker's journal), `record` the name of the worker's record in `dir`.
  */
-export function resolveTarget(ref) {
-  const r = parseRef(ref);
-  if (!r) return { ok: false, code: "bad-payload", message: `not a supervisor or task: ${ref} (falcon, or falcon:t3)` };
-  if (!store.listHomes().includes(r.home)) return { ok: false, code: "not-found", message: `no supervisor named ${r.home}` };
-  if (r.id) {
-    const t = store.readTask(r.home, r.id);
-    if (!t) return { ok: false, code: "not-found", message: `no task ${r.id} in supervisor ${r.home}` };
-    const s = t.sessions?.at(-1);
-    const harness = s ? sessionHarness(s) : harnessOf(t);
-    const dir = store.workerDir(r.home, r.id);
-    if (harness === "codex") {
-      const rec = readJson(join(dir, "codex.json"));
-      const session = rec?.session ?? s?.id ?? null;
-      const journal = session ? codexJournal(r.home, r.id, session) : null;
-      return { ok: true, ref: refOf(t), home: r.home, id: r.id, harness, dir, session, cwd: t.worktree ?? t.repo?.main ?? null, transcript: journal, record: "codex.json" };
-    }
-    if (harness !== "claude") return { ok: false, code: "not-available", message: `${refOf(t)} runs on ${harness}: its conversation is not readable yet` };
-    const rec = readJson(join(dir, "claude.json"));
-    const session = rec?.session ?? s?.id ?? null;
-    const cwd = t.worktree ?? t.repo?.main ?? null;
-    return { ok: true, ref: refOf(t), home: r.home, id: r.id, harness, dir, session, cwd, transcript: transcriptFor(session, cwd), record: "claude.json" };
-  }
-  const dir = store.workerDir(r.home, r.home);
-  const rec = readJson(join(dir, "claude.json"));
-  const last = lastSession(r.home);
-  const session = rec?.session ?? last?.id ?? null;
-  const cwd = last?.cwd ?? null;
-  return { ok: true, ref: r.home, home: r.home, id: null, harness: "claude", dir, session, cwd, transcript: transcriptFor(session, cwd), record: "claude.json" };
-}
-
-const alive = (pid) => { if (!pid) return true; try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
-/** The worker record's view and open prompt: a terminal view with no prompt when there is no record (or its process is gone). */
-function recordOf(dir, name = "claude.json") {
-  const rec = dir ? readJson(join(dir, name)) : null;
-  const live = rec && alive(rec.pid);
-  return { view: rec?.view === "chat" ? "chat" : "terminal", switching: rec?.switching ?? null, prompt: live && rec.view === "chat" ? (rec.prompt ?? null) : null, session: rec?.session ?? null };
-}
-
 /** turns.jsonl lines matched to the turn ends they belong to (the nearest end within 30 s, each once): Map endId -> line. */
 export function matchTurns(ends, turns, session = null) {
   const out = new Map();
@@ -434,23 +388,6 @@ const enrich = (item, matched) => {
   if (l.error) x.error = oneLine(l.error, 200);
   return x;
 };
-
-/** The live file's items not yet in the transcript: streaming text, then the messages sent while busy. */
-export function overlayItems(folder, live) {
-  if (!live || (live.session && folder.session && live.session !== folder.session)) return [];
-  const out = [];
-  for (const li of live.items ?? []) {
-    if (!li?.id || folder.has(li.id)) continue;
-    const x = { id: li.id, at: li.at ?? live.at ?? Date.now(), kind: li.kind === "thinking" ? "thinking" : "assistant", text: li.text ?? "", streaming: true };
-    if (li.parent) x.parent = li.parent;
-    out.push(x);
-  }
-  for (const q of live.queued ?? []) {
-    if (!q?.uuid || folder.has(q.uuid)) continue;
-    out.push({ id: q.uuid, at: q.at ?? live.at ?? Date.now(), kind: "user", text: q.text ?? "", images: [], from: q.from ?? "owner", queued: true });
-  }
-  return out;
-}
 
 /** A subagent's own transcript files next to the main one: Map toolUseId -> path (from each one's meta file). */
 function agentFiles(transcript, session) {
@@ -497,7 +434,6 @@ function load(target) {
   return { target, folder, tail, children: new Map() };
 }
 
-const liveOf = (t) => (t.dir ? readJson(join(t.dir, "stream.live.json")) : null);
 const turnsOf = (t) => (t.dir ? readLines(join(t.dir, "turns.jsonl")) : []);
 const endsOf = (folder) => folder.items.filter((x) => x.kind === "turn" && x.phase === "end");
 
@@ -519,7 +455,7 @@ function childrenOf(state, s, files) {
 function pageOf(state, { before = null, limit = PAGE } = {}) {
   const { target, folder } = state;
   const matched = matchTurns(endsOf(folder), turnsOf(target), folder.session ?? target.session);
-  const all = [...folder.items, ...overlayItems(folder, liveOf(target))];
+  const all = folder.items;
   let end = all.length;
   if (before != null) {
     end = all.findIndex((x) => x.id === before);
@@ -533,204 +469,17 @@ function pageOf(state, { before = null, limit = PAGE } = {}) {
     const kids = x.kind === "subagent" ? childrenOf(state, x, files) : [];
     items.push(enrich(x, matched), ...kids);
   }
-  const rec = recordOf(target.dir, target.record);
   return {
-    ok: true, ref: target.ref, session: folder.session ?? target.session ?? null, harness: target.harness ?? "claude", view: rec.view,
-    items, cursor: start > 0 ? all[start].id : null, more: start > 0, prompt: rec.prompt,
+    ok: true, ref: target.ref, session: folder.session ?? target.session ?? null, harness: target.harness ?? "claude",
+    items, cursor: start > 0 ? all[start].id : null, more: start > 0,
   };
 }
 const tail = (state) => state.tail?.path ?? state.target.transcript;
 
-/** One page of `target` (a resolved target, or a ref): the last `limit` items, or those before item `before`. */
-export function readPage(target, { before = null, limit = PAGE } = {}) {
-  const t = typeof target === "string" ? resolveTarget(target) : target;
-  if (!t.ok) return { ok: false, error: { code: t.code, message: t.message } };
-  return pageOf(load(t), { before, limit });
-}
-
-// ---------------------------------------------------------------- follow
-
 /**
- * Follows a conversation: the page as the first line, then one line per change (contract "Conversation verb"), until
- * a signal, the reader closing its end, or `signal` aborting. `target` is a ref (resolved again each second, so a
- * new session is seen) or a resolved target. Resolves when it ends.
+ * One page of `target` ({ ref, home, id, harness, dir, session, cwd, transcript }: a Claude transcript or a Codex
+ * journal): the last `limit` items, or those before item `before`.
  */
-export function follow(target, out = process.stdout, { limit = PAGE, client = null, signal = null, signals = true } = {}) {
-  const resolve = typeof target === "string" ? () => resolveTarget(target) : () => target;
-  return new Promise((resolveEnd) => {
-    let seq = 0;
-    let ended = false;
-    let lastLine = Date.now();
-    const write = (o) => {
-      if (ended) return;
-      lastLine = Date.now();
-      out.write(`${JSON.stringify({ v: INTERFACE, seq: ++seq, at: lastLine, ...o })}\n`);
-    };
-    if (client) registerClient({ client, notifies: false });
-
-    let state = null;
-    let sentLive; // overlay id -> text (or queued flag) sent
-    let sentEnds; // turn end id -> JSON sent
-    let sentKids; // subagent child id -> JSON sent
-    let doneKids; // subagent ids whose children are all sent
-    let gone; // overlay id -> when it left the live file without reaching the transcript
-    let rec;
-    let stamps;
-    let files = new Map();
-    let filesAt = 0;
-    let resolvedAt = 0;
-    let lastError = null;
-    let watchers = new Map();
-
-    const at = (name) => join(state.target.dir ?? "", name);
-    const stamp = (p) => { try { const s = statSync(p); return `${s.ino}:${s.size}:${s.mtimeMs}`; } catch { return "-"; } };
-    const watchDirs = () => {
-      const want = [state.target.dir, state.target.transcript ? dirname(state.target.transcript) : null].filter((d) => d && existsSync(d));
-      for (const [d, w] of watchers) if (!want.includes(d)) { try { w.close(); } catch {} watchers.delete(d); }
-      for (const d of want) {
-        if (watchers.has(d)) continue;
-        try { const w = watch(d, soon); w.on("error", () => {}); watchers.set(d, w); } catch {}
-      }
-    };
-    const fail = (message) => { if (message !== lastError) write({ type: "error", message }); lastError = message; };
-    const start = () => {
-      const t = resolve();
-      resolvedAt = Date.now();
-      if (!t.ok) { state = null; fail(t.message); return; }
-      lastError = null;
-      state = load(t);
-      const page = pageOf(state, { limit });
-      write({ type: "page", ...page });
-      sentLive = new Map(page.items.filter((x) => x.streaming || x.queued).map((x) => [x.id, x.kind === "user" ? x.queued : x.text]));
-      sentEnds = new Map(page.items.filter((x) => x.kind === "turn" && x.phase === "end").map((x) => [x.id, JSON.stringify(x)]));
-      sentKids = new Map(page.items.filter((x) => x.parent && !x.streaming).map((x) => [x.id, JSON.stringify(x)]));
-      // Finished subagents before the page keep their children to themselves (a front end pages back for them).
-      doneKids = new Set(state.folder.subagents.filter((s) => s.state !== "running").map((s) => s.id));
-      gone = new Map();
-      rec = recordOf(t.dir, t.record);
-      stamps = { live: stamp(at("stream.live.json")), turns: stamp(at("turns.jsonl")), rec: stamp(at(t.record ?? "claude.json")) };
-      files = new Map();
-      filesAt = 0;
-      watchDirs();
-    };
-    const reset = () => { write({ type: "reset" }); start(); };
-
-    const step = () => {
-      if (!state) return start();
-      // A new session (a resume, a handoff, the Falcon starting again): start over.
-      if (Date.now() - resolvedAt >= 1000) {
-        resolvedAt = Date.now();
-        const t = resolve();
-        if (t.ok && (t.transcript !== state.target.transcript || t.session !== state.target.session)) return reset();
-        watchDirs();
-      }
-      const { target, folder } = state;
-      if (!state.tail && target.transcript) state.tail = new Tail(target.transcript, folder);
-      if (state.tail?.read() === "replaced") return reset();
-
-      const ts = stamp(at("turns.jsonl"));
-      const turnsChanged = ts !== stamps.turns;
-      stamps.turns = ts;
-      const dirty = folder.takeDirty();
-      const matched = turnsChanged || dirty.some((x) => x.kind === "turn") ? matchTurns(endsOf(folder), turnsOf(target), folder.session ?? target.session) : null;
-      const running = folder.subagents.filter((s) => !doneKids.has(s.id));
-      if (running.length && (dirty.some((x) => x.kind === "subagent") || Date.now() - filesAt >= 1000)) {
-        files = agentFiles(tail(state), folder.session ?? target.session);
-        filesAt = Date.now();
-      }
-      for (const x of dirty) {
-        const y = matched ? enrich(x, matched) : x;
-        if (y.kind === "turn" && y.phase === "end") sentEnds.set(y.id, JSON.stringify(y));
-        sentLive.delete(y.id);
-        gone.delete(y.id);
-        write({ type: "item", item: y });
-      }
-      // turns.jsonl lines that came after their turn's end was sent.
-      if (turnsChanged && matched) {
-        for (const e of endsOf(folder)) {
-          const y = enrich(e, matched);
-          const j = JSON.stringify(y);
-          if (sentEnds.has(e.id) && sentEnds.get(e.id) !== j) { sentEnds.set(e.id, j); write({ type: "item", item: y }); }
-        }
-      }
-      // A running subagent's own messages, as its file grows; the last of them once it finishes.
-      for (const s of running) {
-        if (!files.has(s.id)) continue;
-        const count = s.children;
-        for (const k of childrenOf(state, s, files)) {
-          const j = JSON.stringify(k);
-          if (sentKids.get(k.id) !== j) { sentKids.set(k.id, j); write({ type: "item", item: k }); }
-        }
-        if (s.children !== count) write({ type: "item", item: s });
-        if (s.state !== "running") doneKids.add(s.id);
-      }
-
-      // The live file: text that streams now, and messages sent while busy.
-      const ls = stamp(at("stream.live.json"));
-      if (ls !== stamps.live || dirty.length || gone.size) {
-        stamps.live = ls;
-        const over = overlayItems(folder, liveOf(target));
-        const now = Date.now();
-        const ids = new Set(over.map((x) => x.id));
-        for (const x of over) {
-          const was = sentLive.get(x.id);
-          if (was === undefined) write({ type: "item", item: x });
-          else if (x.kind !== "user" && was !== x.text) {
-            if (x.text.startsWith(was)) write({ type: "text", id: x.id, append: x.text.slice(was.length) });
-            else write({ type: "item", item: x });
-          }
-          sentLive.set(x.id, x.kind === "user" ? x.queued : x.text);
-          gone.delete(x.id);
-        }
-        // One that left the live file and never reached the transcript (a stopped stream): start over.
-        for (const id of sentLive.keys()) {
-          if (ids.has(id) || folder.has(id)) continue;
-          if (!gone.has(id)) gone.set(id, now);
-          else if (now - gone.get(id) >= envMs("ROLLCALL_CONVERSATION_GRACE_MS", 2000)) return reset();
-        }
-      }
-
-      // The record: the open prompt and the view.
-      const rs = stamp(at(target.record ?? "claude.json"));
-      if (rs !== stamps.rec) {
-        stamps.rec = rs;
-        const next = recordOf(target.dir, target.record);
-        if (JSON.stringify(next.prompt) !== JSON.stringify(rec.prompt)) write({ type: "prompt", prompt: next.prompt });
-        if (next.view !== rec.view || JSON.stringify(next.switching) !== JSON.stringify(rec.switching)) write({ type: "view", view: next.view, switching: next.switching });
-        rec = next;
-      }
-    };
-
-    let lastTick = 0;
-    let timer = null;
-    const tick = () => {
-      timer = null;
-      if (ended) return;
-      lastTick = Date.now();
-      try { step(); } catch (e) { fail(String(e?.message ?? e)); }
-      if (Date.now() - lastLine >= envMs("ROLLCALL_API_HEARTBEAT_MS", 15_000)) write({ type: "heartbeat" });
-    };
-    // Lines go out at most every ~50 ms; a short beat covers what a watch misses (a folder made later, a lost event).
-    function soon() {
-      if (timer || ended) return;
-      timer = setTimeout(tick, Math.max(0, lastTick + envMs("ROLLCALL_CONVERSATION_GAP_MS", 50) - Date.now()));
-    }
-    try { start(); } catch (e) { fail(String(e?.message ?? e)); }
-    const beat = setInterval(soon, envMs("ROLLCALL_CONVERSATION_BEAT_MS", 250));
-
-    const end = () => {
-      if (ended) return;
-      ended = true;
-      clearInterval(beat);
-      if (timer) clearTimeout(timer);
-      for (const w of watchers.values()) try { w.close(); } catch {}
-      if (client) unregisterClient();
-      resolveEnd();
-    };
-    out.on?.("error", end);
-    out.on?.("close", end);
-    signal?.addEventListener("abort", end);
-    // A front end that goes away ends the follow: a signal, or its end of stdout closing.
-    if (signals) for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(sig, end);
-  });
+export function readPage(target, { before = null, limit = PAGE } = {}) {
+  return pageOf(load(target), { before, limit });
 }

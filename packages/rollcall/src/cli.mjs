@@ -32,7 +32,6 @@ import { closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs
 import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskCommand, visibleTasks } from "./task.mjs";
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
-import { hostOn } from "./host/client.mjs";
 
 const USAGE = `rollcall - awareness for parallel agent sessions on one machine
 
@@ -120,7 +119,6 @@ export async function main(argv) {
       case "_pick-pictures": return await pickPictures(rest);
       case "codex-worker": return await (await import("./codex/worker.mjs")).codexWorker(rest);
       case "_codex-send": return await (await import("./codex/send.mjs")).codexSend(rest);
-      case "claude-worker": return await (await import("./claude/worker.mjs")).claudeWorker(rest);
       case "_claude-send": return await (await import("./claude/send.mjs")).claudeSend(rest);
       case "host": return await (await import("./host/server.mjs")).hostCommand(rest);
       case "open": return await (await import("./host/client.mjs")).openCommand(rest);
@@ -494,7 +492,7 @@ function supervise(args) {
   store.writeGlobal({ ...g, supervisor: { home: h, at: g.supervisor?.home === h ? g.supervisor.at : Date.now(), skill: skillStamp() ?? undefined } });
   ensureWatcher(h);
   say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; its workers run in tmux (session ${tmux.sessionName(h)}), its chips in the status line.`);
-  if (!hostOn() && !tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
+  if (!tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
   else if (tmux.inside() && tmux.windowOf(h, h)) say(`  Tabs: each task gets a tab in the bar at the bottom of this terminal. The owner clicks one to switch to that worker and clicks ${h} to come back; /attach t3 switches too.`);
   else say(`  Tabs: this supervisor runs outside falcon, so /attach t3 opens a terminal tab per task, and news reaches it with the owner's next line, since nothing can type into this terminal. For tabs in one terminal, the owner quits this session (/exit) and runs \`falcon resume ${h}\` in a terminal tab.`);
   const open = store.listTasks(h).filter(isOpen);

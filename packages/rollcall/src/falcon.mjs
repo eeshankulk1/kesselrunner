@@ -16,14 +16,15 @@ import { mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { blocked, check, lines } from "./needs.mjs";
-import { BIN, short } from "./session.mjs";
+import { short } from "./session.mjs";
 import * as store from "./store.mjs";
 import { isOpen } from "./state.mjs";
 import { holderOf, nameOf, pickName } from "./supervisor.mjs";
 import * as tmux from "./tmux.mjs";
 import { decisionsOf } from "./task.mjs";
 import { view } from "./watch.mjs";
-import { backText, comeBack, hostedSupervisor, lastSession, startWindow, supervisorHosted, unparkHome, writeWindow } from "./window.mjs";
+import { hostedHome } from "./host/client.mjs";
+import { backText, comeBack, lastSession, startWindow, unparkHome } from "./window.mjs";
 
 const USAGE = `falcon - open a supervisor in this terminal tab, the way \`claude\` opens a session.
 
@@ -74,7 +75,6 @@ export async function main(argv) {
 /** A new supervisor: the next free name, reserved by making its home, then its window. */
 function start() {
   const h = reserve();
-  if (supervisorHosted(h)) return openHosted(h, { session: randomUUID(), cwd: process.cwd(), resume: false });
   const r = startWindow(h, { session: randomUUID(), cwd: process.cwd(), resume: false });
   if (!r.ok) fail(`could not open ${h}'s window: ${r.err}`);
   return attach(h);
@@ -96,15 +96,8 @@ function reserve() {
  * another terminal is left alone: one process per conversation, so the owner quits it there first.
  */
 function open(h, again) {
-  if (supervisorHosted(h)) {
-    const a = hostedSupervisor(h);
-    if (a?.state === "terminal") fail(`${h} is open in another terminal. Quit it there, then run ${again} again.`);
-    if (a && a.state !== "stopped") return openTerminal(h);
-    const holder = holderOf(h);
-    if (holder) fail(`${h} is open in another terminal (session ${short(holder.id)}). Quit it there with /exit, then run ${again} again.`);
-    const parked = unparkHome(h);
-    return openHosted(h, comeBack(h), { prompt: parked ? backText(h) : null });
-  }
+  // A crew cockpit started runs in the agent host, not in falcon's tmux: cockpit shows it.
+  if (hostedHome(h)) fail(`${h} runs in cockpit's agent host, not in a terminal: open it in cockpit (rollcall open ${h} runs its real CLI here).`);
   if (!tmux.windowOf(h, h)?.alive) {
     const holder = holderOf(h);
     if (holder) fail(`${h} is open in another terminal (session ${short(holder.id)}). Quit it there with /exit, then run ${again} again.`);
@@ -114,18 +107,6 @@ function open(h, again) {
   }
   return attach(h);
 }
-
-/**
- * A supervisor the agent host runs (ROLLCALL_HOST=1) has no window. Until the owner settles what the terminal Falcon
- * becomes (docs/plans/2026-11-08-agent-host.md, slice 4), falcon opens the terminal escape hatch on the supervisor's
- * own session: the real CLI here, the host carrying on once it exits. A placeholder, not the Falcon's new form.
- */
-function openHosted(h, back, opts = {}) {
-  writeWindow(h, back, opts);
-  return openTerminal(h);
-}
-
-const openTerminal = (h) => spawnSync(process.execPath, [BIN, "open", h], { stdio: "inherit" }).status ?? 1;
 
 /** Shows the supervisor's window in this terminal: attaches it, or switches to it inside falcon's tmux. */
 function attach(h) {
@@ -147,6 +128,7 @@ function attach(h) {
 export function supervisors(now = Date.now()) {
   const out = [];
   for (const h of store.listHomes()) {
+    if (hostedHome(h)) continue; // cockpit's crews (the agent host) are cockpit's to list
     const lock = store.readHomeFile(h, "lock");
     const f = store.readHomeFile(h, "falcon");
     if (!lock?.session && !f?.session) continue;

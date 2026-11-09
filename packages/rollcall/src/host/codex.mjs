@@ -1,5 +1,4 @@
-// A Codex agent's process in the host: codex/session.mjs's startCodex (the code the tmux worker runs too: the app
-// server, the thread, the hooks, snapshots, journal, prompts, the usage limit and the context cap), its events turned
+// A Codex agent's process in the host: codex/session.mjs's startCodex (the app server, the thread, the hooks, snapshots, journal, prompts, the usage limit and the context cap), its events turned
 // into the ones host/server.mjs hears from a Claude agent (claude/stream.mjs startClaude).
 //
 // Item ids get the session's first 8 characters as a prefix (`3f2a9c1d:item-4`): Codex numbers live items per

@@ -38,12 +38,9 @@ import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.
 import * as tmux from "./tmux.mjs";
 import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
-import { comeBack, contextOf, hostedSupervisor, markBack, startWindow, supervisorHosted, supervisorMark } from "./window.mjs";
-import { callSync as hostCall } from "./host/client.mjs";
-import { inChat, readJson, send as sendToWorker } from "./claude/live.mjs";
-
-/** rollcall's news into a chat-view supervisor's stream: { ok, err }. */
-const sayToSupervisor = (h, text) => { const r = sendToWorker(h, null, { op: "say", text, from: "rollcall" }); return r.ok ? { ok: true } : { ok: false, err: r.err }; };
+import { comeBack, contextOf, hostedSupervisor, markBack, startWindow, supervisorMark } from "./window.mjs";
+import { callSync as hostCall, hostedHome } from "./host/client.mjs";
+import { readJson } from "./claude/live.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 // A task waits on the owner this long before the first notification, then reminds every 10 minutes.
@@ -443,9 +440,9 @@ export function tick(h, now = Date.now()) {
       // for its worker, brought back, are typeWaiting's.
       const st = workerState(t, now);
       const at = closesAt(st, now);
-      if (at !== null && now >= at && !st?.hosted && (!st?.alive || !tmux.viewed(h, t.id))) tmux.killWindow(h, t.id);
+      if (at !== null && now >= at && (!st?.alive || !tmux.viewed(h, t.id))) tmux.killWindow(h, t.id);
     } else if (hostedTask(t)) {
-      // A finished task's hosted agent stops on the same clock (agent host: no window to close).
+      // A finished task's hosted agent stops on the same clock (no window to close).
       const st = workerState(t, now);
       const at = st?.alive ? closesAt(st, now) : null;
       if (at !== null && now >= at) stopWorker(t);
@@ -938,7 +935,7 @@ function takeNews(h, session, entries, now) {
  */
 function supervisorNow(h, now) {
   const holder = holderOf(h);
-  if (supervisorHosted(h)) return hostedNow(h, holder);
+  if (hostedHome(h)) return hostedNow(h, holder);
   const inWindow = !!tmux.windowOf(h, h)?.alive;
   if (holder) {
     if (!inWindow) return { at: "terminal", holder };
@@ -982,8 +979,8 @@ const lost = { misses: 0, at: 0 };
  * second old, and a key pressed in that second counts.
  */
 function clearToType(h, now) {
-  // In the chat view nothing is typed into its window: the news goes into its stream, queued behind a running turn.
-  if (inChat(h, null) || supervisorHosted(h)) return true;
+  // Nothing is typed into a hosted supervisor: the news goes in through the host, queued behind a running turn.
+  if (hostedHome(h)) return true;
   tmux.forget(h);
   return now - tmux.lastUsed(h, h) >= keyQuietMs() && !tmux.draft(h, h);
 }
@@ -1050,7 +1047,7 @@ function deliver(h, s, news, now) {
   if (lost.misses >= MAX_MISSES && (store.readHomeFile(h, "turn")?.at ?? 0) <= lost.at) return;
   const taken = takeNews(h, s.holder.id, news, now);
   if (!taken) return;
-  const r = supervisorHosted(h) ? hostSay(h, taken.text) : inChat(h, null) ? sayToSupervisor(h, taken.text) : tmux.type(h, h, taken.text);
+  const r = hostedHome(h) ? hostSay(h, taken.text) : tmux.type(h, h, taken.text);
   if (r.ok) { markReported(h, taken.shown); return; }
   store.requeueWakes(h, taken.names.map((n) => `d-${n.slice(2)}`));
   store.writeHomeFile(h, "delivery", null);
@@ -1091,7 +1088,7 @@ function handOver(h, s, now) {
   if (!s.holder || !(s.at === "idle" || s.picker)) return false;
   const pct = contextOf(h, s.holder.id);
   if (!Number.isFinite(pct) || pct < supervisorMark()) return false;
-  if (!supervisorHosted(h)) {
+  if (!hostedHome(h)) {
     tmux.forget(h);
     if (now - tmux.lastUsed(h, h) < handOverQuietMs() || tmux.draft(h, h)) return false;
   }

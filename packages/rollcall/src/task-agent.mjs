@@ -1,7 +1,8 @@
 // The supervisor's tools on a worker that are not task-record edits: `rollcall task chat <id>` (a page of its chat),
 // `task interrupt <id>` (its turn stops) and `task wait <id>` (until its turn ends or it asks something). Starting
-// a worker (start.mjs) and telling it (`task tell`) already reach a hosted worker through the host. For a worker the
-// agent host runs, every one goes through the host's socket: no tmux, no screen read, no keys.
+// a worker (start.mjs) and telling it (`task tell`) already reach a hosted worker through the host. They serve a
+// hosted supervisor's workers (cockpit's crews), through the host's socket: no tmux, no screen read, no keys. A
+// terminal supervisor's workers run in tmux, where `task interrupt` is Esc and chat and wait do not apply.
 import { call, connect, ensureHost } from "./host/client.mjs";
 import { P } from "./session.mjs";
 import * as store from "./store.mjs";
@@ -36,15 +37,9 @@ export async function chatCmd(args, ctx, resolve) {
   const json = has(args, "--json");
   const t = resolve(args.shift(), ctx);
   if (!(limit > 0)) ctx.fail("--limit takes a number above 0");
-  let page;
-  if (hostedTask(t)) {
-    const { hostedPage } = await import("./host/conversation.mjs");
-    page = await hostedPage(refOf(t), { before, limit });
-  } else {
-    const { readPage, resolveTarget } = await import("./conversation.mjs");
-    const target = resolveTarget(refOf(t));
-    page = target.ok ? readPage(target, { before, limit }) : { ok: false, error: { message: target.message } };
-  }
+  if (!hostedTask(t)) ctx.fail(`${label(t)} runs in tmux: /attach ${t.id} shows its terminal. task chat is for a worker the agent host runs.`);
+  const { hostedPage } = await import("./host/conversation.mjs");
+  const page = await hostedPage(refOf(t), { before, limit });
   if (!page.ok) ctx.fail(`${label(t)}: ${page.error?.message ?? "its chat could not be read"}`);
   if (json) { ctx.say(JSON.stringify(page)); return 0; }
   ctx.say(`${label(t)}: ${page.items.length} items${page.more ? ` (earlier: task chat ${t.id} --before ${page.cursor})` : ""}`);

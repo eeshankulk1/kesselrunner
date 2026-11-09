@@ -19,8 +19,13 @@ export const logFile = () => join(hostDir(), "host.log");
 /** The host's socket: one per store, in the temp folder (a unix socket path is short on macOS). */
 export const socketFor = (root) => join(tmpdir(), `rollcall-host-${createHash("sha256").update(root).digest("hex").slice(0, 8)}.sock`);
 export const socketPath = () => socketFor(store.home());
-/** ROLLCALL_HOST=1: new task workers start in the host instead of a tmux window (off by default during the build). */
-export const hostOn = () => store.envFlag("ROLLCALL_HOST") === true;
+/**
+ * Supervisor `h`'s runtime: "host" when a front end (cockpit) made it in the agent host (`rollcall host new`, which
+ * writes its home's `runtime.json`), else "terminal" (falcon, /supervisor: tmux and the real CLIs). A hosted
+ * supervisor and all its tasks run in the host; a terminal one and its tasks never touch it.
+ */
+export const runtimeOf = (h) => (h && store.readHomeFile(h, "runtime")?.runtime === "host" ? "host" : "terminal");
+export const hostedHome = (h) => runtimeOf(h) === "host";
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 /** The running host's { pid, sock, at, version }, or null. */

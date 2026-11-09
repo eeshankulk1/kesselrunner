@@ -1,8 +1,9 @@
 // `rollcall host`: the agent host (docs/plans/2026-11-08-agent-host.md). One long-lived process per store that runs
 // every hosted agent as its child (claude/stream.mjs, host/codex.mjs), owns each agent's state (agent.json), keeps one
 // history per task (host/history.mjs), saves questions and permission prompts as requests, and serves a socket where
-// front ends call and subscribe. Each agent also gets the control socket and record the stream worker had
-// (claude/live.mjs), so delivery, `task tell`, answers and away mode reach it unchanged.
+// front ends call and subscribe. It runs a hosted crew's agents only (host/client.mjs hostedHome: a supervisor a front
+// end made with `rollcall host new`, and its tasks); falcon's crews stay in tmux. Each agent also gets a control
+// socket and record (claude/live.mjs), so delivery, `task tell`, answers and away mode reach it as they reach a worker.
 import { randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -18,7 +19,7 @@ import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
 import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
 import { trustWorktree } from "../harness/claude.mjs";
-import { loadFinder, relaysOf } from "../claude/worker.mjs";
+import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
@@ -156,7 +157,7 @@ class Agent {
     if (this.ctl) rmSync(this.ctl, { force: true });
   }
 
-  /** The stream worker's socket requests (claude/live.mjs send), answered by the host. */
+  /** The agent's control socket requests (claude/live.mjs send), answered by the host. */
   async control(req) {
     if (!req || typeof req !== "object") return { ok: false, err: "bad request" };
     const flat = (r) => (r.ok ? r : { ok: false, code: r.error?.code, err: r.error?.message });
@@ -170,7 +171,6 @@ class Agent {
         return flat(r);
       }
       case "set": return flat(await this.set(req));
-      case "switch": return { ok: false, code: "refused", err: "a hosted agent has no terminal view yet" };
       default: return { ok: false, err: `unknown op ${req.op}` };
     }
   }
@@ -218,7 +218,7 @@ class Agent {
     // Codex resumes the thread its launch names; Claude Code the session its launch says exists.
     const resume = harness === "codex" ? !!cfg.thread : !!cfg.resume;
     if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(resume ? null : cfg.session, resume ? cfg.session : null);
-    // A supervisor's question that names a task relays that task's question (claude/worker.mjs relaysOf).
+    // A supervisor's question that names a task relays that task's question (host/relays.mjs).
     if (!this.id) await loadFinder();
     this.rec.harness = harness;
     this.rec.session = cfg.session;
@@ -814,8 +814,13 @@ function takeLock() {
 }
 
 /** `rollcall host [status|stop]`. */
-export async function hostCommand([verb] = []) {
+export async function hostCommand([verb, ...rest] = []) {
   const { call } = await import("./client.mjs");
+  // A hosted crew (cockpit's): made and ended here, run by the host.
+  if (verb === "new" || verb === "end") {
+    if (verb === "end" && !rest[0]) { process.stderr.write("usage: rollcall host end <supervisor>\n"); return 2; }
+    return (await import("./crew.mjs")).crewCommand(verb, rest);
+  }
   if (verb === "status") {
     const r = await call("list", {}, { start: false });
     process.stdout.write(`${JSON.stringify(r.ok ? { ok: true, running: true, sock: socketPath(), agents: r.agents } : { ok: true, running: false }, null, 2)}\n`);
@@ -826,7 +831,7 @@ export async function hostCommand([verb] = []) {
     process.stdout.write(`${JSON.stringify({ ok: true, stopped: !!r.ok })}\n`);
     return 0;
   }
-  if (verb && verb !== "run") { process.stderr.write("usage: rollcall host [run|status|stop]\n"); return 2; }
+  if (verb && verb !== "run") { process.stderr.write("usage: rollcall host [run|status|stop|new [--cwd <dir>] [--name <h>]|end <h>]\n"); return 2; }
   return runHost();
 }
 

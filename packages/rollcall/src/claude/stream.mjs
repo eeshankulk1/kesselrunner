@@ -1,6 +1,5 @@
 // Claude Code in its stream mode (the protocol the Agent SDK wraps; facts in docs/plans/2026-11-08-chat-stream.md):
-// the one copy of the stream code. Both the agent host (host/server.mjs) and the tmux worker's chat view
-// (claude/worker.mjs) run Claude Code through startClaude. It turns the stream into events: items folded with conversation.mjs's own folder (so they match a
+// the agent host (host/server.mjs) runs a hosted Claude agent through startClaude. It turns the stream into events: items folded with conversation.mjs's own folder (so they match a
 // transcript read, ids and all), streamed text, words taken, turn ends, permission requests and the exit.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";

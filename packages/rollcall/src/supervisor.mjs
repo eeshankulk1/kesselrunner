@@ -20,8 +20,7 @@ import * as tmux from "./tmux.mjs";
 import { openBlocker, resetAt } from "./trouble.mjs";
 import { adapter, effortOk, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
 import { MODES, modelOk } from "./harness/claude.mjs";
-import { inChat } from "./claude/live.mjs";
-import { agentRecord, callSync, hostOn } from "./host/client.mjs";
+import { agentRecord, callSync, hostedHome } from "./host/client.mjs";
 
 /** A worker's environment names its task, so its own `rollcall task ...` commands need no home. */
 export const TASK_ENV = "ROLLCALL_TASK";
@@ -246,7 +245,7 @@ export function workerState(t, now = Date.now()) {
     asks: w?.alive && dialog ? dialogAsks(t.home, t.id) : null,
     // Parked: rollcall stopped it while it sat idle. Stopped: on purpose (start.mjs --stop), and no one resumes it unasked.
     session: s.id, harness: sessionHarness(s), legacy: false, parked: hosted ? hosted === "parked" : r.held === "parked" && !w?.alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
-    stopped: hosted ? hosted === "stopped" : r.held === "stopped", hosted: !!hosted, terminal: hosted === "terminal",
+    stopped: hosted ? hosted === "stopped" : r.held === "stopped", ...(hosted ? { hosted: true, terminal: hosted === "terminal" } : {}),
     bg: idle ? r.turn.bg ?? null : null, last: idle ? r.turn.last ?? null : null,
     // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones.
     mode: r.launch?.mode ?? null, model: r.launch?.model ?? null, effort: r.launch?.effort ?? null,
@@ -263,8 +262,8 @@ export function hostedState(t) {
   return pidAlive(a.host) ? a.state : "parked";
 }
 
-/** Whether task `t`'s worker is (or would resume) in the agent host. */
-export const hostedTask = (t) => !!t.sessions?.at(-1)?.hosted;
+/** Whether task `t`'s worker runs (or would resume) in the agent host: its supervisor is a hosted one. */
+export const hostedTask = (t) => hostedHome(t.home);
 
 // ---------------------------------------------------------------- a finished task's window
 
@@ -435,6 +434,9 @@ export const statusLine = (seconds) => ({ type: "command", command: `node ${q(BI
  * own choice). Records the session, and its harness, on the task. Returns { ok, session, err }.
  */
 export function launch(t, { prompt, resume = false, session: pick = null, mode = null, name = null, model = null, effort = null }) {
+  // A hosted supervisor's tasks run in the agent host; a terminal supervisor's in tmux, never the host.
+  const hosted = hostedHome(t.home);
+  if (!hosted && !tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };
   // An archived task's worktree comes back only with its saved work: restore does both, then resumes the worker.
   if (t.archived) return { ok: false, err: `${t.id} is archived: rollcall task restore ${t.id} brings back its worktree and its worker` };
   if (resume) { const r = restoreWorktree(t); if (!r.ok) return r; }
@@ -446,20 +448,17 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   if (last && !last.tmux && !last.endedAt) adapter(last).stopLegacy(last.id);
   model = modelOk(model) ? model : null;
   effort = effortOk(effort) ? effort : null;
-  // The agent host runs it (ROLLCALL_HOST=1), and a resume goes back where it ran.
-  const hosted = again ? !!again.hosted : hostOn();
-  const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort, hosted });
+  const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort, ...(hosted ? { hosted } : {}) });
   rmSync(dialogFlag(t.home, t.id), { force: true });
   launching(t, prompt, { fresh: session !== last?.id });
   // Another session than the last starts with a context of its own: the last one's use and cap flag are not its.
   if (session !== last?.id) { clearCap(t.home, t.id); store.writeHomeFile(t.home, `context-${t.id}`, null); }
   if (hosted) {
-    // The host sources the task's environment (the launch script's lines but its last, which starts the tmux worker).
+    // The host sources the task's environment (the launch script's lines but its last, which starts the CLI).
     try { writeFileSync(join(store.workerDir(t.home, t.id), "host-env.sh"), `${readFileSync(script, "utf8").trimEnd().split("\n").slice(0, -1).join("\n")}\n`); } catch {}
     const r = callSync("start", { ref: `${t.home}:${t.id}`, restart: true, harness });
     if (!r.ok) return { ok: false, err: r.error?.message || "the agent host did not start the worker" };
   } else {
-    if (!tmux.available()) return { ok: false, err: "tmux is not installed (brew install tmux)" };
     const r = tmux.runInWindow(t.home, t.id, t.worktree, paneCommand(script));
     if (!r.ok) return { ok: false, err: r.err || "tmux could not open the window" };
     // Its tab reads right at once; the supervisor's status line adds its state and color within seconds.
@@ -473,7 +472,6 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
     const where = hosted ? { tmux: false, hosted: true } : { tmux: true };
     if (resume && x.sessions.at(-1)?.id === session) {
       Object.assign(x.sessions.at(-1), where, { endedAt: null });
-      if (!hosted) delete x.sessions.at(-1).hosted;
     } else {
       // An earlier worker brought back becomes the task's worker again, under its own name.
       const was = x.sessions.find((s) => s.id === session);
@@ -744,9 +742,9 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       if (t.wait) setWait(h, id, null);
       // A delivery of rollcall's has its receipt; any other prompt waits for the transcript to say whose it is.
       const ours = received(t, p.prompt);
-      // In the chat view every prompt came through rollcall (a front end's words are on the record already): no key
-      // in the window typed it.
-      if (!ours.length && !inChat(h, id)) noteTyped(t, p);
+      // A hosted worker has no window: every prompt came through rollcall or the host (a front end's words are on
+      // the record already), and no key typed it.
+      if (!ours.length && !hostedHome(h)) noteTyped(t, p);
       const said = [];
       const cap = capDue(h, id, p.session_id);
       if (cap?.level === "soft") { heardSoft(h, id, p.session_id); said.push(softText(t, cap.pct)); }
@@ -843,8 +841,8 @@ export function workerHook(h, id, event, p, { recordAsk }) {
       // task's record, where they find it when they are back. A terminal that only shows it (the Cockpit app keeps one
       // on each task) is not the owner watching.
       const away = isAway();
-      // A worker in the chat view has no picker of its own on any screen: its question is always the task's.
-      if (!away && !inChat(h, id) && tmux.watched(h, id)) return null;
+      // A hosted worker has no picker of its own on any screen: its question is always the task's.
+      if (!away && !hostedHome(h) && tmux.watched(h, id)) return null;
       const questions = p.tool_input?.questions;
       if (!Array.isArray(questions) || !questions.length) return null;
       const res = recordAsk(t, questions);
