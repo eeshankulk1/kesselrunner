@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A stand-in for `claude`, for the stream-mode worker's tests (claude/worker.mjs).
+// A stand-in for `claude` in stream mode, for the agent host's tests (host.test.mjs, host-supervisor.test.mjs).
 //
 // With `-p` it plays Claude Code 2.1.319's stream mode: stream-json lines in on stdin, out on stdout (shapes in
 // docs/plans/2026-11-08-chat-stream.md, only the fields the worker reads). A user message gets its replay

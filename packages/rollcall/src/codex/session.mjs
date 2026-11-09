@@ -439,7 +439,7 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
       : conn.request("thread/start", { ...settings, serviceName: "rollcall" })]);
     s.thread = opened?.thread?.id ?? cfg.thread;
     up = true;
-    // A thread resumed whose journal is gone (or never written, before the chat view): its saved history.
+    // A thread resumed whose journal is gone (or never written): its saved history.
     if (cfg.thread && !existsSync(jfile)) {
       const lines = historyItems(opened?.thread?.turns, { cwd: cfg.cwd });
       if (lines.length) { try { writeFileSync(jfile, `${lines.map((x) => JSON.stringify(x)).join("\n")}\n`); } catch {} }
@@ -532,9 +532,7 @@ async function checkHooks(conn, cwd, h, id, { hosted = false } = {}) {
     const hooks = (r?.data ?? []).flatMap((e) => e.hooks ?? []);
     const untrusted = hooks.filter((x) => x.enabled && (x.trustStatus === "untrusted" || x.trustStatus === "modified"));
     if (!untrusted.length) return;
-    const where = hosted
-      ? `in Codex's own screen (run \`codex\` in the task's worktree), "Review hooks", then trust all`
-      : `in Codex's own screen in the worker's window (Enter there opens it from the chat view), "Review hooks", then trust all`;
+    const where = `in Codex's own screen (run \`codex\` in the task's worktree), "Review hooks", then trust all`;
     store.withTasksLock(h, () => {
       const x = store.readTask(h, id);
       if (!x) return;

@@ -2,7 +2,7 @@
 // and its socket drives them: start, words sent and queued, a request answered from two clients with the first
 // winning, interrupt, an idle agent parking and a message waking it, one history across a session change, earlier
 // sessions backfilled from their transcripts, a restart keeping requests and history (an answer to a request whose
-// process is gone goes in as the owner's words), the push subscription's lines, and the stream worker's control socket
+// process is gone goes in as the owner's words), the push subscription's lines, and the agent's control socket
 // (claude/live.mjs) reaching a hosted agent unchanged.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -47,7 +47,7 @@ test("host: start, say, the history and the push lines", async (t) => {
   assert.ok(events.some((e) => e.ev === "item" && e.item.queued && e.item.id === said.uuid));
   assert.equal(events.filter((e) => e.ev === "text").map((e) => e.append).join(""), "done: hello there");
   assert.ok(events.every((e) => e.ref === ref && e.v === 1 && Number.isFinite(e.seq)));
-  // The compat record points the stream worker's seam at the host.
+  // The compat record points the seam (claude/live.mjs) at the host.
   const rec = x.compat();
   assert.equal(rec.view, "chat");
   assert.equal(rec.hosted, true);
@@ -103,7 +103,7 @@ test("host: a request answered from two clients: the first wins, the other hears
   assert.match(items.find((it) => it.kind === "assistant")?.text ?? "", /^allowed/);
   assert.ok(events.some((e) => e.ev === "closed" && e.id === req.id && e.by === "mac"));
   assert.equal(x.compat().prompt, null);
-  // The seam's answer op on a closed request is `already`, as the stream worker's was.
+  // The seam's answer op on a closed request is `already`.
   const again = await request(x.compat().sock, { op: "answer", prompt: req.id, allow: true });
   assert.deepEqual(again, { ok: true, already: true });
 });

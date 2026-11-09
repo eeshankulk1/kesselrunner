@@ -135,14 +135,11 @@ else `ROLLCALL_CODEX_MODEL`, else Codex's own default. Effort names (`low` to
 `rollcall codex-worker <home> <task>` (`src/codex/worker.mjs`). It starts its
 own `codex app-server --listen unix://<temp socket>`, starts the task's thread
 (`thread/start` with the worktree, sandbox and approval policy) or resumes it
-(`thread/resume`), sends the brief as the first turn, then shows the thread in
-one of two views, as a Claude worker does: the chat (front ends read it with
-`api conversation` and answer its prompts; the pane shows a plain text view),
-or Codex's own terminal UI attached to that server in the foreground (`codex
---remote unix://<socket> resume <thread>`), where the owner watches and types.
-A switch starts or stops only the UI; the thread runs on. When the owner quits
-the UI, the server and the process end with it and the pane falls back to a
-shell: a dead worker, as with Claude Code.
+(`thread/resume`), sends the brief as the first turn, then runs Codex's own
+terminal UI attached to that server in the foreground (`codex --remote
+unix://<socket> resume <thread>`). The owner watches and types into the real
+Codex UI. When the UI exits, the server and the process end with it and the
+pane falls back to a shell: a dead worker, as with Claude Code.
 
 | Supervisor permission mode | Codex approval | Codex sandbox |
 |---|---|---|

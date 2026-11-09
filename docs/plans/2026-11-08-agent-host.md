@@ -1,35 +1,50 @@
 ---
 status: active
 date: 2026-11-08
-decided-with-owner: 2026-11-08 (cockpit task t28 "Chat view rethink": one host owns every agent; cockpit docs/plans/2026-11-08-agent-host.md)
-covers: "rollcall's agent host: one long-lived process that runs every task worker as its child (Claude Code in stream mode, Codex on its app server), owns each agent's state, keeps one history per task across sessions, saves questions and permission prompts as requests, and pushes all of it to front ends over a socket"
+decided-with-owner: 2026-11-08 (cockpit task t28 "Chat view rethink"; cockpit docs/plans/2026-11-08-agent-host.md), reshaped 2026-11-09 (two runtimes kept apart: the host is cockpit's, the terminal keeps tmux)
+covers: "rollcall's agent host: one long-lived process that runs a hosted crew's supervisor and task workers as its children (Claude Code in stream mode, Codex on its app server), owns each agent's state, keeps one history per task across sessions, saves questions and permission prompts as requests, and pushes all of it to front ends over a socket"
 ---
 
 # Agent host (rollcall side)
 
 The plan this serves is cockpit's `docs/plans/2026-11-08-agent-host.md` (section "rollcall becomes the agent host").
-This file records how rollcall builds it, so a fresh worker carries on from the same shapes. It builds on
-`2026-11-08-chat-stream.md`: the facts about Claude Code's stream mode there still hold, and the host speaks that
-protocol directly (no Agent SDK package: rollcall stays dependency-free). Codex stays on its app server.
+This file records how rollcall builds it, so a fresh worker carries on from the same shapes. The facts about Claude
+Code's stream mode in `2026-11-08-chat-stream.md` (superseded) still hold, and the host speaks that protocol
+directly (no Agent SDK package: rollcall stays dependency-free). Codex stays on its app server.
 
-## Slices
+## Two runtimes, kept apart (owner, 2026-11-09)
 
-1. **This one.** The host, its agents (task workers only), their state, history and requests, the push socket, and
-   the seam that keeps the rest of rollcall working. Behind `ROLLCALL_HOST=1`. Built: all of it, for Claude Code and Codex
-   workers. Each harness has one copy of its protocol code, which the tmux workers run too.
-2. Supervisors in the host, and the supervisor's tools (start, tell, wait, interrupt, read the chat) instead of typing
-   into tmux. Built (see Supervisors and The supervisor's tools).
-3. The terminal escape hatch: "open in terminal" runs the real CLI on the agent's session; the host shows it busy until
-   the terminal closes. Built with slice 2 (see The terminal escape hatch).
-4. The terminal Falcon's new form (an open owner question).
-5. Removing the old paths (the chat/terminal switch, the pane view, `capture-pane`, key timing, `stream.live.json`,
-   the per-chat follow processes) and the gate. cockpit moves onto the host.
+"Cockpit should be this more proprietary managed version of what our kesselrunner does": kesselrunner stays a
+terminal way of running the crew, and trying to keep both front ends aligned on one path compromised both. So:
+
+- **Terminal crews** (`falcon`, `/supervisor`): tmux windows and the real Claude Code and Codex CLIs, exactly as
+  before the chat view (#12, #13). No daemon. The host never runs one of their agents.
+- **Hosted crews** (cockpit's): a supervisor a front end makes with `rollcall host new` (or the API's
+  `supervisor.new`), recorded on its home as `runtime.json` (`{ runtime: "host" }`, `host/client.mjs hostedHome`).
+  It and every task it starts run in the host. It is never in tmux, and falcon refuses it.
+- Nothing keeps the two in step. Cockpit shows its own crews as chats and a terminal crew as terminals (tmux attach);
+  the snapshot's `supervisor.runtime` (`host` or `terminal`) says which. Shared code is plain extraction: the hooks,
+  delivery, the watcher and the task store serve both, branching on `hostedHome` only where a hosted agent has no
+  window.
+
+What the chat view had put inside tmux windows is gone: the stream worker (`rollcall claude-worker`), the plain-text
+pane, the chat/terminal switch (`task.switch`), `ROLLCALL_STREAM`, `ROLLCALL_WORKER_VIEW`, `stream.live.json`, the
+per-chat follow processes and `api conversation` for tmux workers. The tmux Codex worker is its pre-#13 self again
+(its own loop, Codex's own screen, the hooks and the usage-limit wait), sharing only the protocol pieces
+(`dialogPayload`, `approvalAnswer`, `questionsOf` and the like) with `codex/session.mjs`.
+
+**A hosted crew's life.** `rollcall host new [--cwd <dir>] [--name <h>]` (one JSON line: `home`, `session`,
+`runtime`) reserves the name (else the next free ship name), writes `runtime.json`, writes the supervisor's launch
+(`window.mjs writeHostedLaunch`) and asks the host to `start` it on `/supervisor <h>`. Its `/supervisor` skill runs
+`rollcall supervise`, which starts the home's watcher as for any supervisor. The snapshot lists it with `runtime:
+"host"`; falcon's own list leaves it out. `rollcall host end <h>` (`supervisor.end`) stops its open tasks' agents and
+its own; the sessions stay, so the owner's words (`task.tell` to the bare home) or `task.resume` bring them back.
 
 ## The process
 
 - `rollcall host` runs the host in the foreground; `rollcall host status` and `rollcall host stop` talk to a running
   one. Clients never run it by hand: `host/client.mjs ensureHost()` connects, and when nothing answers it starts
-  `rollcall host` detached (its own process group, stdio to the log), so it outlives cockpit, the Falcon and the
+  `rollcall host` detached (its own process group, stdio to the log), so it outlives cockpit and the
   terminal that started it.
 - One host per store (`ROLLCALL_HOME`), so a test's throwaway home gets its own.
 - Files, under `<store>/_host/`:
@@ -60,8 +75,7 @@ An agent is one task's worker, named by its ref (`falcon:t3`). Its files live in
 
 ### The runtimes
 
-- **Claude** (`claude/stream.mjs` `startClaude`, the one copy of the stream code: the tmux worker's chat view runs it
-  too, adding only its pane, live file and switch): `claude -p --input-format stream-json --output-format stream-json
+- **Claude** (`claude/stream.mjs` `startClaude`): `claude -p --input-format stream-json --output-format stream-json
   --include-partial-messages --verbose --replay-user-messages --permission-prompt-tool stdio`, plus the launch's
   `--session-id` or `--resume`, `--add-dir`, `--settings`, mode, model and effort, from `claude-launch.json` (as
   `harness/claude.mjs writeLaunch` writes it). It runs under the owner's login shell
@@ -73,15 +87,14 @@ An agent is one task's worker, named by its ref (`falcon:t3`). Its files live in
   `tool_result` closes its tool; `result` ends the turn with its time, tokens and error; `compact_boundary` is a
   compaction. Messages under a subagent (`parent_tool_use_id`) fold into that subagent's own folder, their items
   carrying `parent`.
-- **Codex** (`host/codex.mjs` on `codex/session.mjs` `startCodex`, the one copy of the Codex code: the tmux worker
-  runs it too, adding only its two views, live file, record and control socket). `codex app-server` on a unix socket
+- **Codex** (`host/codex.mjs` on `codex/session.mjs` `startCodex`). `codex app-server` on a unix socket
   (`rollcall-codex-<host pid>-<hex>.sock` in the temp folder), under the login shell with `host-env.sh` as Claude
   is, one thread per session (`thread/start`, or `thread/resume` on the launch file's `thread`, which the session
   writes back once the thread runs, so a wake resumes it). Items mapped with `codex/items.mjs` (the session still
   writes the journal too). Item ids get the session's first 8 characters as a prefix (`3f2a9c1d:item-4`): Codex
   numbers live items per process, so two sessions would reuse them. A user message keeps its client id as its id
   (the owner's `uuid`, or `rollcall-d-<hex>` for rollcall's words, so the prompt-submit hook knows whose they are).
-  startCodex carries what the tmux worker did itself: the hooks (`workerHook`: prompt-submit, stop, stop-failure,
+  startCodex carries what the tmux Codex worker does in its own loop: the hooks (`workerHook`: prompt-submit, stop, stop-failure,
   dialog, clear, ask, cap, session-start, session-end), the turn snapshots, the usage-limit wait, the context file and
   cap flag, the untrusted-hooks note and the thread on the task's session. Differences from Claude: a turn starts with
   `turn/started` (the host's `turn-start` event), the mode cannot change (`set` takes a model only), and words
@@ -136,13 +149,13 @@ memory, mapped), so a request keeps its id across a restart.
 
 - Answered from any client (`answer`, or the compat socket's `answer`); the first answer wins, closes it (`closed`,
   `how: "answered"`) and goes to the process. A second answer hears `already-answered` (the socket's `answer` op
-  returns `{ ok: true, already: true }`, as the stream worker's did).
+  returns `{ ok: true, already: true }`).
 - Claude Code cancelling it closes it with `how: "cancelled"`.
 - **Answered after its process is gone** (a crash, a host restart): the host wakes the agent on its session and
   delivers the answer as the owner's words, so the owner never meets a dead end. Allowed: "The owner approved <what>
   after this session restarted. Go ahead with it." Declined: "The owner declined <what>[: why]." A question: the
   question and the picked answer. It closes with `how: "words"`.
-- The dialog flag (`delivery.mjs dialogFlag`) clears with the last open request, as in the stream worker.
+- The dialog flag (`delivery.mjs dialogFlag`) clears with the last open request.
 
 ## The socket protocol
 
@@ -186,8 +199,7 @@ The host keeps that seam for each hosted agent:
 - It writes the compat record (`claude.json`, or `codex.json` with `ctl`) with `pid` = the host's pid,
   `sock` / `ctl` = a control socket per agent served by the host, `view: "chat"`, `session`, `busy` and the first open
   request as `prompt`; a Codex agent's adds `thread` and `turn`, so `harness/codex.mjs` sees a worker that takes words. It stays while the agent is parked (a `say` wakes it) and goes when the agent stops.
-- The control socket takes the stream worker's ops (`say`, `interrupt`, `answer`, `set`, `state`); `switch` is
-  `refused` (no terminal view until the escape hatch).
+- The control socket takes `say`, `interrupt`, `answer`, `set` and `state`.
 - `supervisor.mjs workerState` reads `agent.json` for a session the host runs (`hosted: true` on the session):
   `alive` while `running` or `idle`, `parked`, `stopped`; busy and idle still come from the hooks' status log.
 - `launch` asks the host to `start` (with the harness); `stopWorker` asks it to `stop`; `park` asks it to `park` (the host also parks on
@@ -201,44 +213,43 @@ The host keeps that seam for each hosted agent:
   worker folder (`workers/<home>/`: `claude-launch.json`, `agent.json`, `history.jsonl`, `claude.json`), Claude Code
   only. Its history is its own. Backfill reads its last session (the one its lock or `falcon.json` names) and the one a
   launch resumes, from their transcripts.
-- `window.mjs supervisorHosted(h)`: the gate is on, or the host ran it before. Then `startWindow` writes the same launch
-  file the stream worker reads and asks the host to `start` it (`restart`, so a handoff's new session replaces the
+- `host/client.mjs hostedHome(h)`: its home's `runtime.json` says `host`. Then `window.mjs startWindow` writes its launch
+  file (`writeHostedLaunch`) and asks the host to `start` it (`restart`, so a handoff's new session replaces the
   running one), and `parkWindow` asks the host to `park`. `park.mjs supervisorDue` leaves it to the host's own timer.
 - The watcher (`watch.mjs hostedNow`) reads where it stands from `agent.json`, not a window: `running` is busy (a
   picker when a request is open), `idle` and `parked` are idle, `terminal` is the terminal. News goes in through the
   host's `say` (`from: "rollcall"`), which wakes a parked supervisor on its session. A handover skips the key checks.
-- The owner's words to a hosted supervisor write `app-line`, as the chat-view supervisor's composer did, so the prompt
+- The owner's words to a hosted supervisor (the host's `say`, `from: "owner"`) write `app-line`, so the prompt
   hook hears them as the owner's.
 - **Relayed questions.** A supervisor's question whose every question names one task that asks now carries
-  `relays: { ref, question }` (`claude/worker.mjs relaysOf`). It is that task's request, answered once:
+  `relays: { ref, question }` (`host/relays.mjs relaysOf`). It is that task's request, answered once:
   - On the supervisor's request (`answer` with `answers`), the host runs `question.answer` for the task in a child
     process (never in its own: delivery reaches agents through control sockets the host serves, and a synchronous call
     there would wait on itself). That delivers to the worker and marks the task answered; closing the Falcon's picker
     (`answer.mjs closeFalconPicker`) then answers the supervisor's request through its seam with "answered elsewhere".
     The answer reads `how: "relayed"`. A task that asks nothing now leaves the pick to the supervisor, as its picker did.
-  - On the task (`question.answer` from a front end), `closeFalconPicker` finds the supervisor's chat-view record and
+  - On the task (`question.answer` from a front end), `closeFalconPicker` finds the hosted supervisor's record and
     closes its request the same way.
   - A second answer from either side hears `already-answered` (the task's lock, then the request's).
 
 ## The supervisor's tools
 
-The supervisor drives a hosted worker through the host only. Existing commands, unchanged for tmux workers:
+A hosted supervisor drives its workers through the host only. Existing commands, unchanged for tmux workers:
 `start.mjs` (`supervisor.mjs launch`: the host's `start`), `task tell` (inbox plus the doorbell through the seam, or
 `say` when the host is down), `start.mjs --interrupt` (`api-actions task.interrupt`: the host's `interrupt`), `--stop`
 and `--resume` (no window check for a hosted task). New verbs (`src/task-agent.mjs`):
 
-- `task chat <id> [--before <cursor>] [--limit <n>] [--json]`: a page of the worker's chat (the host's `history`; for a
-  tmux worker, its transcript), one line per item.
+- `task chat <id> [--before <cursor>] [--limit <n>] [--json]`: a page of the worker's chat (the host's `history`), one line
+  per item. A tmux worker is refused (`/attach` shows it).
 - `task interrupt <id>`: its turn stops.
 - `task wait <id> [--timeout <minutes>]`: subscribes and returns when its turn ends or it opens a request (hosted only:
   a tmux worker's news comes by itself).
 
-No path that serves a hosted agent runs `capture-pane`, `send-keys` or key timing. The Claude harness's `type`,
-`interrupt` and `takesTyping` go to the host even when its record is gone; the watcher's prompt, close and parking
-checks skip `tmux.watched`, `viewed` and `lastUsed` for hosted workers; `supervise` does not probe tmux under the gate.
-Still on tmux under the gate, and none of them reaches a hosted agent: the watcher's own tab bar (`setTabs`,
-`windows`), `/attach` and `api attach` (no window: they say so), `falcon`'s check for a running tmux, and the
-gate-off paths.
+No path that serves a hosted agent runs `capture-pane`, `send-keys` or key timing: the harnesses' `type`, `interrupt`
+and `takesTyping` go to the host for a hosted crew's task; the watcher's prompt, close and parking checks skip
+`tmux.watched`, `viewed` and `lastUsed` for hosted workers; `supervise` does not probe tmux for a hosted crew. The
+watcher's own tab bar still runs for every home (it finds no windows for a hosted one); `/attach` and `api attach`
+have no window to show for a hosted agent and say so.
 
 ## The terminal escape hatch
 
@@ -249,7 +260,7 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   its own process for the agent (two processes never share a session), and answers the argv: `claude --resume
   <session>` with the launch's `--add-dir`, `--settings`, mode, model and effort, under the login shell with
   `host-env.sh` when the task has one (a session that never ran gets `--session-id`, `-n` and its first prompt, as the
-  stream worker's terminal view did); or `codex resume <thread>`. The agent is `terminal` (`send: "hold"`).
+  tmux worker's CLI did); or `codex resume <thread>`. The agent is `terminal` (`send: "hold"`).
 - Meanwhile: `say` holds the words (`how: "held"`, shown queued) and they go in when the terminal closes; `interrupt`
   and `start` are refused with the reason; `park` does nothing; the idle timer does not run. Held words also sit on
   `agent.json` (`held`, each with its uuid), so a restarted host shows and sends them; they leave it in the same write
@@ -295,29 +306,17 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   worker started such a task in the terminal for the owner to answer; a folder the owner opened (a main checkout, a
   supervisor's home) still asks.
 
-## The terminal Falcon (pending the owner's answer)
-
-What `falcon` opens once supervisors run in the host is an open owner question (slice 4). Until it is settled, under
-the gate `falcon` opens the escape hatch on the supervisor's session: a new supervisor writes its launch and runs
-`rollcall open <home>` (the real CLI starts `/supervisor <home>`); an existing one opens on its session (refused while
-it is in a terminal elsewhere). This is a placeholder, not the Falcon's new form. With the gate off, falcon is unchanged.
-
-## The gate
-
-`ROLLCALL_HOST=1` (in settings `env`) starts new task workers, Claude and Codex, in the host (`harness/codex.mjs
-writeLaunch` takes `hosted`, so a hosted Codex launch is always the chat view). Off by default, so the
-owner's live crew keeps running as it does until the later slices land. A session started in the host records
-`hosted: true` on the task's session, so a resume goes back to the host whatever the setting says then. A supervisor
-the host ran once stays there too (its `agent.json`).
-
 ## Tests
 
-`test/host.test.mjs`, against `test/fixtures/fake-claude.mjs` and `fake-codex.mjs`, each test with its own store:
+`test/host.test.mjs` and `test/host-supervisor.test.mjs`, against `test/fixtures/fake-claude.mjs` and `fake-codex.mjs`, each test with its own store:
 start, say, queued words while running, a prompt answered from two clients with the first winning, interrupt, park on
 idle and wake on a message, history across a session change, backfill, a restart keeping requests and history, and
 the push subscription's lines; for Codex, words with their ids and streamed text, the seam, the hooks, an approval
 answered from two clients, a refused mode, and park then wake on the same thread. Every test stops the host it
-started (SIGTERM in `t.after`, which parks its agents and ends their processes).
+started (SIGTERM in `t.after`, which parks its agents and ends their processes). `host-helpers.mjs setup` marks its
+home hosted; `host-supervisor.test.mjs` also checks the split: a terminal supervisor's task and window go to tmux and
+never start the host, `rollcall host new` makes a crew the snapshot names `host` (falcon refuses it, `host end`
+stops it), and a hosted crew's supervisor tools make no tmux call.
 
 The slow full run (25 minutes) was not this branch: `queue.test.mjs` alone took 235 s here and 238 s on
 origin/main on the same machine at the same time, and no `rollcall host` or fake app server is left after the suite.

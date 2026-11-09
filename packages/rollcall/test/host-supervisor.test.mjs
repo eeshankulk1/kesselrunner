@@ -56,7 +56,7 @@ test("host supervisor: its own agent and history; a relayed question answered fr
   const st = (await c.call("state", { ref: "alpha" })).agent;
   assert.equal(st.supervisor, true);
   assert.equal(st.task, null);
-  assert.equal(x.supCompat().view, "chat", "the seam's record, where answer.mjs looks for a chat-view supervisor");
+  assert.equal(x.supCompat().view, "chat", "the seam's record, where answer.mjs looks for a hosted supervisor's request");
   // Answered on the supervisor's request: the task hears it as a front end's answer, and the request closes.
   const r = await c.call("answer", { request: req.id, answers: { [QUESTIONS[0].question]: "Bold" }, by: "the phone" });
   assert.equal(r.ok, true, JSON.stringify(r));

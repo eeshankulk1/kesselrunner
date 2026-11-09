@@ -97,7 +97,7 @@ async function sessionItems({ home, id, dir, session, cwd, harness }) {
   const conv = await import("../conversation.mjs");
   const { journalFile } = await import("../harness/codex.mjs");
   const transcript = harness === "codex" ? journalFile(home, id, session) : conv.transcriptFor(session, cwd);
-  // `dir` gives a turn its time and tokens (turns.jsonl); "none.json" keeps the stream worker's record out of it.
+  // `dir` gives a turn its time and tokens (turns.jsonl); "none.json" keeps the agent's record out of it.
   const target = { ok: true, ref: `${home}:${id}`, home, id, harness, dir, session, cwd, transcript, record: "none.json" };
   const pages = [];
   let before = null;
@@ -109,7 +109,7 @@ async function sessionItems({ home, id, dir, session, cwd, harness }) {
     before = p.cursor;
   }
   const prefix = harness === "codex" ? `${session.slice(0, 8)}:` : "";
-  // What a stream worker's live file adds is not the transcript's: never logged.
+  // Streamed or waiting items are not the transcript's: never logged.
   return pages.flat().filter((x) => !x.streaming && !x.queued)
     .map((x) => (prefix ? { ...x, id: `${prefix}${x.id}`, ...(x.parent ? { parent: `${prefix}${x.parent}` } : {}) } : x));
 }
