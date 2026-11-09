@@ -167,6 +167,7 @@ Newline-delimited JSON both ways. A call is `{ "id": <any>, "op": "...", ... }`;
 | `open` | `ref` | `argv`: `rollcall open <ref>`, for a front end's own terminal |
 | `terminal` | `ref` | `argv`, `cwd`, `unset`, `agent`; the escape hatch begins (held by its connection) |
 | `terminal-done` | `ref` | `closed`, `added`, `agent` |
+| `terminal-end` | `ref` | `closing`, `agent`: the terminal closes once its turn ends |
 | `shutdown` | | `ok`, then the host exits |
 
 Events on a subscribed connection: `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }` with `ev`:
@@ -270,6 +271,22 @@ terminal. Front ends that run their own terminal ask the socket's `open` for the
   starts listening (the agent shows `terminal` and holds words until then) and leaves it `parked`. `rollcall open`
   itself, when the CLI exits and its connection died with the old host, sends `terminal-done` to the host running
   now. Closing twice adds nothing: the second close finds no terminal open.
+- A front end done with the terminal (cockpit's setting back to Chat, or its pane gone) sends `terminal-end`. The host
+  sets `terminal.closing` on the agent (its state says so) and sends SIGTERM to the `rollcall open` pid on record.
+  That command ends the CLI with SIGTERM once no turn runs, then closes as above, so held words go in after the
+  terminal's turn and nothing is cut off. Mid-turn means the task's status log (written by the launch settings'
+  hooks, which the terminal's CLI runs too) shows a turn that started after the terminal opened and has not ended; an
+  open dialog counts as no turn, since nobody sees the terminal to answer it. A supervisor's session and a Codex
+  thread write no such log, so theirs close at once. A terminal with no pid on record (a front end that sent
+  `terminal` itself) is `refused`.
+- **Trust.** Stream mode skips Claude Code's trust question, so a hosted agent's worktree may never have been
+  trusted, and the real CLI asks there, where Enter means "No, exit". Before it answers `terminal` for a task, the
+  host marks the task's worktree trusted the way Claude Code records the owner's yes
+  (`projects[<folder>].hasTrustDialogAccepted` in `$CLAUDE_CONFIG_DIR/.claude.json`, `harness/claude.mjs
+  trustWorktree`), only for folders rollcall made: a worktree under the repo's `.claude/worktrees/`, or the folder
+  of tasks with no repo. It re-reads the config and renames a new copy over it, changing that one key. The old tmux
+  worker started such a task in the terminal for the owner to answer; a folder the owner opened (a main checkout, a
+  supervisor's home) still asks.
 
 ## The terminal Falcon (pending the owner's answer)
 

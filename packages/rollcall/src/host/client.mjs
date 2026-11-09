@@ -3,7 +3,8 @@
 // `rollcall _host-call` for the synchronous callers (supervisor.mjs launch).
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { dialogFlag } from "../delivery.mjs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,6 +123,21 @@ export function agentRecord(h, id) {
   return readJson(join(store.workerDir(h, id ?? h), "agent.json"));
 }
 
+const END_POLL_MS = 300;
+
+/**
+ * Whether the CLI in a terminal is in a turn, by its task's status log (the launch settings' hooks write it): a turn
+ * that started after `since` (when the terminal opened) with no end after it. A dialog open in the turn (a permission prompt, a question) counts
+ * as no turn: nobody sees the terminal to answer it, and the session resumes past it. A supervisor's session and a
+ * Codex thread write no such log, so they never count as in a turn.
+ */
+export function midTurn(agent, since) {
+  if (!agent?.task || agent.harness === "codex") return false;
+  if (existsSync(dialogFlag(agent.home, agent.task))) return false;
+  const last = store.readStatus(agent.home, agent.task).filter((e) => (e.at ?? 0) >= since && ["busy", "idle", "exit"].includes(e.ev)).at(-1);
+  return last?.ev === "busy";
+}
+
 /**
  * `rollcall open <ref>`: the terminal escape hatch. The real CLI on the agent's own session (`claude --resume`, `codex
  * resume`), in this terminal. The host ends its process first and shows the agent as `terminal` while this runs; when
@@ -141,11 +157,33 @@ export async function openCommand([ref] = [], { say = (s) => process.stderr.writ
     // Ctrl-C belongs to the CLI: this process only waits for it.
     const quiet = () => {};
     process.on("SIGINT", quiet);
+    let child = null;
+    let ending = null;
+    const spawnedAt = Date.now();
+    // SIGTERM (the host's `terminal-end`: a front end is done with this terminal) ends the CLI once no turn runs.
+    const end = () => {
+      if (ending) return;
+      const opened = r.agent?.terminal?.at ?? spawnedAt;
+      let told = false;
+      ending = setInterval(() => {
+        if (!child || child.exitCode !== null) return;
+        if (midTurn(r.agent, opened)) {
+          if (!told) say("\r\nrollcall: this terminal closes when the turn ends; the chat carries on from there.\r");
+          told = true;
+          return;
+        }
+        clearInterval(ending);
+        child.kill("SIGTERM");
+      }, END_POLL_MS);
+    };
+    process.on("SIGTERM", end);
     const code = await new Promise((resolve) => {
-      const child = spawn(r.argv[0], r.argv.slice(1), { cwd: r.cwd ?? undefined, stdio: "inherit", env });
+      child = spawn(r.argv[0], r.argv.slice(1), { cwd: r.cwd ?? undefined, stdio: "inherit", env });
       child.on("error", (e) => { say(`rollcall: ${e.message}`); resolve(1); });
       child.on("exit", (n, sig) => resolve(n ?? (sig ? 1 : 0)));
     });
+    clearInterval(ending);
+    process.off("SIGTERM", end);
     process.off("SIGINT", quiet);
     // The host that opened it may have restarted meanwhile: the one running now reads the terminal's turns.
     let done = c.socket.destroyed ? { ok: false } : await c.call("terminal-done", { ref });

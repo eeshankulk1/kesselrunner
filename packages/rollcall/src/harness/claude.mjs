@@ -4,7 +4,7 @@
 // In the chat rollcall's words, interrupts and answers go through the worker's socket; in the terminal they go as
 // keys, as before: a bracketed paste and Enter (tmux.type), Esc to stop a turn. Its transcript lives under
 // ~/.claude/projects either way. ROLLCALL_STREAM=0 starts the plain CLI with no worker process around it.
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -55,6 +55,34 @@ export function trusted(t) {
   let config;
   try { config = JSON.parse(readFileSync(join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json"), "utf8")); } catch { return null; }
   return [t.repo?.main, t.worktree].some((d) => config.projects?.[d]?.hasTrustDialogAccepted === true);
+}
+
+/**
+ * Marks task `t`'s worktree as trusted, the way Claude Code records the owner's yes to its trust question
+ * (`projects[<folder>].hasTrustDialogAccepted` in its config), for the terminal escape hatch (`rollcall open`). A hosted
+ * agent never meets that question (stream mode skips it), so the escape hatch would be the first to ask, where Enter
+ * means "No, exit" and the CLI ends. Only a folder rollcall made: a task's worktree under its repo's
+ * `.claude/worktrees/`, or the one folder of tasks with no repo; never a folder the owner opened. The config is read
+ * again just before an atomic rename, and only that one key changes. true: written; false: not ours, or trusted
+ * already; null: the config could not be read or written (the CLI then asks, as before).
+ */
+export function trustWorktree(t) {
+  const dir = t?.worktree;
+  const main = t?.repo?.main;
+  const ours = !!dir && (main ? dir !== main && dir.startsWith(join(main, ".claude", "worktrees") + "/") : dir === store.machineFolder());
+  if (!ours || trusted(t) !== false) return false;
+  let file = join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json");
+  try {
+    file = realpathSync(file);
+    const config = JSON.parse(readFileSync(file, "utf8"));
+    if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+    config.projects ??= {};
+    config.projects[dir] = { ...(config.projects[dir] ?? {}), hasTrustDialogAccepted: true };
+    const tmp = `${file}.rollcall-${process.pid}-${randomUUID().slice(0, 8)}`;
+    writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: statSync(file).mode & 0o777 });
+    renameSync(tmp, file);
+    return true;
+  } catch { return null; }
 }
 
 /**

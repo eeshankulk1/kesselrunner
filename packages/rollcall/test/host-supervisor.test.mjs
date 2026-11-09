@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BIN, until } from "./helpers.mjs";
@@ -205,6 +205,84 @@ test("host escape hatch: a host restarted while the terminal runs watches it, an
   assert.equal(texts(x, "terminal: from the terminal").length, 1);
   const page = await c.call("history", { ref });
   assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
+});
+
+test("host escape hatch: terminal-end closes the CLI once its turn ends, then held words go in", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  // A turn runs in the terminal, as its hooks write it to the task's status log.
+  const status = join(x.sb.home, "_supervisors", "alpha", "status", "t1.jsonl");
+  mkdirSync(join(x.sb.home, "_supervisors", "alpha", "status"), { recursive: true });
+  appendFileSync(status, `${JSON.stringify({ at: Date.now(), ev: "busy" })}\n`);
+  assert.equal((await c.call("say", { ref, text: "while open" })).how, "held");
+  // The front end is done with the terminal: it waits for the turn, and says so on the agent.
+  const r = await c.call("terminal-end", { ref });
+  assert.equal(r.closing, true);
+  await until(() => x.agent()?.terminal?.closing);
+  assert.ok((await c.call("state", { ref })).agent.terminal.closing, "the state says the terminal is closing");
+  await new Promise((res) => setTimeout(res, 1000));
+  assert.equal(x.agent().state, "terminal", "mid-turn: the CLI keeps running");
+  assert.ok(!x.fake().some((l) => l.sigterm), "the CLI was not stopped mid-turn");
+  // The turn ends: the CLI ends cleanly, its turn is read back and the held words go in.
+  appendFileSync(status, `${JSON.stringify({ at: Date.now(), ev: "idle" })}\n`);
+  assert.equal(await term.exited, 0);
+  assert.ok(x.fake().some((l) => l.sigterm), "the CLI heard SIGTERM");
+  await until(() => texts(x, "done: while open").length, { timeout: 8000 });
+  const page = await c.call("history", { ref });
+  assert.deepEqual(page.items.filter((i) => i.kind === "user").map((i) => i.text), ["before", "from the terminal", "while open"]);
+  await until(() => x.agent()?.state === "idle");
+  assert.equal(x.agent().terminal, null);
+  // With no terminal open, it is a no-op.
+  assert.equal((await c.call("terminal-end", { ref })).closing, false);
+});
+
+test("host escape hatch: terminal-end with no turn running closes the terminal at once", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "60000" } });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  await until(() => x.agent()?.state === "terminal");
+  await until(() => x.fake().find((l) => l.argv && l.argv.includes("--resume") && !l.argv.includes("-p")));
+  assert.equal((await c.call("terminal-end", { ref })).closing, true);
+  assert.equal(await term.exited, 0);
+  await until(() => x.agent()?.state === "parked");
+  assert.equal(texts(x, "terminal: from the terminal").length, 1);
+});
+
+test("host escape hatch: a worktree rollcall made is marked trusted before the CLI opens; the owner's folders are not", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "200" } });
+  const wt = join(x.sb.main, ".claude", "worktrees", "t1");
+  mkdirSync(wt, { recursive: true });
+  x.task({ worktree: wt });
+  x.launch({ cwd: wt });
+  mkdirSync(x.claudeDir, { recursive: true });
+  const cfgFile = join(x.claudeDir, ".claude.json");
+  const before = { oauthAccount: { emailAddress: "owner@example.com" }, numStartups: 7, projects: { "/elsewhere": { hasTrustDialogAccepted: true, allowedTools: ["Bash"] } } };
+  writeFileSync(cfgFile, JSON.stringify(before), { mode: 0o600 });
+  await x.startHost();
+  const c = await x.client();
+  await ranOnce(x, c);
+  const term = openTerminal(t, x);
+  assert.equal(await term.exited, 0);
+  const after = readJson(cfgFile);
+  assert.equal(after.projects[wt].hasTrustDialogAccepted, true, "the worktree is trusted, as Claude Code records it");
+  assert.deepEqual({ ...after, projects: { "/elsewhere": after.projects["/elsewhere"] } }, before, "nothing else in the config changed");
+  assert.equal(statSync(cfgFile).mode & 0o777, 0o600, "the config keeps its permissions");
+  await until(() => x.agent()?.state === "parked");
+  // The task's own repo checkout is the owner's folder: rollcall never trusts it for them.
+  x.task();
+  x.launch();
+  writeFileSync(cfgFile, JSON.stringify(before));
+  assert.equal(await openTerminal(t, x).exited, 0);
+  assert.deepEqual(readJson(cfgFile), before, "the main checkout stays as the owner left it");
 });
 
 test("host escape hatch: words held while the terminal runs survive a host restart, and go in once when it closes", async (t) => {

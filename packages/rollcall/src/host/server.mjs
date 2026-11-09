@@ -17,6 +17,7 @@ import { recordClaude } from "../usage.mjs";
 import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
 import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
+import { trustWorktree } from "../harness/claude.mjs";
 import { loadFinder, relaysOf } from "../claude/worker.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
@@ -111,6 +112,7 @@ class Agent {
       ref: this.ref, home: this.h, task: this.id, supervisor: !this.id, harness: this.rec.harness, state: s, send: SEND[s], session: this.rec.session,
       since: this.rec.since, turnAt: this.rec.turnAt, parkedAt: this.rec.parkedAt, model: this.rec.model, mode: this.rec.mode,
       pid: this.proc?.pid ?? null, requests: [...this.hist.open.values()], queued: this.queued.map(({ uuid, text, at, from }) => ({ uuid, text, at, from })),
+      terminal: this.terminal ? { at: this.terminal.at, closing: this.terminal.closing ?? null } : null,
     };
   }
 
@@ -421,6 +423,14 @@ class Agent {
     if (this.proc) await this.endProcess("terminal");
     if (this.rec.state === "running") return err("refused", `${this.ref} started a turn: try again when it ends`);
     const started = harness === "claude" ? !!cfg.resume : true;
+    // The real CLI asks to trust a folder stream mode never asked about, and Enter there exits: a worktree rollcall
+    // made is marked trusted first, as the owner's yes would record it.
+    if (harness === "claude" && this.id) {
+      const t = store.readTask(this.h, this.id);
+      const wrote = t ? trustWorktree(t) : false;
+      if (wrote) log(`${this.ref}: marked ${t.worktree} trusted for Claude Code`);
+      else if (wrote === null) log(`${this.ref}: could not mark ${t.worktree} trusted; the CLI asks`);
+    }
     if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(started ? null : cfg.session, started ? cfg.session : null);
     let args;
     if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : [])];
@@ -454,6 +464,26 @@ class Agent {
     log(`${this.ref}: open in a terminal on session ${cfg.session}`);
     if (c) c.once("close", () => { void this.closeTerminal(); });
     return { ok: true, argv: [cmd, ...argv], cwd: cfg.cwd && existsSync(cfg.cwd) ? cfg.cwd : null, unset: CHILD_UNSET, agent: this.state() };
+  }
+
+  /**
+   * A front end is done with the terminal (its setting went back to Chat, or its view closed): the command that runs
+   * it (`rollcall open`, its `pid`) hears SIGTERM, ends the CLI once no turn runs, then closes it as any end does.
+   * Meanwhile the agent stays `terminal`, with `terminal.closing` set, so a front end can say why it waits.
+   */
+  endTerminal() {
+    if (!this.terminal) return { ok: true, closing: false, agent: this.state() };
+    const { pid, start } = this.terminal;
+    if (!pid) return err("refused", `${this.ref} runs in a terminal rollcall cannot reach: close it there`);
+    if (!pidAlive(pid, start)) { void this.closeTerminal(); return { ok: true, closing: true, agent: this.state() }; }
+    if (!this.terminal.closing) {
+      this.terminal.closing = Date.now();
+      this.rec.terminal = this.terminal;
+      this.persist();
+      log(`${this.ref}: asked to close its terminal`);
+    }
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    return { ok: true, closing: true, agent: this.state() };
   }
 
   /** The terminal closed: what its session added joins the history, and words held meanwhile wake the agent. */
@@ -673,7 +703,7 @@ async function restore() {
         // The command that runs the terminal held its connection to the host that died, so nothing tells this one it
         // closed: while that command runs, it is watched; once it is gone, what the terminal added is read now.
         const t = rec.terminal ?? {};
-        a.terminal = { at: t.at ?? rec.terminalAt ?? rec.since ?? 0, cwd: t.cwd ?? readJson(launchOf(h, a.id, rec.harness))?.cwd ?? null, pid: t.pid ?? null, start: t.start ?? null };
+        a.terminal = { at: t.at ?? rec.terminalAt ?? rec.since ?? 0, cwd: t.cwd ?? readJson(launchOf(h, a.id, rec.harness))?.cwd ?? null, pid: t.pid ?? null, start: t.start ?? null, closing: t.closing ?? null };
         if (sameProcess(a.terminal.pid, a.terminal.start)) { a.watchTerminal(); log(`${a.ref}: still open in a terminal (pid ${a.terminal.pid}); watching it`); }
         else gone.push(a);
       }
@@ -739,6 +769,7 @@ async function handle(req, c) {
       case "open": { const a = need(); return { ok: true, argv: [process.execPath, BIN, "open", a.ref], ref: a.ref, agent: a.state() }; }
       case "terminal": return await need().openTerminal(c, { pid: req.pid });
       case "terminal-done": return await need().closeTerminal();
+      case "terminal-end": return need().endTerminal();
       case "park": { const a = need(); return { ok: true, parked: a.park() }; }
       case "stop": { const a = need(); return { ok: true, stopped: a.stop() }; }
       case "answer": {
