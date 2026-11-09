@@ -24,6 +24,7 @@ export class History {
     this.open = new Map(); // request id -> request
     this.closed = new Map(); // request id -> the closing event
     this.seq = 0;
+    this.torn = false; // the file ends inside a line (a write cut short): the next append starts a new one
     this.load();
   }
 
@@ -32,6 +33,7 @@ export class History {
   load() {
     let text = "";
     try { text = readFileSync(this.file, "utf8"); } catch { return; }
+    this.torn = text !== "" && !text.endsWith("\n");
     for (const line of text.split("\n")) {
       if (!line) continue;
       try { this.apply(JSON.parse(line)); } catch {}
@@ -60,7 +62,8 @@ export class History {
   /** Appends one event (seq and at filled in) and applies it. */
   append(e) {
     const ev = { seq: this.seq + 1, at: Date.now(), ...e };
-    appendFileSync(this.file, `${JSON.stringify(ev)}\n`);
+    appendFileSync(this.file, `${this.torn ? "\n" : ""}${JSON.stringify(ev)}\n`);
+    this.torn = false;
     this.apply(ev);
     return ev;
   }
@@ -129,8 +132,10 @@ export async function backfill(hist, t, { skip = null } = {}) {
     if (!s?.id || s.id === skip || hist.hasSession(s.id)) continue;
     const harness = sessionHarness(s);
     const items = await sessionItems({ home: t.home, id: t.id, dir, session: s.id, cwd, harness });
-    hist.append({ ev: "session", session: s.id, harness, how: "backfill", started: s.at ?? null });
+    // Items first: a host that dies midway leaves the session unnamed, and the next backfill writes it again (an
+    // item with a known id replaces its earlier line), where a named session with missing items would stay short.
     for (const item of items) { hist.append({ ev: "item", session: s.id, item }); n++; }
+    hist.append({ ev: "session", session: s.id, harness, how: "backfill", started: s.at ?? null });
   }
   return n;
 }

@@ -248,6 +248,7 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
   };
 
   let buf = "";
+  child.stdout.setEncoding("utf8"); // a character split across two chunks stays whole
   child.stdout.on("data", (d) => {
     buf += d;
     let i;

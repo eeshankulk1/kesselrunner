@@ -57,6 +57,7 @@ export function connect({ onEvent = null, timeoutMs = 3000, sock = socketPath() 
         socket: c,
       });
     });
+    c.setEncoding("utf8"); // a character split across two chunks stays whole
     c.on("data", (d) => {
       buf += d;
       let i;

@@ -40,7 +40,7 @@ async function run(args, ctx, json) {
       const before = opt("--before") ?? null;
       const limit = opt("--limit");
       const following = has("--follow");
-      opt("--client");
+      opt("--client"); // accepted and ignored: older front ends still pass it
       const ref = rest[0];
       if (!ref) return error("bad-payload", "usage: rollcall api conversation <home>[:<task>] [--before <cursor>] [--limit <n>] [--follow]", 2);
       if (limit !== undefined && !(Number(limit) > 0)) return error("bad-payload", "--limit takes a number above 0", 2);

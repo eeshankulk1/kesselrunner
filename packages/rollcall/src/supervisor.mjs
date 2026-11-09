@@ -445,7 +445,7 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   const harness = again ? sessionHarness(again) : harnessOf(t);
   const a = adapter(harness);
   // A v2 worker is a background session the daemon may still run: stopped first, so one conversation has one process.
-  if (last && !last.tmux && !last.endedAt) adapter(last).stopLegacy(last.id);
+  if (last && !last.tmux && !last.hosted && !last.endedAt) adapter(last).stopLegacy(last.id);
   model = modelOk(model) ? model : null;
   effort = effortOk(effort) ? effort : null;
   const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort, ...(hosted ? { hosted } : {}) });
@@ -730,7 +730,7 @@ export function workerHook(h, id, event, p, { recordAsk }) {
           if (!x?.sessions.length) return;
           const now = Date.now();
           x.sessions.at(-1).endedAt = now;
-          x.sessions.push({ id: p.session_id, name: x.sessions.at(-1).name, at: now, endedAt: null, tmux: true });
+          x.sessions.push({ id: p.session_id, name: x.sessions.at(-1).name, at: now, endedAt: null, ...(hostedHome(h) ? { tmux: false, hosted: true } : { tmux: true }) });
           store.writeTask(x);
         });
       }

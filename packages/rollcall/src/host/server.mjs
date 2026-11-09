@@ -176,7 +176,14 @@ class Agent {
   }
 
   /** Writes earlier sessions into the history once, before anything else is appended (`skip`: a session starting fresh). */
-  async backfill(skip = null, also = null) {
+  backfill(skip = null, also = null) {
+    // One at a time: two callers at once (a history read, a start) would each write every session.
+    const run = (this.backfilling ?? Promise.resolve()).catch(() => {}).then(() => this._backfill(skip, also));
+    this.backfilling = run;
+    return run;
+  }
+
+  async _backfill(skip, also) {
     const t = this.id ? store.readTask(this.h, this.id) : await supervisorTask(this.h, also);
     if (t) await backfill(this.hist, t, { skip });
   }
@@ -190,7 +197,7 @@ class Agent {
   /** Starts the agent's process on its launch file: a new session, or its last one resumed. */
   async start({ prompt = null, restart = false, harness = null } = {}) {
     if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal: it carries on here when the terminal closes`);
-    harness = HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
+    harness = !this.id ? "claude" : HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
     if (this.proc && restart) {
       // supervisor.mjs launch wrote a launch file: the same session running takes its first prompt as words; another
       // session (a handoff, a fresh start, another harness) replaces the process.
@@ -612,6 +619,8 @@ class Agent {
           this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `${NAME[this.rec.harness] ?? "The agent"} stopped (exit ${e.code}). A message brings it back.${e.err ? `\n${e.err}` : ""}` });
         }
         this.setState("parked");
+        // Words that came in while it was closing went to a dying process: the next process takes them.
+        if (how === "park" && this.queued.length) void this.start().catch((x) => log(`${this.ref}: held words did not go in: ${x.message}`));
         return;
       }
       default:
@@ -640,6 +649,7 @@ function relayAnswer(req, a, by) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [BIN, "api", "do", "question.answer", JSON.stringify(payload)], { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    child.stdout.setEncoding("utf8");
     child.stdout.on("data", (d) => { out += d; });
     child.on("error", (e) => resolve(err("failed", e.message)));
     child.on("exit", () => {
@@ -728,6 +738,7 @@ async function restore() {
 /** Line-delimited JSON on a connection: each request line gets one answer line (`id` echoed). */
 function lineServer(c, handle) {
   let buf = "";
+  c.setEncoding("utf8"); // a character split across two chunks stays whole
   c.on("data", (d) => {
     buf += d;
     if (buf.length > 32_000_000) { c.destroy(); return; }
