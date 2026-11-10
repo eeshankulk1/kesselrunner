@@ -15,6 +15,7 @@
 //   PLAN     sends its plan (turn/plan/updated)
 //   THINK    thinks first (a reasoning summary, streamed)
 //   STREAM   streams its reply in pieces, 100 ms apart
+// On stdio, model/list answers with two models and a hidden one (the default second).
 // thread/resume answers with the turns in $FAKE_CODEX_HISTORY (a JSON file), as a thread's saved history.
 // With $FAKE_CODEX_THREADS (a folder) the threads are saved there, as Codex saves its own: every finished turn goes in
 // <folder>/<thread>.json, thread/resume answers with them, and so does thread/read on stdio. `resume <thread>` (the
@@ -64,7 +65,7 @@ if (args[0] === "resume") {
   const listen = args[args.indexOf("--listen") + 1];
   const path = listen.replace(/^unix:\/\//, "");
   rmSync(path, { force: true });
-  log({ server: args });
+  log({ server: args, session: process.env.ROLLCALL_SESSION ?? null });
   serve(path);
 } else {
   process.stderr.write(`fake codex: unknown ${args.join(" ")}\n`);
@@ -263,6 +264,11 @@ function serveStdio() {
       buf = buf.slice(i + 1);
       if (m.method === "initialize") send({ id: m.id, result: {} });
       else if (m.method === "thread/read") send({ id: m.id, result: { thread: { id: m.params?.threadId, turns: m.params?.includeTurns ? savedTurns(m.params?.threadId) : [] } } });
+      else if (m.method === "model/list") send({ id: m.id, result: { nextCursor: null, data: [
+        { id: "fake-pro", model: "gpt-fake-pro", displayName: "GPT Fake Pro", hidden: false, isDefault: false },
+        { id: "fake-main", model: "gpt-fake-main", displayName: "GPT Fake", hidden: false, isDefault: true },
+        { id: "fake-hidden", model: "gpt-fake-hidden", displayName: "Hidden", hidden: true, isDefault: false },
+      ] } });
       else if (m.method === "account/rateLimits/read") send({ id: m.id, result: { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 }, planType: "plus" } } } });
       else if (m.id !== undefined) send({ id: m.id, error: { code: -32601, message: "no" } });
     }

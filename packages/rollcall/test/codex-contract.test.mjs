@@ -74,6 +74,19 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
     assert.match(JSON.stringify(read(`${f}.json`).definitions[def]), /"acceptForSession"/, `${f} takes acceptForSession`);
   }
   assert.ok(read("PermissionsRequestApprovalResponse.json").definitions.PermissionGrantScope.enum.includes("session"));
+  // A Codex chat (host/chat.mjs): its contract as developer instructions, its mode changed from the next turn, the
+  // model chip from Codex's own list.
+  for (const f of ["ThreadStartParams", "ThreadResumeParams"]) assert.ok(props(f).has("developerInstructions"), `${f} takes developerInstructions`);
+  for (const p of ["approvalPolicy", "approvalsReviewer", "sandboxPolicy"]) assert.ok(props("TurnStartParams").has(p), `turn/start takes ${p}`);
+  const reviewers = JSON.stringify(v2.ApprovalsReviewer);
+  for (const r of ["user", "auto_review"]) assert.match(reviewers, new RegExp(`"${r}"`), `approvals reviewer ${r}`);
+  const sandboxes = Object.fromEntries(v2.SandboxPolicy.oneOf.map((o) => [o.properties.type.enum[0], new Set(Object.keys(o.properties))]));
+  for (const [type, fields] of Object.entries({ readOnly: ["networkAccess"], workspaceWrite: ["writableRoots", "networkAccess"], dangerFullAccess: [] })) {
+    assert.ok(sandboxes[type], `sandbox policy ${type}`);
+    for (const f of fields) assert.ok(sandboxes[type].has(f), `a ${type} sandbox policy carries ${f}`);
+  }
+  assert.ok(client.has("model/list"), "client method model/list");
+  for (const f of ["model", "displayName", "hidden", "isDefault"]) assert.ok(f in v2.Model.properties, `a listed model carries ${f}`);
 
   const caps = read("v1/InitializeParams.json").definitions.InitializeCapabilities.properties;
   assert.ok("experimentalApi" in caps, "initialize still takes experimentalApi");

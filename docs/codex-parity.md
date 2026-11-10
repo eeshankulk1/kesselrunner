@@ -69,7 +69,10 @@ that never runs Claude.
   Claude Code's terminal UI only. Codex sessions and delegated workers show no
   bands and load no mods; nothing the mods show is needed by an agent.
 - **Supervisor mode**: the supervisor stays on Claude Code; its workers can
-  run on either harness. See [Codex as a Falcon worker](#codex-as-a-falcon-worker)
+  run on either harness. A cockpit chat in the agent host can run on Codex
+  (Codex models in `chatOptions`, modes Ask, Auto and Read only; Codex Full
+  Access is left out on purpose). Codex task workers still keep the mode they
+  started with. See [Codex as a Falcon worker](#codex-as-a-falcon-worker)
   and what is still missing there.
 - **`/update-tests`** uses kesselrunner's own `test-updater` agent, so it works on
   Codex.

@@ -1,7 +1,8 @@
 // A chat: cockpit's "new chat" (docs/plans/2026-11-09-new-chat.md in cockpit). A hosted home of kind `chat`
-// (`runtime.json` { runtime: "host", kind: "chat" }): an ordinary Claude Code session the agent host runs, in a
-// worktree and branch of its own, that does the work itself and starts tasks (hosted workers, as a hosted crew's)
-// when work splits. Its session runs with chat-contract.md appended to Claude Code's system prompt. The record is
+// (`runtime.json` { runtime: "host", kind: "chat" }): an ordinary Claude Code or Codex session the agent host runs, in
+// a worktree and branch of its own, that does the work itself and starts tasks (hosted workers, as a hosted crew's)
+// when work splits. A Codex model makes a Codex chat. Its session runs with chat-contract.md appended to Claude Code's
+// system prompt, or as Codex's developer instructions. The record is
 // `chat.json` in the home; its title starts as a draft from the first words, then a one-shot Haiku title, and the
 // owner's rename always wins. A chat archives (by hand, or after ROLLCALL_CHAT_ARCHIVE_DAYS unused) and comes back
 // when the owner writes to it. Terminal crews (falcon, /supervisor) never meet any of this.
@@ -11,6 +12,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { launchFile, readJson, writeJson } from "../claude/live.mjs";
+import { once } from "../codex/rpc.mjs";
+import { bin as codexBin, launchFile as codexLaunchFile, models as codexNames, modelFor, policyFor, writableRoots } from "../harness/codex.mjs";
 import { defaultBranch, gitSync, locate, mainCheckout, repoKey } from "../git.mjs";
 import { BIN } from "../session.mjs";
 import { isOpen } from "../state.mjs";
@@ -42,27 +45,66 @@ export function updateChat(h, fn) {
 /** Days unused before a chat archives itself: ROLLCALL_CHAT_ARCHIVE_DAYS (fractions allowed), else 7. */
 export const archiveDays = () => { const v = Number(process.env.ROLLCALL_CHAT_ARCHIVE_DAYS); return Number.isFinite(v) && v > 0 ? v : 7; };
 
-/** The models and modes a new chat offers (the snapshot's `chatOptions`). */
-export const CLAUDE_MODES = [{ id: "default", label: "Ask" }, { id: "acceptEdits", label: "Accept edits" }, { id: "plan", label: "Plan" }, { id: "auto", label: "Auto" }];
-export const CODEX_MODES = [{ id: "read-only", label: "Read only" }, { id: "auto", label: "Auto" }, { id: "full-access", label: "Full access" }];
-const CLAUDE_MODELS = [{ id: "opus", label: "Opus", harness: "claude" }, { id: "sonnet", label: "Sonnet", harness: "claude" }, { id: "haiku", label: "Haiku", harness: "claude" }];
 /**
- * Codex chats are not built yet: the host's Codex agent is a task's (its hooks, status log and journal are keyed by a
- * task), and a chat's own session has no task. Until they are, Codex models stay out of chatOptions, and chat.new
- * refuses one with `not-available`.
+ * The models and modes a new chat offers (the snapshot's `chatOptions`). Codex's modes are its own presets, under the
+ * names the Claude modes they match carry: Ask (it asks before it leaves the worktree's sandbox), Auto (Codex's auto
+ * review decides each request, as Claude Code's classifier does in auto), Read only. Codex's Full Access has no Claude
+ * mode in the chip and stays out.
  */
-export const CODEX_CHATS = false;
-const CODEX_MODELS = [{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra", harness: "codex" }];
+export const CLAUDE_MODES = [{ id: "default", label: "Ask" }, { id: "acceptEdits", label: "Accept edits" }, { id: "plan", label: "Plan" }, { id: "auto", label: "Auto" }];
+export const CODEX_MODES = [{ id: "default", label: "Ask" }, { id: "auto", label: "Auto" }, { id: "read-only", label: "Read only" }];
+const CLAUDE_MODELS = [{ id: "opus", label: "Opus", harness: "claude" }, { id: "sonnet", label: "Sonnet", harness: "claude" }, { id: "haiku", label: "Haiku", harness: "claude" }];
+/** Codex's models before its own list has been read (codexModels). */
+const CODEX_FALLBACK = [{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra", harness: "codex" }];
+/** The modes a chat of `harness` takes. */
+export const modesOf = (harness) => (harness === "codex" ? CODEX_MODES : CLAUDE_MODES);
 
-/** `codex()`: whether the codex CLI is on PATH, asked only when Codex chats exist. */
+/** Codex's models as its app server last listed them (`_machine/codex-models.json`), else the fallback. */
+export function codexModels() {
+  const c = store.readMachineFile("codex-models");
+  return Array.isArray(c?.models) && c.models.length ? c.models : CODEX_FALLBACK;
+}
+
+/** Whether `model` names a Codex model: one Codex listed, or a name of Codex's shape. */
+export const isCodexModel = (model) => typeof model === "string" && (codexNames.ok(model) || codexModels().some((m) => m.id === model));
+
+/** How long a read of Codex's models lasts before the host reads them again. */
+const MODELS_TTL = 6 * 3600_000;
+
+/**
+ * Reads Codex's model list from its app server (`model/list`, the picker's own list: hidden models left out, the
+ * default first) into `_machine/codex-models.json`, at most once per MODELS_TTL unless `force`. Resolves to the list,
+ * or null when Codex is not installed or does not answer (the last list, or the fallback, stays).
+ * ROLLCALL_CODEX_MODELS=0 never reads it (test sandboxes: the Mac's own Codex must not start there).
+ */
+export async function refreshCodexModels({ force = false, env = process.env, now = Date.now() } = {}) {
+  if (store.parseFlag(env.ROLLCALL_CODEX_MODELS) === false) return null;
+  const b = codexBin(env);
+  if (!b) return null;
+  const last = store.readMachineFile("codex-models");
+  if (!force && last?.at && now - last.at < MODELS_TTL) return last.models;
+  try {
+    const r = await once(b, "model/list", { limit: 100 }, { env, timeoutMs: 20_000 });
+    const seen = new Set();
+    const models = (r?.data ?? [])
+      .filter((m) => m && !m.hidden && typeof (m.model ?? m.id) === "string")
+      .sort((a, b) => Number(!!b.isDefault) - Number(!!a.isDefault))
+      .map((m) => ({ id: m.model ?? m.id, label: m.displayName || m.model || m.id, harness: "codex" }))
+      .filter((m) => !seen.has(m.id) && seen.add(m.id));
+    if (!models.length) return null;
+    store.updateMachineFile("codex-models", () => ({ value: { at: now, models }, out: null }));
+    return models;
+  } catch { return null; }
+}
+
+/** `codex()`: whether the codex CLI is installed: its models are offered only then. */
 export function chatOptions({ codex = () => false } = {}) {
-  const withCodex = CODEX_CHATS && codex();
   return {
-    models: [...CLAUDE_MODELS, ...(withCodex ? CODEX_MODELS : [])],
+    models: [...CLAUDE_MODELS, ...(codex() ? codexModels() : [])],
     defaultModel: "opus",
     modes: { claude: CLAUDE_MODES, codex: CODEX_MODES },
-    defaultMode: { claude: "default", codex: "auto" },
-    modeFixed: { claude: false, codex: true },
+    defaultMode: { claude: "default", codex: "default" },
+    modeFixed: { claude: false, codex: false },
     archiveAfterDays: archiveDays(),
   };
 }
@@ -207,10 +249,17 @@ export function makeWorktree(h, folder, { branch = `chat/${h}` } = {}) {
   return { worktree: path, branch, repo, note: null };
 }
 
-/** The appended system prompt for chat `h`, written to its home: chat-contract.md with its place filled in. */
+/** What the chat contract names for each harness: the agent, and its tool for asking the owner. */
+const CONTRACT_WORDS = { claude: { agent: "Claude Code", ask: "AskUserQuestion" }, codex: { agent: "Codex", ask: "request_user_input" } };
+
+/**
+ * The chat's instructions, written to its home: chat-contract.md with its place and harness filled in. Claude Code
+ * appends it to its system prompt; Codex takes it as developer instructions.
+ */
 export function writeContract(h, c) {
   const where = c.worktree ? `your own worktree, ${c.worktree}, on your own branch (\`git branch --show-current\`; it starts as ${c.branch} and is renamed once the chat has a title, until you push it)` : `the folder ${c.folder} (no worktree of your own: ${c.note ?? "git refused one"})`;
-  const text = readFileSync(CONTRACT, "utf8").replaceAll("{{where}}", where).replaceAll("{{home}}", h);
+  const words = CONTRACT_WORDS[c.harness] ?? CONTRACT_WORDS.claude;
+  const text = readFileSync(CONTRACT, "utf8").replaceAll("{{where}}", where).replaceAll("{{home}}", h).replaceAll("{{agent}}", words.agent).replaceAll("{{ask}}", words.ask);
   const file = join(store.homeDir(h), "chat-contract.md");
   writeFileSync(file, text);
   return file;
@@ -227,9 +276,14 @@ export function reserveChatHome() {
   return null;
 }
 
-/** The launch file the host starts chat `h`'s own session from (claude-launch.json in the home's worker folder). */
-export function writeChatLaunch(h, c, { session, resume = false }) {
+/**
+ * The launch file the host starts chat `h`'s own session from, in the home's worker folder: claude-launch.json, or
+ * codex-launch.json for a Codex chat. `session` null keeps the one the launch names (and a Codex chat its thread).
+ */
+export function writeChatLaunch(h, c, { session = null, resume = false } = {}) {
+  if (c.harness === "codex") { writeCodexChatLaunch(h, c, { session }); return; }
   const prev = readJson(launchFile(h, null));
+  session ??= prev?.session ?? null;
   writeJson(launchFile(h, null), {
     ...(prev ?? {}),
     home: h, task: null, session, resume, settings: null, cwd: c.worktree ?? c.folder,
@@ -240,6 +294,26 @@ export function writeChatLaunch(h, c, { session, resume = false }) {
 }
 
 /**
+ * A Codex chat's launch (codex-launch.json), as harness/codex.mjs writes a worker's: the chat's mode as Codex's
+ * approval policy and sandbox, its contract as developer instructions (`instructions`, read at each start).
+ */
+export function writeCodexChatLaunch(h, c, { session = null } = {}) {
+  const f = codexLaunchFile(h, null);
+  const prev = readJson(f);
+  const cwd = c.worktree ?? c.folder;
+  const on = modelFor({ model: c.model });
+  writeJson(f, {
+    home: h, task: null, session: session ?? prev?.session ?? randomUUID(), thread: session && session !== prev?.session ? null : prev?.thread ?? null,
+    name: c.title, cwd, prompt: null, model: isCodexModel(c.model) ? c.model : on.model, effort: on.effort, mode: c.mode ?? "default", ...policyFor(c.mode),
+    writableRoots: writableRoots({ home: h, id: null, worktree: cwd }), bin: codexBin(), view: "chat",
+    questions: store.envFlag("ROLLCALL_CODEX_QUESTIONS") !== false, instructions: writeContract(h, c),
+  });
+}
+
+/** The Claude Code mode a Codex chat's pick matches: the one its tasks' workers start in (start.mjs reads it). */
+const claudeModeOf = (c) => (c?.harness === "codex" ? (c.mode === "auto" ? "auto" : "default") : c?.mode ?? null);
+
+/**
  * Binds chat `h` to its Claude Code session `session`, as `rollcall supervise` binds a supervisor: the home's lock and
  * the session's record (`chat`, not `supervisor`: its hooks mark turns and bring task news, and its edits are allowed).
  * The record is written before the session runs; the session's hooks fill in the rest.
@@ -248,7 +322,10 @@ export function bindChat(h, session) {
   if (!session) return;
   store.writeHomeFile(h, "lock", { session, at: Date.now(), chat: true });
   const g = store.readGlobal(session);
-  store.writeGlobal({ id: session, startedAt: Date.now(), repos: [], firstPrompt: null, ...(g ?? {}), supervisor: null, chat: { home: h, at: g?.chat?.at ?? Date.now() } });
+  // A Codex chat has no Claude Code hooks to record the mode its workers start in: the chat's pick says it.
+  const c = readChat(h);
+  const mode = c?.harness === "codex" ? { mode: claudeModeOf(c) } : {};
+  store.writeGlobal({ id: session, startedAt: Date.now(), repos: [], firstPrompt: null, ...(g ?? {}), ...mode, supervisor: null, chat: { home: h, at: g?.chat?.at ?? Date.now() } });
 }
 
 /**
@@ -257,13 +334,14 @@ export function bindChat(h, session) {
  * the agent is started, never waiting on the first turn: { ok, home, chat, session } or { ok: false, code, err }.
  */
 export async function newChat({ folder, text, attachments = [], model = "opus", mode = "default", title = null, now = Date.now() }) {
+  const harness = isCodexModel(model) ? "codex" : "claude";
   const h = reserveChatHome();
   if (!h) return { ok: false, code: "failed", err: "could not find a free chat name" };
   store.writeHomeFile(h, "runtime", { runtime: "host", kind: "chat", at: now });
   const w = makeWorktree(h, folder);
   const c = {
     title: title ?? draftTitle(text), titleBy: title ? "owner" : "draft", folder, repo: w.repo, worktree: w.worktree, branch: w.branch,
-    harness: "claude", model, mode, createdAt: now, lastUsedAt: now, archivedAt: null, archivedBy: null, note: w.note,
+    harness, model, mode, createdAt: now, lastUsedAt: now, archivedAt: null, archivedBy: null, note: w.note,
   };
   writeChat(h, c);
   const session = randomUUID();

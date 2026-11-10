@@ -1025,7 +1025,8 @@ function hostedNow(h, holder) {
   const who = holder ?? (a.session ? { id: a.session } : null);
   if (a.state === "terminal") return { at: "terminal", holder: who };
   if (a.state === "stopped" || !who) return { at: "closed" };
-  if (a.state === "running") return { at: "busy", holder: who, picker: !!readJson(join(store.workerDir(h, h), "claude.json"))?.prompt };
+  // The compat record names a prompt open in the chat: claude.json, or codex.json for a Codex chat.
+  if (a.state === "running") return { at: "busy", holder: who, picker: !!readJson(join(store.workerDir(h, h), a.harness === "codex" ? "codex.json" : "claude.json"))?.prompt };
   return { at: "idle", holder: who };
 }
 
