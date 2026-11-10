@@ -102,6 +102,8 @@ export function pruneHomes(now = Date.now()) {
   if (!store.decisionsGathered()) return; // the lock was busy: a home dropped now would take its list with it
   for (const h of store.listHomes()) {
     try {
+      // A cockpit chat stays until the owner deletes it (archived, it waits for their words).
+      if (store.readHomeFile(h, "runtime")?.kind === "chat") continue;
       if (now - store.homeLastChange(h) <= 7 * 86400_000 || holderOf(h)) continue;
       const open = store.listTasks(h).filter(isOpen);
       if (tmux.windows(h).size || open.some((t) => workerState(t, now)?.alive)) continue;
@@ -154,7 +156,9 @@ export function inheritHome(g, now = Date.now()) {
     if (!lock?.session || lock.session === g.id || currentSession(lock.session)?.id !== g.id) continue;
     store.writeHomeFile(h, "lock", { session: g.id, at: now, from: lock.session });
     const old = store.readGlobal(lock.session);
-    store.writeGlobal({ ...store.readGlobal(g.id), ...g, supervisor: { ...old?.supervisor, home: h, at: now }, mode: g.mode ?? old?.mode });
+    // A chat's session (host/chat.mjs) stays a chat: it edits, as a supervisor never does.
+    const role = old?.chat || lock.chat ? { chat: { ...old?.chat, home: h, at: now } } : { supervisor: { ...old?.supervisor, home: h, at: now } };
+    store.writeGlobal({ ...store.readGlobal(g.id), ...g, ...role, mode: g.mode ?? old?.mode });
     const open = store.listTasks(h).filter(isOpen).map((t) => t.id);
     lines.push(`${P} This session continues supervisor ${h} (session ${short(lock.session)} was sent to the background), so it runs ${h} now${open.length ? `: ${open.join(", ")}` : ""}.`);
   }

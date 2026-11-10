@@ -28,6 +28,8 @@ import * as trouble from "./trouble.mjs";
 import { tokensOf, usageOf, when } from "./usage.mjs";
 import { usageMoves, view } from "./watch.mjs";
 import { runtimeOf as crewRuntime } from "./host/client.mjs";
+import { chatOptions, chatView } from "./host/chat.mjs";
+import { bin as codexBin } from "./harness/codex.mjs";
 
 /** The interface's version. A front end checks it; any change that could break one (a field gone or retyped, an action's meaning) bumps it. Added fields and actions do not. */
 export const INTERFACE = 1;
@@ -147,6 +149,8 @@ function supervisorView(h, now) {
     // Where the crew runs: "host" (made by a front end in the agent host: a chat, through the host's socket) or
     // "terminal" (falcon or /supervisor: tmux windows and the real CLIs).
     runtime: crewRuntime(h),
+    // A hosted home as a chat (host/chat.mjs): its title, folder, worktree, model and archive state; null in a terminal.
+    chat: chatView(h),
   };
 }
 
@@ -197,6 +201,8 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
     interface: INTERFACE, rollcall: VERSION, at: now,
     tmux: { socket: tmux.SOCKET(), available: tmuxAvailable() },
     supervisors: homes.map((h) => supervisorView(h, now)),
+    // What a new chat offers: models, modes per harness, and the archive delay.
+    chatOptions: chatOptions({ codex: () => !!codexBin() }),
     tasks: views.map(({ t, v }) => taskView(t, now, v)),
     sessions: sessionsView(now),
     queues: queuesView(),

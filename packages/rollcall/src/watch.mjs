@@ -40,6 +40,7 @@ import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from ".
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
 import { comeBack, contextOf, hostedSupervisor, markBack, startWindow, supervisorMark } from "./window.mjs";
 import { callSync as hostCall, hostedHome } from "./host/client.mjs";
+import { isChat } from "./host/chat.mjs";
 import { readJson } from "./claude/live.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
@@ -782,6 +783,57 @@ function reportNote(t) {
   return `\n  Its report: \`${path}\`${moved}: "${reportGist(t)}". Give the owner that path and line first, not the text; read it only if you need it.`;
 }
 
+/** A task's replies a wake names: every one since the first this wake's entries name, else the last. */
+function repliesFor(e, t, entries) {
+  const since = Math.min(...entries.filter((x) => x.task === e.task && x.kind === "reply").map((x) => x.note ?? Infinity));
+  const all = t.notes.filter((n) => n.by !== "supervisor" && /^reply:/i.test(n.text));
+  return (Number.isFinite(since) && all.some((n) => n.at >= since) ? all.filter((n) => n.at >= since) : all.slice(-1)).map((n) => n.text.replace(/^reply:\s*/i, "").trim());
+}
+
+/** A task's questions as words: 'Ship it? (Yes / No)', one after another. */
+export function questionWords(questions) {
+  return (questions ?? []).map((q) => {
+    const opts = (q.options ?? []).map((o) => o.label).filter(Boolean);
+    return `${store.oneLine(q.question ?? "")}${opts.length ? ` (${opts.join(" / ")})` : ""}`;
+  }).join(" ");
+}
+
+/**
+ * One piece of task news as a chat hears it: what happened to which task, by title (its name after, which the
+ * rollcall commands take), in plain words. The chat's contract (host/chat-contract.md) says what to do with it.
+ * Null when the news no longer stands.
+ */
+export function chatNewsLine(e, t, entries = [e]) {
+  const who = `"${t.title}" (${nameOf(t.id)})`;
+  const quote = (x, n = 300) => `"${store.clip(store.oneLine(x ?? ""), n)}"`;
+  if (e.kind === "ask" && t.state === "needs-you" && t.ask) return `${who} asks: ${questionWords(t.ask.questions)}`;
+  if (e.kind === "needs-you" && t.state === "needs-you" && !t.ask) return `${who} asks: ${quote(t.question ?? "(no question recorded)")}`;
+  if (e.kind === "stuck" && t.state === "working") {
+    const w = workerState(t);
+    if (!(w?.alive && !w.busy && w.bg?.length === 0)) return null;
+    return `${who} stopped ${duration(Date.now() - w.since) || "minutes"} ago without a report. Its last words: ${quote(w.last ?? "(none)")}`;
+  }
+  if (e.kind === "stalled" && (t.state === "pr-open" || t.state === "queued")) return `${who}: its PR has been quiet for ${duration(Date.now() - e.since) || "a while"}.`;
+  if (e.kind === "reply") {
+    const texts = repliesFor(e, t, entries);
+    const said = texts.length ? texts.join("\n\n") : "(no note)";
+    const head = `${who}${isOpen(t) ? "" : ` (${t.state})`} replies:`;
+    if (said.length <= 300 && !said.includes("\n")) return `${head} "${said}"`;
+    const rest = said.length > 600 ? `\n    (the rest: \`rollcall task show ${nameOf(t.id)}\`)` : "";
+    return `${head}\n${store.clip(said, 600).replace(/^/gm, "    ")}${rest}`;
+  }
+  if (e.kind === "unanswered" && !isOpen(t)) return `${who} (${t.state}) heard from you after it finished and did not reply.${e.said ? ` Its last words: ${quote(e.said)}` : ""}`;
+  if (e.kind === "grew" && isOpen(t)) return `${who}: the work grew: ${quote(t.notes.findLast((n) => /^grew:/i.test(n.text))?.text.replace(/^grew:\s*/i, "") ?? "(no note)")}`;
+  if (e.kind === "failed" && isOpen(t)) return `${who}: its worker did not start (${e.what}): ${e.err || "no reason given"}.`;
+  if (e.kind === "setup-failed" && isOpen(t) && setupState(t.worktree)?.state === "failed") return `${who}: its worktree setup failed: ${quote(setupState(t.worktree).last, 200)}`;
+  if (e.kind === "spotlight" && isOpen(t)) return `${who}: the main checkout stopped following it: ${e.err}.`;
+  if (e.kind === "answered-elsewhere") return `${who}: you answered its question from ${e.by ?? "another app"}.`;
+  if (e.kind === "hooks-untrusted" && isOpen(t)) return `${who} runs on Codex, where ${e.count} of your hooks are not trusted yet.`;
+  if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) return `${who} runs on ${HARNESSES[e.harness].title}, whose ${e.window} limit is at ${e.pct}%; ${HARNESSES[e.other].title} has room (${e.room}% used).`;
+  if (e.kind === "exit-loop" && isOpen(t)) return `${who}: its worker exited ${e.times} times in ${RESUME_WINDOW_MS / 60_000} minutes, so rollcall stopped resuming it.`;
+  return null;
+}
+
 /**
  * The text a wake hands the supervisor: one line per piece of news that needs its judgment, or null when none
  * still stands. `shown` collects the tasks whose report went in, for markReported once it is delivered.
@@ -789,12 +841,22 @@ function reportNote(t) {
 export function wakeText(h, entries, { shown = new Map() } = {}) {
   const lines = [];
   const done = new Set();
+  const chat = isChat(h);
   for (const e of [...entries].reverse()) {
     const key = `${e.task}:${e.kind}`;
     if (done.has(key)) continue;
     done.add(key);
     const t = store.readTask(h, e.task);
     if (!t) continue;
+    if (chat) {
+      // A chat shows these words to the owner as they go in: plain lines, no orders for a supervisor.
+      const said = chatNewsLine(e, t, entries);
+      if (!said) continue;
+      const out = reportToShow(t) && reportFile(t) ? t.output : null;
+      if (out) shown.set(t.id, out.at);
+      lines.unshift(`- ${said}${out ? ` Its report: "${reportGist(t)}" (${reportFile(t)})` : ""}`);
+      continue;
+    }
     const note = reportNote(t);
     const carries = (line) => { if (note) shown.set(t.id, t.output.at); return `${line}${note}`; };
     let line = null;
@@ -813,9 +875,7 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
     } else if (e.kind === "reply") {
       // A finished task's reply too: the owner may have asked it something after it landed. Every reply since the
       // first this wake names, whole when long, since it may be the answer the owner waits on.
-      const since = Math.min(...entries.filter((x) => x.task === e.task && x.kind === "reply").map((x) => x.note ?? Infinity));
-      const all = t.notes.filter((n) => n.by !== "supervisor" && /^reply:/i.test(n.text));
-      const texts = (Number.isFinite(since) && all.some((n) => n.at >= since) ? all.filter((n) => n.at >= since) : all.slice(-1)).map((n) => n.text.replace(/^reply:\s*/i, "").trim());
+      const texts = repliesFor(e, t, entries);
       const said = !texts.length ? ': "(no note)".'
         : texts.length === 1 && !texts[0].includes("\n") && texts[0].length <= 400 ? `: "${texts[0]}".`
           : `, as written:\n${texts.map((x) => x.replace(/^/gm, "    ")).join("\n\n")}\n `;
@@ -850,6 +910,8 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
     if (line) lines.unshift(`- ${line}`);
   }
   if (!lines.length) return null;
+  // A chat started these tasks itself (host/chat.mjs): its contract says what to do with news.
+  if (chat) return [`${P} News from your tasks:`, ...lines].join("\n");
   return [`${P} supervisor ${h}: news from your tasks. Act on each line per the /supervisor skill, then end your turn.`, ...lines].join("\n");
 }
 
@@ -1028,7 +1090,9 @@ function bringBack(h, queued, why, now) {
     const shown = new Map();
     const text = b.resume ? wakeText(h, queued, { shown }) : null;
     const first = why === "parked" ? "was parked while idle, and news from its tasks brought it back" : "stopped without warning, and news from its tasks brought it back";
-    const started = startWindow(h, b, { prompt: text ? `${P} Supervisor ${h} ${first}.\n${text}` : null });
+    // A chat's news reads the same either way (its words show in the chat as they go in).
+    const prompt = !text ? null : isChat(h) ? text : `${P} Supervisor ${h} ${first}.\n${text}`;
+    const started = startWindow(h, b, { prompt });
     if (started.ok && text) {
       store.markDelivered(h, queued.map((w) => w.name));
       store.writeHomeFile(h, "delivery", { session: b.session, at: now });

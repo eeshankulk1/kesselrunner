@@ -4,7 +4,7 @@
 // repeat: a payload with a `requestId` seen in the last day returns the first result again, and races between two
 // front ends settle here (the first answer to a question wins), not in each front end.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { answerFromFrontEnd } from "./answer.mjs";
@@ -15,6 +15,7 @@ import * as store from "./store.mjs";
 import { deliverWords, holderOf, hostedTask, label, workerState } from "./supervisor.mjs";
 import { callSync, hostedHome } from "./host/client.mjs";
 import { endCrew, newCrew } from "./host/crew.mjs";
+import { CLAUDE_MODES, chatView, isChat, newChat, searchChats, setTitle, unarchiveChat } from "./host/chat.mjs";
 import { SET_MODES } from "./claude/stream.mjs";
 import * as live from "./claude/live.mjs";
 import { modelOk } from "./harness/claude.mjs";
@@ -127,6 +128,13 @@ function attachmentsOf(p) {
   const missing = p.attachments.filter((a) => !existsSync(a));
   if (missing.length) refuse("bad-payload", `no such file: ${missing.join(", ")}`);
   return p.attachments;
+}
+
+/** The chat a payload's `home` names. */
+function chatHome(p) {
+  const h = homeOf(p);
+  if (!isChat(h)) refuse("not-found", `no chat ${h}`);
+  return h;
 }
 
 /** A hosted crew's running agent, for an action only the agent host serves: refused for a terminal crew's. */
@@ -267,6 +275,12 @@ export const ACTIONS = {
       if (codex && !codexModels.ok(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
       if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
+      // A chat with no process (parked, archived) takes the pick for its next start (host/server.mjs set).
+      if (!x.t && isChat(x.h) && !live.record(x.h, x.id)) {
+        const r = callSync("set", { ref: x.h, model, mode });
+        if (!r.ok) refuse(r.error?.code === "bad-payload" ? "bad-payload" : "failed", r.error?.message ?? "the agent host refused");
+        return { set: r.set ?? {}, view: viewAfter(x) };
+      }
       hostedAgent(x, "change its model or mode");
       const r = live.send(x.h, x.id, { op: "set", model, mode });
       if (!r.ok) refuse("failed", r.err ?? "the agent refused");
@@ -284,6 +298,75 @@ export const ACTIONS = {
       const r = newCrew({ cwd, name: name ?? null });
       if (!r.ok) refuse(r.code, r.err);
       return { home: r.home, session: r.session, runtime: r.runtime };
+    },
+  },
+
+  // A new chat (host/chat.mjs): an ordinary session in the agent host, in its own worktree and branch, started on the
+  // owner's words. It answers once the agent is started, never waiting on the first turn.
+  "chat.new": {
+    cli: "a new chat in cockpit",
+    async run(p) {
+      const cwd = str(p, "cwd", { max: 4096 });
+      if (!cwd.startsWith("/")) refuse("bad-payload", "cwd is an absolute path");
+      let dir = false;
+      try { dir = statSync(cwd).isDirectory(); } catch {}
+      if (!dir) refuse("bad-payload", `no such folder: ${cwd}`);
+      const text = str(p, "text");
+      if (!text.trim()) refuse("bad-payload", "text is required");
+      const attachments = attachmentsOf(p);
+      const model = str(p, "model", { required: false, max: 100 }) ?? "opus";
+      if (codexModels.ok(model)) refuse("not-available", "a chat on Codex is not built yet: pick a Claude model");
+      if (!modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
+      const mode = str(p, "mode", { required: false, max: 40 }) ?? "default";
+      if (!CLAUDE_MODES.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${CLAUDE_MODES.map((m) => m.id).join(", ")}`);
+      const title = str(p, "title", { required: false, max: 200 });
+      if (title !== null && !title.trim()) refuse("bad-payload", "title is empty");
+      const r = await newChat({ folder: cwd, text, attachments, model, mode, title: title?.trim() ?? null });
+      if (!r.ok) refuse(r.code, r.err, r.home ? { home: r.home } : undefined);
+      return { home: r.home, ref: r.home, chat: r.chat, session: r.session };
+    },
+  },
+
+  "chat.rename": {
+    cli: "rename in cockpit's sidebar",
+    run(p) {
+      const h = chatHome(p);
+      const title = str(p, "title", { max: 200 }).trim().replace(/\s+/g, " ");
+      if (!title) refuse("bad-payload", "title is empty");
+      if (!setTitle(h, title, "owner")) refuse("not-found", `no chat ${h}`);
+      return { chat: chatView(h) };
+    },
+  },
+
+  // Archived: its process ends (its session is saved), and the owner's words bring it back. Refused with open tasks.
+  "chat.archive": {
+    cli: "archive in cockpit's sidebar",
+    run(p) {
+      const h = chatHome(p);
+      const r = callSync("chat-archive", { ref: h, by: "owner" });
+      if (!r.ok) refuse(r.error?.code ?? "failed", r.error?.message ?? "the agent host did not archive it");
+      return { chat: chatView(h) };
+    },
+  },
+
+  "chat.unarchive": {
+    cli: "unarchive in cockpit's sidebar",
+    run(p) {
+      const h = chatHome(p);
+      unarchiveChat(h);
+      return { chat: chatView(h) };
+    },
+  },
+
+  // Every chat's title and history (the owner's words and the replies), archived ones included. Read-only.
+  "chat.search": {
+    cli: "search in cockpit's sidebar",
+    repeatable: true,
+    run(p) {
+      const query = str(p, "query", { max: 200 });
+      if (!query.trim()) refuse("bad-payload", "query is required");
+      if (p.limit !== undefined && (!Number.isInteger(p.limit) || p.limit < 1 || p.limit > 200)) refuse("bad-payload", "limit is a whole number from 1 to 200");
+      return { results: searchChats(query, { limit: p.limit ?? 30 }) };
     },
   },
 

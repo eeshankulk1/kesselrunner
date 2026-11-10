@@ -9,7 +9,7 @@
 //   TOOL       asks can_use_tool for Bash and waits for the answer; the reply says allowed or denied
 //   ASKTAGGED  asks AskUserQuestion with the questions in $FAKE_CLAUDE_QUESTIONS (JSON)
 //   ASK        asks AskUserQuestion with one "Ship it?" question
-//   SLOW       streams for about 2 s (an interrupt ends it with an error result)
+//   SLOW       streams for about 2 s, 20 x $FAKE_CLAUDE_SLOW_MS (an interrupt ends it with an error result)
 // Control requests: interrupt, set_model and set_permission_mode answer success. stdin's end: exit 0 once the
 // turn running is done.
 //
@@ -125,7 +125,7 @@ function stream() {
       if (interrupted) break;
       ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: c } });
       said += c;
-      await wait(/SLOW/.test(words) ? 100 : 5);
+      await wait(/SLOW/.test(words) ? Number(process.env.FAKE_CLAUDE_SLOW_MS) || 100 : 5);
     }
     absorb();
     ev({ type: "content_block_stop", index: 0 });

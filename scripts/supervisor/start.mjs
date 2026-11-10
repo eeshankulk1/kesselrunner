@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 const ROLLCALL = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "rollcall", "bin", "rollcall.mjs");
 const src = (m) => import(join(dirname(ROLLCALL), "..", "src", m));
 const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
+const { hostedHome } = await src("host/client.mjs");
 
 const run = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, ...opts });
 const rollcall = (argv) => run(process.execPath, [ROLLCALL, ...argv]);
@@ -104,7 +105,9 @@ if (resume !== undefined) {
   ].join(" ");
   const r = launch(task, { prompt: nudge, resume: true, session, mode, ...workerModel(task) });
   if (!r.ok) die(`could not resume ${task.id}'s worker: ${r.err}`);
-  process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} resumed in tmux (${tmux.sessionName(task.home)}, window ${task.id})\n  watch it: rollcall attach ${task.id}\n`);
+  process.stdout.write(hostedHome(task.home)
+    ? `${task.id}: worker ${r.session.slice(0, 8)} resumed in the agent host (the owner sees it in cockpit)\n`
+    : `${task.id}: worker ${r.session.slice(0, 8)} resumed in tmux (${tmux.sessionName(task.home)}, window ${task.id})\n  watch it: rollcall attach ${task.id}\n`);
   if (finished) process.stdout.write(`  ${task.id} stays ${task.state}; its window closes ${Math.round(closeAfterMs() / 60_000)}m after the worker's last turn\n`);
   process.exit(await settled(task));
 }
@@ -123,15 +126,18 @@ if (!ready.ok) die(`${task.id} runs on ${a.title}, which cannot start a worker: 
 const r = launch(task, { prompt: brief, mode, name, ...on });
 if (!r.ok) die(`could not start ${task.id}'s worker: ${r.err}`);
 const runsOn = [a.name !== "claude" && `on ${a.title}`, a.models.map(on.model), on.effort && `${on.effort} effort`, mode && `${mode} mode`].filter(Boolean).join(", ");
-process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} started (${name}) in ${task.worktree}${runsOn ? `, ${runsOn}` : ""}\n  watch it: rollcall attach ${task.id}\n`);
+// A hosted worker (a chat's, a hosted crew's) has no tmux window: the owner follows it in cockpit.
+const watch = hostedHome(task.home) ? "  the owner follows it in cockpit" : `  watch it: rollcall attach ${task.id}`;
+process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} started (${name}) in ${task.worktree}${runsOn ? `, ${runsOn}` : ""}\n${watch}\n`);
 process.exit(await settled(task));
 
 /**
  * Waits (up to ~15 s) for the worker's session to start. Claude Code asks once per repo whether to trust it,
  * before any hook runs: then exit 4 and what the owner does. The window stays up, so accepting there is enough.
+ * A hosted worker never meets that question (stream mode does not ask it), so it never waits on it.
  */
 async function settled(t) {
-  if (workerAdapter(store.readTask(t.home, t.id) ?? t).trusted(t) === false) {
+  if (!hostedHome(t.home) && workerAdapter(store.readTask(t.home, t.id) ?? t).trusted(t) === false) {
     process.stderr.write([
       `start: ${t.id}'s worker waits on Claude Code's trust prompt for ${t.repo.name} (asked once per repo).`,
       `The owner answers it in the worker's window (rollcall attach ${t.id}: "Yes, I trust this folder"), and the worker starts on its brief.`,

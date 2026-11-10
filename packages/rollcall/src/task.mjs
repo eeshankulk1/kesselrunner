@@ -13,6 +13,8 @@ import { asksText, promptAuthor } from "./asked.mjs";
 import { addComment, commentsCommand, commentsLine, readComments } from "./comments.mjs";
 import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoKey } from "./git.mjs";
 import { BIN, P, ago, cli, short } from "./session.mjs";
+import { callSync } from "./host/client.mjs";
+import { isChat } from "./host/chat.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import { WAITABLE, isUsage, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
@@ -352,6 +354,11 @@ async function create(args, ctx) {
     const top = locate(worktree)?.top ?? worktree;
     const baseSha = gitSync(top, ["rev-parse", "HEAD"]).stdout?.trim() || null;
     Object.assign(t, update(t, ctx, (x) => { x.worktree = top; x.baseSha = baseSha; }));
+  }
+  // A task a chat started shows in that chat as a card (host/chat.mjs taskItem): the host appends it to its history.
+  if (isChat(h)) {
+    const r = callSync("chat-task", { ref: h, task: t.id, title: t.title }, { timeoutMs: 15_000 });
+    if (!r.ok && !json) ctx.say(`${P} the chat's card for ${t.id} did not go in: ${r.error?.message ?? "no answer"}`);
   }
   // A new worktree runs on its own before its worker's first turn: its ports, then its files and setup in the background.
   const fresh = !own && t.branch && existsSync(t.worktree);

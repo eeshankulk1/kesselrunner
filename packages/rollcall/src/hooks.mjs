@@ -121,6 +121,12 @@ function mainDenial(info) {
   ].join("\n");
 }
 
+/**
+ * Whether session `g` holds a home: a supervisor (`rollcall supervise`), or a cockpit chat (`chat`, host/chat.mjs
+ * bindChat), which does its own work: its turns and its tasks' news are tracked as a supervisor's, its edits never denied.
+ */
+const holds = (g) => !!(g.supervisor || g.chat);
+
 /** A supervisor (`rollcall supervise`) routes work to task workers and edits no project file, its subagents included. */
 function supervisorDenial(info) {
   return [
@@ -374,7 +380,7 @@ function promptSubmit(p, now) {
     store.writeHomeFile(h, "said", [...(Array.isArray(said) ? said : []), { at: now, session: g.id, text: p.prompt.trim().slice(0, 50_000) }].slice(-SAID_KEEP));
   }
   // A turn starts in a supervisor: what the watcher holds for it goes with this prompt.
-  const running = g.supervisor ? homeOf(g.id) : null;
+  const running = holds(g) ? homeOf(g.id) : null;
   const news = running ? turnStarted(running, g, now) : [];
   let changed = false;
   if (!g.firstPrompt) {
@@ -496,7 +502,7 @@ function stop(p, now) {
   const focus = cwdFocus(p);
   refresh(g, now, focus, { idle: true });
   if (!g.supervisor) snapshotDetached(focus?.info, ["--session", g.id]);
-  const h = g.supervisor ? homeOf(g.id) : null;
+  const h = holds(g) ? homeOf(g.id) : null;
   if (h) turnEnded(h, g, now);
   return null;
 }
@@ -504,7 +510,7 @@ function stop(p, now) {
 /** A supervisor's turn ended on an API error (a worker's has its own hook): what it carried goes back in the queue. */
 function stopFailure(p, now) {
   const g = ensureSession(p);
-  const h = g.supervisor ? homeOf(g.id) : null;
+  const h = holds(g) ? homeOf(g.id) : null;
   if (!h) return null;
   if (ACCOUNT_ERRORS.has(p.error)) openBlocker("usage", { until: resetAt(p.last_assistant_message), text: store.clip(store.oneLine(p.last_assistant_message ?? ""), 240) || null }, now);
   turnFailed(h, g, now);
@@ -529,8 +535,8 @@ function refresh(g, now, focus, { deliver = false, idle = false }) {
   }
   if (!deliver) return lines;
   // A supervisor works across repos and may sit in none: what the owner told its workers directly is task news, not a repo event.
-  const home = g.supervisor ? homeOf(g.id) : null;
-  if (home) lines.push(...ownerNews(home, now), ...skillChanged(g));
+  const home = holds(g) ? homeOf(g.id) : null;
+  if (home) lines.push(...ownerNews(home, now), ...(g.supervisor ? skillChanged(g) : []));
   for (const key of g.repos) {
     if (key === focus?.repo.key) continue;
     const peek = store.readRecord(key, g.id);

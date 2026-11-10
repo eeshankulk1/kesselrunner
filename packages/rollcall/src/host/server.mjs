@@ -10,7 +10,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexRecordFile, launchFile, readJson, recordFile, writeJson } from "../claude/live.mjs";
-import { PLAN_MODES, SET_MODES, commandOf, promptOf } from "../claude/stream.mjs";
+import { PLAN_MODES, SET_MODES, appendedPrompt, commandOf, promptOf } from "../claude/stream.mjs";
 import { dialogFlag } from "../delivery.mjs";
 import { pidAlive, sameProcess, startOf } from "../proc.mjs";
 import * as store from "../store.mjs";
@@ -23,6 +23,7 @@ import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
+import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
 
@@ -104,6 +105,9 @@ class Agent {
     this.terminalWatch = null;
   }
 
+  /** Whether this is a chat's own session (host/chat.mjs): a hosted home of kind chat, and no task. */
+  get chat() { return !this.id && isChat(this.h); }
+
   /** The history, read from its file on first use. */
   get hist() { return (this._hist ??= new History(historyFile(this.h, this.id))); }
 
@@ -123,6 +127,7 @@ class Agent {
     this.rec.serverSock = this.proc?.harness === "codex" ? this.proc.sock : null;
     this.rec.host = process.pid;
     this.rec.at = Date.now();
+    this.rec.requests = this.hist.open.size; // for readers of the record: a chat's `busy` in the snapshot
     writeJson(this.file, this.rec);
     const recFile = this.rec.harness === "codex" ? codexRecordFile(this.h, this.id) : recordFile(this.h, this.id);
     if (this.rec.state === "stopped" || !this.ctl) rmSync(recFile, { force: true });
@@ -239,6 +244,11 @@ class Agent {
     writeJson(file, launch);
     const envFile = join(this.dir, "host-env.sh");
     this.ending = null;
+    // A chat's session holds its home as a supervisor's does (its hooks mark turns and bring task news), edits allowed.
+    if (this.chat) {
+      bindChat(this.h, cfg.session);
+      import("../supervisor.mjs").then((m) => m.ensureWatcher(this.h)).catch(() => {});
+    }
     const on = (e) => { if (this.proc === proc || !proc) this.onEvent(e); };
     let proc = null;
     if (harness === "codex") {
@@ -264,9 +274,11 @@ class Agent {
 
   send(text, attachments, from, uuid = randomUUID()) {
     if (this.proc.idFor) uuid = this.proc.idFor(from, uuid);
-    const q = { uuid, text, at: Date.now(), from, attachments };
+    // `wait`: the words join a running turn, so the item says queued until the agent takes them. Words that start a
+    // turn go in at once: their item is plain from the first event (a front end shows no "queued" for them).
+    const q = { uuid, text, at: Date.now(), from, attachments, wait: this.rec.state === "running" };
     this.queued.push(q);
-    broadcast(this.ref, "item", { item: { id: uuid, at: q.at, kind: "user", text, images: [], from, queued: true } });
+    broadcast(this.ref, "item", { item: sentItem(q) });
     const proc = this.proc;
     // Codex takes words over its protocol, which can refuse them: then they leave the queue, and the chat says so.
     Promise.resolve(proc.say(text, attachments, uuid)).catch((e) => {
@@ -283,15 +295,22 @@ class Agent {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
+    if (this.chat && readChat(this.h)?.archivedAt) {
+      // An archived chat hears only the owner: their words unarchive it and wake it.
+      if ((from ?? "owner") !== "owner") return err("refused", `${this.ref} is archived`);
+      unarchiveChat(this.h);
+      log(`${this.ref}: unarchived by the owner's words`);
+    }
+    if (this.chat && (from ?? "owner") === "owner") touchChat(this.h);
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
     // A supervisor's prompt hook tells the owner's lines from rollcall's by this note (hooks.mjs keyed).
     if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
     if (this.rec.state === "terminal") {
       // Open in a terminal: the words wait, and go in when the terminal closes (closeTerminal).
-      const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
+      const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments, wait: true };
       this.queued.push(q);
       this.rec.held = this.queued.map(({ uuid, text, at, from, attachments }) => ({ uuid, text, at, from, attachments }));
-      broadcast(this.ref, "item", { item: { id: q.uuid, at: q.at, kind: "user", text, images: [], from: q.from, queued: true } });
+      broadcast(this.ref, "item", { item: sentItem(q) });
       this.persist();
       return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
     }
@@ -326,12 +345,22 @@ class Agent {
       done.model = model;
     }
     if (mode) {
-      if (!this.proc) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
-      const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
-      if (r?.error) return err("failed", r.error);
+      if (!this.proc && !this.chat) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
+      if (this.proc) {
+        const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
+        if (r?.error) return err("failed", r.error);
+      }
+      // A chat keeps the owner's pick across park, archive and wake (its chip shows it), as a model carries into a
+      // resume; a parked chat takes it for its next start. A task's worker keeps its supervisor's mode per session.
+      if (this.chat) {
+        const cfg = readJson(launchOf(this.h, this.id, this.rec.harness));
+        if (cfg) writeJson(launchOf(this.h, this.id, this.rec.harness), { ...cfg, mode });
+      }
       this.rec.mode = mode;
       done.mode = mode;
     }
+    // The chat's record too: a launch written again from it (a worktree remade on unarchive) starts with the pick.
+    if (this.chat) updateChat(this.h, (c) => { if (model) c.model = model; if (mode) c.mode = mode; });
     this.persist();
     return { ok: true, set: done };
   }
@@ -341,6 +370,7 @@ class Agent {
     this.hist.append({ ev: "closed", id, how, by: by ?? null, answer });
     broadcast(this.ref, "closed", { id, how, by: by ?? null });
     if (!this.hist.open.size) rmSync(dialogFlag(this.h, this.wid), { force: true });
+    this.persist();
   }
 
   /** The first answer wins; a request whose process is gone is answered as the owner's words on a resumed session. */
@@ -452,6 +482,7 @@ class Agent {
         ...(cfg.mode ? ["--permission-mode", cfg.mode] : []),
         ...(cfg.model ? ["--model", cfg.model] : []),
         ...(cfg.effort ? ["--effort", cfg.effort] : []),
+        ...(appendedPrompt(cfg) ? ["--append-system-prompt", appendedPrompt(cfg)] : []),
         ...(!started && cfg.name ? ["-n", cfg.name] : []),
         ...(first.trim() ? [first.startsWith("-") ? ` ${first}` : first] : []),
       ];
@@ -575,6 +606,7 @@ class Agent {
         return;
       case "turn-end":
         this.streaming.clear();
+        if (this.chat) touchChat(this.h);
         if (e.context) recordContext(this, e.context);
         if (this.rec.harness === "codex") {
           // Codex starts no turn for words steered in as one ended: they are gone, rather than shown waiting for good.
@@ -600,7 +632,7 @@ class Agent {
       }
       case "cancel": {
         const id = [...this.pending].find(([, v]) => v.rid === e.rid)?.[0];
-        if (id) { this.closeRequest(id, "cancelled", null); this.persist(); }
+        if (id) this.closeRequest(id, "cancelled", null);
         return;
       }
       case "limits": try { recordClaude(e.limits); } catch {} return;
@@ -627,6 +659,9 @@ class Agent {
     }
   }
 }
+
+/** Words sent and not taken yet, as an item: `queued` only while they wait (behind a running turn, or a terminal). */
+const sentItem = (q) => ({ id: q.uuid, at: q.at, kind: "user", text: q.text, images: [], from: q.from, ...(q.wait === false ? {} : { queued: true }) });
 
 /** What an agent's process must not inherit: a Claude Code session's own markers, and rollcall's session. */
 export const CHILD_UNSET = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "ROLLCALL_SESSION"];
@@ -791,7 +826,7 @@ async function handle(req, c) {
       case "history": {
         const a = need();
         if (!a.hist.exists) await a.backfill();
-        const extra = [...a.streaming.values(), ...a.queued.map((q) => ({ id: q.uuid, at: q.at, kind: "user", text: q.text, images: [], from: q.from, queued: true }))];
+        const extra = [...a.streaming.values(), ...a.queued.map(sentItem)];
         const p = a.hist.page({ before: req.before ?? null, limit: req.limit ?? 200, extra });
         if (!p.ok) return p;
         return { ...p, ref: a.ref, session: a.rec.session, harness: a.rec.harness, agent: a.state(), requests: [...a.hist.open.values()] };
@@ -803,11 +838,75 @@ async function handle(req, c) {
         c.on("close", () => subscribers.delete(s));
         return { ok: true, subscribed: refs ? [...refs] : "all", agents: [...agents.values()].filter((a) => a.rec.state && (!refs || refs.has(a.ref))).map((a) => a.state()) };
       }
+      // A chat (host/chat.mjs): its first words and title, a task card, and archiving, all where its agent runs.
+      case "chat-start": return await chatStart(req);
+      case "chat-task": {
+        const a = agentFor(req.ref);
+        if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+        a.item(taskItem(a.h, String(req.task ?? ""), req.title));
+        return { ok: true };
+      }
+      case "chat-archive": {
+        const a = agentFor(req.ref);
+        if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+        return archiveAgent(a, req.by === "auto" ? "auto" : "owner");
+      }
       case "shutdown": setTimeout(() => shutdown?.(0), 20); return { ok: true };
       default: return err("bad-payload", `no op ${req.op}`);
     }
   } catch (e) {
     return err(e.code ?? "failed", e.message);
+  }
+}
+
+// ---------------------------------------------------------------- chats
+
+/**
+ * A new chat's first words (`chat.new`, after its launch is written): the owner's, attachments as `say` takes them,
+ * which starts its session. Then, unless the owner named it, a title from a one-shot model in the background.
+ */
+async function chatStart(req) {
+  const a = agentFor(req.ref);
+  if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+  const r = await a.say({ text: req.text, attachments: req.attachments ?? [], from: "owner" });
+  if (!r.ok) return r;
+  if (readChat(a.h)?.titleBy === "draft") {
+    void writeTitle(String(req.text ?? ""), { env: childEnv() }).then((title) => {
+      if (!title) { log(`${a.ref}: no title came back; the draft stays`); return; }
+      const c = setTitle(a.h, title, "auto");
+      log(`${a.ref}: titled "${c?.title ?? title}"${c?.branch ? ` (${c.branch})` : ""}`);
+    }).catch((e) => log(`${a.ref}: the title failed: ${e.message}`));
+  }
+  return { ok: true, how: r.how, uuid: r.uuid, session: a.rec.session, agent: a.state() };
+}
+
+/** Whether a chat's agent is mid-turn, open in a terminal, or holding words not yet taken: archiving would cut it short. */
+const chatRunning = (a) => a.rec.state === "running" || a.rec.state === "terminal" || a.queued.length > 0;
+
+/**
+ * Archives a chat (refused with open tasks, a turn running or a request open) and ends its process; its session is
+ * saved, and words bring it back.
+ */
+function archiveAgent(a, by) {
+  const r = archiveChat(a.h, by, Date.now(), { running: chatRunning(a), requests: a.hist.open.size });
+  if (!r.ok) return err(r.code, r.err);
+  if (a.rec.state && a.rec.state !== "stopped") a.stop(); // never "terminal": chatRunning refused it above
+  log(`${a.ref}: archived (${by})`);
+  return { ok: true, chat: r.chat };
+}
+
+/** How often the host looks for chats to archive: every 10 minutes (ROLLCALL_CHAT_ARCHIVE_POLL_MS). */
+const archivePollMs = () => msEnv("ROLLCALL_CHAT_ARCHIVE_POLL_MS", 600_000);
+
+/** Archives each chat unused for the delay, with no open tasks, no turn running and no open request. */
+export function archiveIdleChats(now = Date.now()) {
+  for (const h of store.listHomes()) {
+    if (!isChat(h)) continue;
+    const c = readChat(h);
+    if (!c || c.archivedAt) continue;
+    const a = agentFor(h);
+    if (!archiveDue(c, { open: openTasks(h).length, running: a ? chatRunning(a) : false, requests: a ? a.hist.open.size : 0 }, now)) continue;
+    if (a) archiveAgent(a, "auto");
   }
 }
 
@@ -864,6 +963,8 @@ export async function runHost() {
   await restore();
   writeJson(infoFile(), { pid: process.pid, sock, at: Date.now(), version: VERSION });
   log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored)`);
+  const archiver = setInterval(() => { try { archiveIdleChats(); } catch (e) { log(`the chat archiver failed: ${e.message}`); } }, archivePollMs());
+  archiver.unref?.();
 
   let ended = false;
   shutdown = async (code) => {
