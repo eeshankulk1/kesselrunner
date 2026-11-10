@@ -229,6 +229,18 @@ test("chat: search, snapshot chat and chatOptions, gc keeps its worktree, worker
   assert.equal(set.result.set.mode, "auto");
   assert.ok(x.inputs().some((m) => m.type === "control_request" && m.request?.subtype === "set_permission_mode" && m.request.mode === "auto"));
   assert.equal(x.chatAgent(h).mode, "auto");
+  // A chat's mode outlives its process: archived and woken, it resumes in auto; parked, it takes a new pick for later.
+  await until(() => x.chatAgent(h)?.state === "idle");
+  assert.equal(x.api("chat.archive", { home: h }).ok, true);
+  await until(() => x.chatAgent(h)?.state === "stopped");
+  const parked = x.api("worker.set", { task: h, mode: "acceptEdits" });
+  assert.equal(parked.ok, true, JSON.stringify(parked));
+  assert.equal(x.api("task.tell", { task: h, text: "back again" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: back again"));
+  assert.equal(x.chatAgent(h).mode, "acceptEdits");
+  const resumed = x.fake().filter((l) => l.argv?.includes("--resume")).at(-1)?.argv ?? [];
+  assert.equal(resumed[resumed.indexOf("--permission-mode") + 1], "acceptEdits", resumed.join(" "));
+  assert.equal(x.chat(h).mode, "acceptEdits", "the chat's record, which a remade worktree's launch is written from");
 });
 
 test("chat: the branch keeps its name once pushed", (t) => {

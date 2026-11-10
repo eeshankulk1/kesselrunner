@@ -23,7 +23,7 @@ import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
-import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, writeTitle } from "./chat.mjs";
+import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
 
@@ -342,12 +342,22 @@ class Agent {
       done.model = model;
     }
     if (mode) {
-      if (!this.proc) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
-      const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
-      if (r?.error) return err("failed", r.error);
+      if (!this.proc && !this.chat) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
+      if (this.proc) {
+        const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
+        if (r?.error) return err("failed", r.error);
+      }
+      // A chat keeps the owner's pick across park, archive and wake (its chip shows it), as a model carries into a
+      // resume; a parked chat takes it for its next start. A task's worker keeps its supervisor's mode per session.
+      if (this.chat) {
+        const cfg = readJson(launchOf(this.h, this.id, this.rec.harness));
+        if (cfg) writeJson(launchOf(this.h, this.id, this.rec.harness), { ...cfg, mode });
+      }
       this.rec.mode = mode;
       done.mode = mode;
     }
+    // The chat's record too: a launch written again from it (a worktree remade on unarchive) starts with the pick.
+    if (this.chat) updateChat(this.h, (c) => { if (model) c.model = model; if (mode) c.mode = mode; });
     this.persist();
     return { ok: true, set: done };
   }

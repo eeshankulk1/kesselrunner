@@ -327,7 +327,7 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `question.answer` | `task`, `question` (its id), `answers` (question text to answer) or `answer` (a single question) | `delivered`, `how`, `why`, `pickerClosed`, `view` | a pick in the Falcon's picker |
 | `task.interrupt` | `task` (or a bare home: a hosted supervisor) | `interrupted`, `why` | `start.mjs <task> --interrupt` (Esc in its window; the host's interrupt for a hosted agent) |
 | `prompt.answer` | `task` (or a bare home), of a hosted crew; `prompt` (the request's id), and by kind: `permission`: `allow`, optional `why`, optional `always`; `plan`: `allow`, optional `why`, optional `mode` (`acceptEdits`, `default`); `question`: `answers` (question text to answer) | `answered`, `already`, `view` | the host's `answer` |
-| `worker.set` | `task` (or a bare home: a hosted supervisor or a chat), of a hosted crew; `model` and/or `mode` (`default`, `acceptEdits`, `plan`, `auto`: the modes Shift-Tab cycles, and Claude Code's auto mode; a mode lasts for the session, a model carries into a resume). A Codex task takes a Codex `model` only, from its next turn (a `mode` is `bad-payload`: it keeps the mode it started with) | `set`, `view` | the host's `set` |
+| `worker.set` | `task` (or a bare home: a hosted supervisor or a chat), of a hosted crew; `model` and/or `mode` (`default`, `acceptEdits`, `plan`, `auto`: the modes Shift-Tab cycles, and Claude Code's auto mode; a task's mode lasts for the session, a model carries into a resume; a chat keeps its mode too, across park, archive and wake, and takes either while parked, for its next start). A Codex task takes a Codex `model` only, from its next turn (a `mode` is `bad-payload`: it keeps the mode it started with) | `set`, `view` | the host's `set` |
 | `chat.new` | `cwd` (an absolute folder), `text` (the first message), optional `attachments` (absolute paths, ten at most), `model` (a Claude alias or id; default `opus`; a Codex model is `not-available`), `mode` (`default`, `acceptEdits`, `plan`, `auto`; default `default`), `title` (1-200: the owner names it, and no model title follows) | `home`, `ref` (= home), `chat` (as in the snapshot), `session` | a new chat in cockpit |
 | `chat.rename` | `home`, `title` (1-200) | `chat` | |
 | `chat.archive` | `home` | `chat`; `refused` with open tasks ("it has N open tasks") | |
@@ -468,7 +468,7 @@ Cockpit's crews run in the agent host: a supervisor made with `supervisor.new` (
 | `say` | `ref`, `text`, optional `attachments` (paths, ten at most), `from` (`owner`, `rollcall`), `uuid` | `how` (`sent`, `queued`, `resumed`), `uuid` (the item's id) |
 | `interrupt` | `ref` | `interrupted` |
 | `answer` | `request`, optional `ref`, `by`, and by kind: `allow`, `why`, `always`, `mode`; `answers` | `answered`, `how` (`answered`, or `words` for a request whose process is gone) |
-| `set` | `ref`, `model` and/or `mode` (`default`, `acceptEdits`, `plan`) | `set` |
+| `set` | `ref`, `model` and/or `mode` (`default`, `acceptEdits`, `plan`, `auto`); a chat's mode also goes in its launch, so a resume keeps it, and a chat with no process takes it for its next start | `set` |
 | `park`, `stop` | `ref` | `parked`, `stopped` |
 | `history` | `ref`, optional `before`, `limit` (200) | `items`, `cursor`, `more`, `session`, `harness`, `agent`, `requests` |
 | `subscribe` | optional `refs` (every agent when absent) | `subscribed`, `agents`; then events on the same connection |

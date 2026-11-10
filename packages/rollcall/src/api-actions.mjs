@@ -275,6 +275,12 @@ export const ACTIONS = {
       if (codex && !codexModels.ok(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
       if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
+      // A chat with no process (parked, archived) takes the pick for its next start (host/server.mjs set).
+      if (!x.t && isChat(x.h) && !live.record(x.h, x.id)) {
+        const r = callSync("set", { ref: x.h, model, mode });
+        if (!r.ok) refuse(r.error?.code === "bad-payload" ? "bad-payload" : "failed", r.error?.message ?? "the agent host refused");
+        return { set: r.set ?? {}, view: viewAfter(x) };
+      }
       hostedAgent(x, "change its model or mode");
       const r = live.send(x.h, x.id, { op: "set", model, mode });
       if (!r.ok) refuse("failed", r.err ?? "the agent refused");
