@@ -41,10 +41,12 @@ test("host: start, say, the history and the push lines", async (t) => {
   assert.equal(page.items[1].id, said.uuid, "the words keep the id they were sent with");
   assert.equal(page.items[2].text, "done: hello there");
   assert.equal(page.items[3].tokens.output, 42);
-  // The push connection saw the same, live: state changes, the queued words, streamed text, the items.
+  // The push connection saw the same, live: state changes, the words sent, streamed text, the items.
   const evs = events.map((e) => e.ev);
   for (const ev of ["state", "session", "item", "text"]) assert.ok(evs.includes(ev), `a ${ev} event: ${evs.join(",")}`);
-  assert.ok(events.some((e) => e.ev === "item" && e.item.queued && e.item.id === said.uuid));
+  const sent = events.filter((e) => e.ev === "item" && e.item.id === said.uuid);
+  assert.ok(sent.length, "the words, at once");
+  assert.ok(sent.every((e) => !e.item.queued), "words that start a turn never show as queued");
   assert.equal(events.filter((e) => e.ev === "text").map((e) => e.append).join(""), "done: hello there");
   assert.ok(events.every((e) => e.ref === ref && e.v === 1 && Number.isFinite(e.seq)));
   // The compat record points the seam (claude/live.mjs) at the host.
@@ -66,6 +68,8 @@ test("host: words while a turn runs join it; interrupt stops the turn", async (t
   await until(() => x.fake().some((l) => l.replayed));
   const q = await c.call("say", { ref, text: "and also this" });
   assert.equal(q.how, "queued");
+  const waiting = (await c.call("history", { ref })).items.find((it) => it.id === q.uuid);
+  assert.equal(waiting?.queued, true, "words that join a running turn show as queued until taken");
   assert.equal((await c.call("state", { ref })).agent.send, "join");
   const i = await c.call("interrupt", { ref });
   assert.equal(i.interrupted, true);

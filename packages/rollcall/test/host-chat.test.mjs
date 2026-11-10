@@ -2,8 +2,9 @@
 // folder itself, with a note, when git refuses), runs the owner's words first with the chat contract appended to
 // Claude Code's system prompt, is titled from its first words and then by the title model unless the owner renamed it
 // first, renames its branch only while unpushed, shows the tasks it starts as cards, archives by hand (refused with
-// open tasks) and by itself once unused, wakes on the owner's words, is found by search, shows in the snapshot with
-// chatOptions, keeps its worktree from gc while not archived, and takes Claude's auto mode.
+// open tasks, a turn running or a request open) and by itself once unused, wakes on the owner's words, is found by
+// search, shows in the snapshot with chatOptions, keeps its worktree from gc while not archived, and takes Claude's
+// auto mode.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -49,6 +50,22 @@ test("chat unit: draft titles, slugs, cleaned titles, archive due", () => {
   assert.equal(archiveDue(c, { requests: 1 }, now, 7), false, "an open request keeps it");
   assert.equal(archiveDue({ ...c, lastUsedAt: now - 86400_000 }, {}, now, 7), false, "used lately");
   assert.equal(archiveDue({ ...c, archivedAt: 1 }, {}, now, 7), false, "archived already");
+});
+
+test("chat unit: task news reads plain, by title, a question as words", async () => {
+  const { chatNewsLine } = await import("../src/watch.mjs");
+  const questions = [{ question: "Ship it now?", header: "Ship", multiSelect: false, options: [{ label: "Yes", description: "ship" }, { label: "No", description: "wait" }] }];
+  const t = { id: "t3", title: "Fix the login page", state: "needs-you", ask: { questions }, notes: [] };
+  const ask = chatNewsLine({ task: "t3", kind: "ask" }, t);
+  assert.equal(ask, '"Fix the login page" (luke) asks: Ship it now? (Yes / No)');
+  assert.doesNotMatch(ask, /[{}[\]]|AskUserQuestion/, "no JSON, no orders for a supervisor");
+  const asked = chatNewsLine({ task: "t3", kind: "needs-you" }, { ...t, ask: null, question: "Which port?" });
+  assert.equal(asked, '"Fix the login page" (luke) asks: "Which port?"');
+  const replied = { ...t, state: "landed", ask: null, notes: [{ at: 5, by: "worker", text: "reply: it is on main" }] };
+  assert.equal(chatNewsLine({ task: "t3", kind: "reply", note: 5 }, replied), '"Fix the login page" (luke) (landed) replies: "it is on main"');
+  const long = { ...replied, notes: [{ at: 5, by: "worker", text: `reply: ${"word ".repeat(200)}` }] };
+  assert.match(chatNewsLine({ task: "t3", kind: "reply", note: 5 }, long), /\(the rest: `rollcall task show luke`\)$/);
+  assert.equal(chatNewsLine({ task: "t3", kind: "ask" }, { ...t, state: "working" }), null, "news that no longer stands");
 });
 
 test("chat.new: worktree and branch, owner's words first, contract appended, draft then auto title, branch renamed", async (t) => {
@@ -173,6 +190,29 @@ test("chat: a task it makes is a card in its history; archive is refused with op
   assert.ok(existsSync(wt2));
   assert.equal(u.result.chat.branch, `chat/${h2}`);
   assert.match(u.result.chat.note, /new one from origin\/main/);
+});
+
+test("chat: archive by hand is refused while a turn runs or a request is open; the snapshot says which", async (t) => {
+  const x = chatSetup(t, { FAKE_CLAUDE_SLOW_MS: "1500" }); // a 30 s turn, ended by an interrupt: no race with a busy machine
+  await x.startHost();
+  const snapChat = (h) => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout).supervisors.find((s) => s.name === h)?.chat;
+  const { home: slow } = x.newChat({ text: "SLOW work" });
+  await until(() => x.chatAgent(slow)?.state === "running");
+  const working = x.api("chat.archive", { home: slow });
+  assert.equal(working.error?.code, "refused", JSON.stringify(working));
+  assert.match(working.error.message, /it is working/);
+  assert.equal(snapChat(slow).busy, "working");
+  assert.equal(x.chat(slow).archivedAt, null, "not archived");
+  assert.equal(x.api("task.interrupt", { task: slow }).ok, true);
+  await until(() => x.chatAgent(slow)?.state === "idle");
+  assert.equal(snapChat(slow).busy, null);
+  assert.equal(x.api("chat.archive", { home: slow }).ok, true, "archives once the turn ended");
+  const { home: asks } = x.newChat({ text: "ASK first" });
+  await until(() => x.chatAgent(asks)?.requests === 1);
+  const waiting = x.api("chat.archive", { home: asks });
+  assert.equal(waiting.error?.code, "refused", JSON.stringify(waiting));
+  assert.match(waiting.error.message, /it is waiting on you/);
+  assert.equal(snapChat(asks).busy, "waiting");
 });
 
 test("chat: archives itself once unused for the delay", async (t) => {

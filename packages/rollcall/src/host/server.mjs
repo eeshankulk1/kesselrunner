@@ -127,6 +127,7 @@ class Agent {
     this.rec.serverSock = this.proc?.harness === "codex" ? this.proc.sock : null;
     this.rec.host = process.pid;
     this.rec.at = Date.now();
+    this.rec.requests = this.hist.open.size; // for readers of the record: a chat's `busy` in the snapshot
     writeJson(this.file, this.rec);
     const recFile = this.rec.harness === "codex" ? codexRecordFile(this.h, this.id) : recordFile(this.h, this.id);
     if (this.rec.state === "stopped" || !this.ctl) rmSync(recFile, { force: true });
@@ -273,9 +274,11 @@ class Agent {
 
   send(text, attachments, from, uuid = randomUUID()) {
     if (this.proc.idFor) uuid = this.proc.idFor(from, uuid);
-    const q = { uuid, text, at: Date.now(), from, attachments };
+    // `wait`: the words join a running turn, so the item says queued until the agent takes them. Words that start a
+    // turn go in at once: their item is plain from the first event (a front end shows no "queued" for them).
+    const q = { uuid, text, at: Date.now(), from, attachments, wait: this.rec.state === "running" };
     this.queued.push(q);
-    broadcast(this.ref, "item", { item: { id: uuid, at: q.at, kind: "user", text, images: [], from, queued: true } });
+    broadcast(this.ref, "item", { item: sentItem(q) });
     const proc = this.proc;
     // Codex takes words over its protocol, which can refuse them: then they leave the queue, and the chat says so.
     Promise.resolve(proc.say(text, attachments, uuid)).catch((e) => {
@@ -304,10 +307,10 @@ class Agent {
     if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
     if (this.rec.state === "terminal") {
       // Open in a terminal: the words wait, and go in when the terminal closes (closeTerminal).
-      const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
+      const q = { uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments, wait: true };
       this.queued.push(q);
       this.rec.held = this.queued.map(({ uuid, text, at, from, attachments }) => ({ uuid, text, at, from, attachments }));
-      broadcast(this.ref, "item", { item: { id: q.uuid, at: q.at, kind: "user", text, images: [], from: q.from, queued: true } });
+      broadcast(this.ref, "item", { item: sentItem(q) });
       this.persist();
       return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
     }
@@ -367,6 +370,7 @@ class Agent {
     this.hist.append({ ev: "closed", id, how, by: by ?? null, answer });
     broadcast(this.ref, "closed", { id, how, by: by ?? null });
     if (!this.hist.open.size) rmSync(dialogFlag(this.h, this.wid), { force: true });
+    this.persist();
   }
 
   /** The first answer wins; a request whose process is gone is answered as the owner's words on a resumed session. */
@@ -628,7 +632,7 @@ class Agent {
       }
       case "cancel": {
         const id = [...this.pending].find(([, v]) => v.rid === e.rid)?.[0];
-        if (id) { this.closeRequest(id, "cancelled", null); this.persist(); }
+        if (id) this.closeRequest(id, "cancelled", null);
         return;
       }
       case "limits": try { recordClaude(e.limits); } catch {} return;
@@ -655,6 +659,9 @@ class Agent {
     }
   }
 }
+
+/** Words sent and not taken yet, as an item: `queued` only while they wait (behind a running turn, or a terminal). */
+const sentItem = (q) => ({ id: q.uuid, at: q.at, kind: "user", text: q.text, images: [], from: q.from, ...(q.wait === false ? {} : { queued: true }) });
 
 /** What an agent's process must not inherit: a Claude Code session's own markers, and rollcall's session. */
 export const CHILD_UNSET = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "ROLLCALL_SESSION"];
@@ -819,7 +826,7 @@ async function handle(req, c) {
       case "history": {
         const a = need();
         if (!a.hist.exists) await a.backfill();
-        const extra = [...a.streaming.values(), ...a.queued.map((q) => ({ id: q.uuid, at: q.at, kind: "user", text: q.text, images: [], from: q.from, queued: true }))];
+        const extra = [...a.streaming.values(), ...a.queued.map(sentItem)];
         const p = a.hist.page({ before: req.before ?? null, limit: req.limit ?? 200, extra });
         if (!p.ok) return p;
         return { ...p, ref: a.ref, session: a.rec.session, harness: a.rec.harness, agent: a.state(), requests: [...a.hist.open.values()] };
@@ -873,9 +880,12 @@ async function chatStart(req) {
   return { ok: true, how: r.how, uuid: r.uuid, session: a.rec.session, agent: a.state() };
 }
 
-/** Archives a chat (refused with open tasks) and ends its process; its session is saved, and words bring it back. */
+/**
+ * Archives a chat (refused with open tasks, a turn running or a request open) and ends its process; its session is
+ * saved, and words bring it back.
+ */
 function archiveAgent(a, by) {
-  const r = archiveChat(a.h, by);
+  const r = archiveChat(a.h, by, Date.now(), { running: a.rec.state === "running", requests: a.hist.open.size });
   if (!r.ok) return err(r.code, r.err);
   if (a.rec.state && a.rec.state !== "stopped" && a.rec.state !== "terminal") a.stop();
   log(`${a.ref}: archived (${by})`);

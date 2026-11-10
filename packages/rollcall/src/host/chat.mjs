@@ -291,10 +291,25 @@ export function archiveDue(c, { open = 0, running = false, requests = 0 } = {}, 
   return now - (c.lastUsedAt ?? c.createdAt ?? now) >= days * DAY;
 }
 
-/** Archives chat `h` (`by` "owner" or "auto"): refused while it has open tasks. { ok, chat } or { ok: false, code, err }. */
-export function archiveChat(h, by, now = Date.now()) {
+/**
+ * What a chat is doing that archiving would cut short, in the words a refusal gives, or null: "it is waiting on you"
+ * (a request open), "it is working" (a turn running).
+ */
+export function busyWords({ running = false, requests = 0 } = {}) {
+  if (requests > 0) return "it is waiting on you";
+  if (running) return "it is working";
+  return null;
+}
+
+/**
+ * Archives chat `h` (`by` "owner" or "auto"): refused while it has open tasks, a turn runs or a request is open (`busy`,
+ * the agent's { running, requests }). { ok, chat } or { ok: false, code, err }.
+ */
+export function archiveChat(h, by, now = Date.now(), busy = {}) {
   const n = openTasks(h).length;
   if (n) return { ok: false, code: "refused", err: `it has ${n} open task${n === 1 ? "" : "s"}` };
+  const doing = busyWords(busy);
+  if (doing) return { ok: false, code: "refused", err: doing };
   const c = updateChat(h, (x) => {
     if (x.archivedAt) return false;
     x.archivedAt = now;
@@ -353,7 +368,7 @@ export function chatView(h) {
       title: c.title, titleBy: c.titleBy, folder: c.folder, folderName: basename(c.folder ?? "") || null, repo: c.repo ?? null,
       worktree: c.worktree ?? null, branch: c.branch ?? null, harness: a?.harness ?? c.harness ?? "claude", model: a?.model ?? c.model ?? null,
       mode: a?.mode ?? c.mode ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null, archivedAt: c.archivedAt ?? null,
-      archivedBy: c.archivedBy ?? null, note: c.note ?? null,
+      archivedBy: c.archivedBy ?? null, note: c.note ?? null, busy: busyOf(a),
     };
   }
   // A hosted crew made before chats: titled by its name, in the folder it was started in (writeHostedLaunch's falcon.json).
@@ -366,9 +381,12 @@ export function chatView(h) {
   return {
     title: h, titleBy: "name", folder, folderName: folder ? basename(folder) : null, repo: rk ? { key: rk.key, name: rk.name, main: mainCheckout(info) } : null,
     worktree: null, branch: null, harness: a?.harness ?? "claude", model: a?.model ?? null, mode: a?.mode ?? null,
-    createdAt: made, lastUsedAt: used ?? made, archivedAt: null, archivedBy: null, note: null,
+    createdAt: made, lastUsedAt: used ?? made, archivedAt: null, archivedBy: null, note: null, busy: busyOf(a),
   };
 }
+
+/** What the chat's agent does now, from its record (agent.json): "waiting" (a request open), "working" (a turn runs), or null. */
+const busyOf = (a) => (a?.requests > 0 ? "waiting" : a?.state === "running" ? "working" : null);
 
 /** Every hosted home, as search sees them. */
 const hostedHomes = () => store.listHomes().filter((h) => runtimeOf(h) === "host");
