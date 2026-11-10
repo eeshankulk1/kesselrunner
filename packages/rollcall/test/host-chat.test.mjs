@@ -4,22 +4,25 @@
 // first, renames its branch only while unpushed, shows the tasks it starts as cards, archives by hand (refused with
 // open tasks, a turn running or a request open) and by itself once unused, wakes on the owner's words, is found by
 // search, shows in the snapshot with chatOptions, keeps its worktree from gc while not archived, and takes Claude's
-// auto mode.
+// auto mode. A Codex model makes a Codex chat: Codex's own model list, its instructions, its modes (Auto as Codex's
+// auto review) changed mid-chat, task news and its own `rollcall task` commands, as a Claude chat has them.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BIN, FIXTURES, denied, git, sandbox, until } from "./helpers.mjs";
-import { FAKE, lines, readJson, setup } from "./host-helpers.mjs";
-import { archiveDue, cleanTitle, draftTitle, renameBranch, slugOf } from "../src/host/chat.mjs";
+import { FAKE, FAKE_CODEX, lines, readJson, setup } from "./host-helpers.mjs";
+import { archiveDue, chatOptions, cleanTitle, draftTitle, renameBranch, slugOf } from "../src/host/chat.mjs";
+import { policyFor, sandboxPolicyOf } from "../src/harness/codex.mjs";
 
 const TITLER = join(FIXTURES, "fake-title.mjs");
 chmodSync(TITLER, 0o755);
 
 /** A host sandbox whose chats run the stand-in Claude Code and title model. */
 function chatSetup(t, env = {}) {
-  const x = setup(t, { env: { KESSELRUNNER_CLAUDE_BIN: FAKE, ROLLCALL_CHAT_TITLE_CMD: TITLER, ...env } });
+  // No Codex unless a test names one: the Mac's own must not answer.
+  const x = setup(t, { env: { KESSELRUNNER_CLAUDE_BIN: FAKE, ROLLCALL_CHAT_TITLE_CMD: TITLER, ROLLCALL_CODEX_BIN: join("/nonexistent", "codex"), ...env } });
   x.api = (action, payload) => {
     const r = spawnSync(process.execPath, [BIN, "api", "do", action, JSON.stringify(payload)], { env: x.hostEnv, encoding: "utf8", cwd: x.sb.root });
     try { return JSON.parse(r.stdout); } catch { throw new Error(`${action}: ${r.stdout}${r.stderr}`); }
@@ -131,7 +134,8 @@ test("chat.new: the owner's rename wins over the title model; a named chat gets 
   assert.equal(x.api("chat.rename", { home: "chat-zzzzzz", title: "x" }).error.code, "not-found");
 });
 
-test("chat.new: a folder git refuses runs the chat there, with a note; a Codex model is not available", async (t) => {
+test("chat.new: a folder git refuses runs the chat there, with a note; a Codex model needs Codex", async (t) => {
+  // chatSetup's codex does not run: Codex is not installed (or not signed in), so a Codex chat is not available.
   const x = chatSetup(t);
   await x.startHost();
   const plain = join(x.sb.root, "plain");
@@ -257,7 +261,7 @@ test("chat: search, snapshot chat and chatOptions, gc keeps its worktree, worker
   assert.equal(snap.chatOptions.defaultModel, "opus");
   assert.deepEqual(snap.chatOptions.models.map((m) => m.harness), ["claude", "claude", "claude"]);
   assert.deepEqual(snap.chatOptions.modes.claude.map((m) => m.id), ["default", "acceptEdits", "plan", "auto"]);
-  assert.equal(snap.chatOptions.modeFixed.codex, true);
+  assert.equal(snap.chatOptions.modeFixed.codex, false);
   assert.equal(snap.chatOptions.archiveAfterDays, 7);
   // gc: a fresh chat worktree has no commits and sits on main, yet stays while the chat is open.
   const gc = spawnSync(process.execPath, [BIN, "gc"], { env: x.hostEnv, encoding: "utf8", cwd: x.sb.main });
@@ -323,4 +327,78 @@ test("chat hooks: a chat's session edits in its worktree, and its turns are mark
   sup.start();
   writeFileSync(join(sb.home, "_sessions", `${sup.id}.json`), JSON.stringify({ ...readJson(join(sb.home, "_sessions", `${sup.id}.json`)), supervisor: { home: "alpha", at: Date.now() } }));
   assert.equal(denied(sup.pre(join(wt, "src/b.js"))), true);
+});
+
+test("chat unit: Codex's modes in the chip, as its approval policy and sandbox", () => {
+  const o = chatOptions({ codex: () => false });
+  assert.deepEqual(o.modes.codex.map((m) => m.id), ["default", "auto", "read-only"]);
+  assert.equal(o.defaultMode.codex, "default");
+  assert.ok(o.models.every((m) => m.harness === "claude"), "no Codex models without Codex");
+  assert.ok(chatOptions({ codex: () => true }).models.some((m) => m.harness === "codex"));
+  assert.equal(policyFor("auto").approvalsReviewer, "auto_review");
+  assert.deepEqual(policyFor("read-only"), { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "read-only" });
+  assert.equal(policyFor("default").approvalsReviewer, "user");
+  assert.deepEqual(sandboxPolicyOf({ sandbox: "read-only" }), { type: "readOnly", networkAccess: false });
+  assert.deepEqual(sandboxPolicyOf({ sandbox: "workspace-write", writableRoots: ["/r"] }), { type: "workspaceWrite", writableRoots: ["/r"], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false });
+});
+
+test("chat on Codex: its models, its instructions, Auto, a mode changed mid-chat, its turns, hooks and session", async (t) => {
+  const x = chatSetup(t, { ROLLCALL_CODEX_BIN: FAKE_CODEX, ROLLCALL_CODEX_MODELS: "1" });
+  await x.startHost();
+  const snapshot = () => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout);
+  // The host reads Codex's own list: shown models only, the default first.
+  await until(() => snapshot().chatOptions.models.some((m) => m.id === "gpt-fake-main"));
+  const codex = snapshot().chatOptions.models.filter((m) => m.harness === "codex");
+  assert.deepEqual(codex.map((m) => [m.id, m.label]), [["gpt-fake-main", "GPT Fake"], ["gpt-fake-pro", "GPT Fake Pro"]]);
+  assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "gpt-fake-main", mode: "acceptEdits" }).error.code, "bad-payload", "a Claude mode");
+
+  const { home: h, chat } = x.newChat({ model: "gpt-fake-main", mode: "auto", text: "hello codex" });
+  assert.equal(chat.harness, "codex");
+  const dir = join(x.home(h), "workers", h);
+  const launch = readJson(join(dir, "codex-launch.json"));
+  assert.equal(launch.task, null);
+  assert.equal(launch.model, "gpt-fake-main");
+  assert.equal(launch.approvalsReviewer, "auto_review", "Auto is Codex's auto review");
+  assert.equal(launch.cwd, chat.worktree);
+  assert.equal(existsSync(join(dir, "claude-launch.json")), false);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: hello codex"));
+  const ins = x.codexFake().filter((l) => l.in).map((l) => l.in);
+  const start = ins.find((m) => m.method === "thread/start");
+  assert.match(start.params.developerInstructions, /You are a chat in cockpit/);
+  assert.match(start.params.developerInstructions, /a terminal session of Codex/);
+  assert.match(start.params.developerInstructions, /request_user_input/);
+  assert.equal(start.params.approvalsReviewer, "auto_review");
+  assert.equal(start.params.cwd, chat.worktree);
+  // Its shell names its session, so `rollcall task new` there finds its home; its tasks start in auto.
+  const session = readJson(join(dir, "codex-launch.json")).session;
+  assert.equal(x.codexFake().find((l) => l.server)?.session, session);
+  const g = readJson(join(x.sb.home, "_sessions", `${session}.json`));
+  assert.equal(g.chat.home, h);
+  assert.equal(g.mode, "auto");
+  // Its turns are marked as a Claude chat's hooks mark them.
+  await until(() => readJson(join(x.home(h), "turn.json"))?.idle === true);
+  assert.equal(readJson(join(x.home(h), "turn.json")).session, session);
+  // Codex's untrusted hooks: the chat says so.
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && /hooks are not trusted/.test(e.item.text ?? "")));
+
+  // A mode changed mid-chat: Codex's modes only, from the next turn, and the chat keeps it.
+  assert.equal(x.api("worker.set", { task: h, mode: "plan" }).error.code, "bad-payload");
+  assert.equal(x.api("worker.set", { task: h, model: "opus" }).error.code, "bad-payload");
+  const set = x.api("worker.set", { task: h, mode: "read-only" });
+  assert.equal(set.ok, true, JSON.stringify(set));
+  assert.equal(x.chatAgent(h).mode, "read-only");
+  assert.equal(x.api("task.tell", { task: h, text: "look only" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: look only"));
+  const turn = x.codexFake().filter((l) => l.in?.method === "turn/start").map((l) => l.in.params).find((p) => p.input?.[0]?.text === "look only");
+  assert.equal(turn.approvalPolicy, "on-request");
+  assert.equal(turn.approvalsReviewer, "user");
+  assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  assert.equal(readJson(join(dir, "codex-launch.json")).sandbox, "read-only", "a resume starts in it");
+  assert.equal(x.chat(h).mode, "read-only");
+  assert.equal(readJson(join(x.sb.home, "_sessions", `${session}.json`)).mode, "default", "its tasks start asking");
+  const snap = snapshot().supervisors.find((s) => s.name === h);
+  assert.equal(snap.chat.harness, "codex");
+  assert.equal(snap.chat.mode, "read-only");
+  // A Codex chat in a parked state takes a model of Codex's for its next start.
+  assert.equal(x.api("worker.set", { task: h, model: "gpt-fake-pro" }).ok, true);
 });

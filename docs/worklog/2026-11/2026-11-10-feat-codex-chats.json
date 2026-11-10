@@ -1,0 +1,1 @@
+{"date": "2026-11-10", "project": "kesselrunner", "summary": "rollcall agent host runs chats on Codex too: Codex models in the picker, Ask/Auto/Read only modes changeable mid-chat, the chat contract as developer instructions.", "pr": 16, "why": "The owner wanted an Auto mode to pick for each agent, Codex included."}

@@ -17,13 +17,14 @@ import * as store from "../store.mjs";
 import { recordClaude } from "../usage.mjs";
 import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
-import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
+import { launchFile as codexLaunchFile, policyFor } from "../harness/codex.mjs";
 import { trustWorktree } from "../harness/claude.mjs";
 import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
-import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
+import { archiveChat, archiveDue, bindChat, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
+import { chatHook } from "./chat-hooks.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
 
@@ -43,8 +44,11 @@ const NAME = { claude: "Claude Code", codex: "Codex" };
 /** The launch file the harness adapter wrote for an agent (claude-launch.json, codex-launch.json). */
 const launchOf = (h, id, harness) => (harness === "codex" ? codexLaunchFile(h, id) : launchFile(h, id));
 const mtime = (f) => { try { return statSync(f).mtimeMs; } catch { return -1; } };
-/** Which harness a start without one means: the newer launch file. A supervisor is always Claude Code. */
-const newerLaunch = (h, id) => (id && mtime(codexLaunchFile(h, id)) > mtime(launchFile(h, id)) ? "codex" : "claude");
+/**
+ * Which harness a start without one means: the newer launch file. A supervisor is always Claude Code; a chat runs on
+ * the harness its record names.
+ */
+const newerLaunch = (h, id) => (id ? (mtime(codexLaunchFile(h, id)) > mtime(launchFile(h, id)) ? "codex" : "claude") : isChat(h) && readChat(h)?.harness === "codex" ? "codex" : "claude");
 
 let logPath = null;
 export function log(line) {
@@ -202,7 +206,7 @@ class Agent {
   /** Starts the agent's process on its launch file: a new session, or its last one resumed. */
   async start({ prompt = null, restart = false, harness = null } = {}) {
     if (this.rec.state === "terminal") return err("refused", `${this.ref} is open in a terminal: it carries on here when the terminal closes`);
-    harness = !this.id ? "claude" : HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
+    harness = !this.id ? newerLaunch(this.h, null) : HARNESSES.has(harness) ? harness : this.proc ? this.rec.harness : newerLaunch(this.h, this.id);
     if (this.proc && restart) {
       // supervisor.mjs launch wrote a launch file: the same session running takes its first prompt as words; another
       // session (a handoff, a fresh start, another harness) replaces the process.
@@ -252,7 +256,10 @@ class Agent {
     const on = (e) => { if (this.proc === proc || !proc) this.onEvent(e); };
     let proc = null;
     if (harness === "codex") {
-      try { proc = await startCodexAgent({ h: this.h, id: this.id, cfg: launch, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) }); }
+      // A Codex chat runs no rollcall hooks: the host does their part (chat-hooks.mjs), and its shell names its session,
+      // so its own `rollcall task` commands find its home as a Claude chat's do.
+      const chat = this.chat ? { hook: (event, p) => chatHook(this.h, event, p), env: { ...childEnv(), ROLLCALL_SESSION: cfg.session } } : null;
+      try { proc = await startCodexAgent({ h: this.h, id: this.id, cfg: launch, envFile, env: chat?.env ?? childEnv(), hook: chat?.hook ?? null, on, log: (l) => log(`${this.ref}: ${l}`) }); }
       catch (e) {
         this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `Codex did not start. A message tries again.\n${e.message}` });
         if (this.rec.state !== "stopped") this.setState("parked");
@@ -332,8 +339,11 @@ class Agent {
   }
 
   async set({ model = null, mode = null } = {}) {
-    if (mode && this.rec.harness === "codex") return err("bad-payload", "a Codex worker keeps the permission mode it started with");
-    if (mode && !SET_MODES.has(mode)) return err("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
+    // A chat on Codex takes Codex's modes (host/chat.mjs CODEX_MODES) from its next turn; a Codex task's worker keeps its own.
+    const codex = this.chat ? readChat(this.h)?.harness === "codex" : this.rec.harness === "codex" || (!this.rec.state && newerLaunch(this.h, this.id) === "codex");
+    if (mode && codex && !this.chat) return err("bad-payload", "a Codex worker keeps the permission mode it started with");
+    const modes = codex ? new Set(modesOf("codex").map((m) => m.id)) : SET_MODES;
+    if (mode && !modes.has(mode)) return err("bad-payload", `mode is one of ${[...modes].join(", ")}`);
     if (!model && !mode) return err("bad-payload", "set takes a model or a mode");
     const done = {};
     if (model) {
@@ -353,14 +363,17 @@ class Agent {
       // A chat keeps the owner's pick across park, archive and wake (its chip shows it), as a model carries into a
       // resume; a parked chat takes it for its next start. A task's worker keeps its supervisor's mode per session.
       if (this.chat) {
-        const cfg = readJson(launchOf(this.h, this.id, this.rec.harness));
-        if (cfg) writeJson(launchOf(this.h, this.id, this.rec.harness), { ...cfg, mode });
+        const harness = codex ? "codex" : "claude";
+        const cfg = readJson(launchOf(this.h, this.id, harness));
+        if (cfg) writeJson(launchOf(this.h, this.id, harness), { ...cfg, mode, ...(codex ? policyFor(mode) : {}) });
       }
       this.rec.mode = mode;
       done.mode = mode;
     }
     // The chat's record too: a launch written again from it (a worktree remade on unarchive) starts with the pick.
     if (this.chat) updateChat(this.h, (c) => { if (model) c.model = model; if (mode) c.mode = mode; });
+    // A Codex chat's tasks start in the Claude mode its pick matches: the session's record says it (bindChat).
+    if (this.chat && codex && mode && this.rec.session) bindChat(this.h, this.rec.session);
     this.persist();
     return { ok: true, set: done };
   }
@@ -621,8 +634,9 @@ class Agent {
       case "request": {
         const id = `rq-${hex(6)}`;
         const input = e.input ?? (e.req.input && typeof e.req.input === "object" ? e.req.input : {});
-        const relays = this.id ? null : relaysOf(this.h, input);
-        const p = e.prompt ? { ...e.prompt, id } : promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null, relays });
+        // A Codex question carries its questions on the prompt, not in a tool input.
+        const relays = this.id ? null : relaysOf(this.h, e.prompt?.kind === "question" ? { questions: e.prompt.questions } : input);
+        const p = e.prompt ? { ...e.prompt, id, ...(relays ? { relays } : {}) } : promptOf(e.req, id, { cwd: readJson(launchFile(this.h, this.id))?.cwd ?? null, relays });
         const request = { ...p, ref: this.ref, session: this.rec.session };
         this.pending.set(id, { rid: e.rid, input, prompt: p });
         this.hist.append({ ev: "request", request });
@@ -965,6 +979,11 @@ export async function runHost() {
   log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored)`);
   const archiver = setInterval(() => { try { archiveIdleChats(); } catch (e) { log(`the chat archiver failed: ${e.message}`); } }, archivePollMs());
   archiver.unref?.();
+  // Codex's model list for a new chat's model chip, read from Codex itself now and then (none when it is not installed).
+  const readModels = () => { refreshCodexModels({ env: childEnv() }).catch((e) => log(`Codex's models were not read: ${e.message}`)); };
+  readModels();
+  const modelsTimer = setInterval(readModels, 3600_000);
+  modelsTimer.unref?.();
 
   let ended = false;
   shutdown = async (code) => {

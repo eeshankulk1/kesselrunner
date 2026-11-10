@@ -49,8 +49,11 @@ export async function terminalTurnRunning({ cfg, thread, since = 0, envFile = nu
   } catch { return null; }
 }
 
-/** Starts the session; resolves to the runtime host/server.mjs drives (rejects when the thread does not start). */
-export async function startCodexAgent({ h, id, cfg, envFile = null, env = process.env, on, log }) {
+/**
+ * Starts the session; resolves to the runtime host/server.mjs drives (rejects when the thread does not start). A
+ * chat's own session passes `hook` (host/chat-hooks.mjs) for what a task worker's hooks do.
+ */
+export async function startCodexAgent({ h, id, cfg, envFile = null, env = process.env, hook = null, on, log }) {
   // A unix socket path has room for ~100 bytes: the system temp folder, not the store.
   const sock = join(tmpdir(), `rollcall-codex-${process.pid}-${randomBytes(4).toString("hex")}.sock`);
   const pre = `${String(cfg.session).slice(0, 8)}:`;
@@ -76,7 +79,7 @@ export async function startCodexAgent({ h, id, cfg, envFile = null, env = proces
       default:
     }
   };
-  const core = await startCodex({ h, id, cfg, sock, envFile, env, hosted: true, on: onEvent, log });
+  const core = await startCodex({ h, id, cfg, sock, envFile, env, hosted: true, hook, on: onEvent, log });
   return {
     harness: "codex",
     pid: core.pid,
@@ -92,7 +95,8 @@ export async function startCodexAgent({ h, id, cfg, envFile = null, env = proces
     answer: (rid, p, input, a) => core.answer({ ...a, prompt: `codex-${rid}` }).allowed === true,
     interrupt: () => core.interrupt(),
     setModel: (model) => core.setModel(model),
-    setMode: () => Promise.resolve({ error: "a Codex worker keeps the permission mode it started with" }),
+    // A chat's mode, from its next turn (host/server.mjs refuses it for a task's worker).
+    setMode: (mode) => (id ? Promise.resolve({ error: "a Codex worker keeps the permission mode it started with" }) : core.setMode(mode)),
     /** Ends the session (its SessionEnd hook) and the server. */
     close: () => core.close("exit"),
     kill: (sig) => core.kill(sig),
