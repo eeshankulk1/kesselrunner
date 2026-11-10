@@ -3,11 +3,12 @@
 // `rollcall _host-call` for the synchronous callers (supervisor.mjs launch).
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync } from "node:fs";
 import { dialogFlag } from "../delivery.mjs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { pidAlive } from "../proc.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -28,7 +29,28 @@ export const runtimeOf = (h) => (h && store.readHomeFile(h, "runtime")?.runtime 
 export const hostedHome = (h) => runtimeOf(h) === "host";
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
-/** The running host's { pid, sock, at, version }, or null. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
+/**
+ * A fingerprint of the rollcall code on disk: every file under src/, by path and content. The host records the one it
+ * started from (host.json `code`); an update (`kesselrunner sync`) changes it, and the next call replaces that host
+ * (replaceStale), so a host never runs older code than the rollcall that calls it. Null when src/ does not read.
+ */
+export function codeStamp(dir = SRC) {
+  const h = createHash("sha256");
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) h.update(`${relative(dir, p)}\0`).update(readFileSync(p)).update("\0");
+    }
+  };
+  try { walk(dir); } catch { return null; }
+  return h.digest("hex").slice(0, 16);
+}
+
+/** The running host's { pid, sock, at, version, code }, or null. */
 export function hostInfo() {
   const i = readJson(infoFile());
   return i && pidAlive(i.pid) ? i : null;
@@ -86,8 +108,35 @@ export function spawnHost(env = process.env) {
   return p.pid;
 }
 
-/** A connection to the host, started first when none answers. */
+/**
+ * Stops a host that runs other rollcall code than the code on disk (an update landed while it ran: it lacks the new
+ * ops and answers with the old behaviour), so the next start runs the new code. It waits while an agent is in a turn,
+ * which a restart would cut, unless `force`; the rest park and a message brings each back (server.mjs restore).
+ * Whether it stopped one.
+ */
+export async function replaceStale({ force = false, waitMs = 15_000 } = {}) {
+  const i = hostInfo();
+  if (!i) return false;
+  const code = codeStamp();
+  if (!code || i.code === code) return false;
+  let c;
+  try { c = await connect({ sock: i.sock ?? socketPath() }); } catch { return false; }
+  try {
+    if (!force) {
+      const r = await c.call("list", {}, 5000);
+      if (!r.ok || r.agents?.some((a) => a.state === "running")) return false;
+    }
+    if (!(await c.call("shutdown", {}, 5000)).ok) return false;
+  } catch { return false; } finally { c.close(); }
+  // Its shutdown parks its agents (up to 8 s) before it lets go of its socket and lock.
+  const until = Date.now() + waitMs;
+  while (pidAlive(i.pid) && Date.now() < until) await sleep(50);
+  return !pidAlive(i.pid);
+}
+
+/** A connection to the host, started first when none answers (or when the one that runs has stale code). */
 export async function ensureHost({ onEvent = null, waitMs = 10_000 } = {}) {
+  await replaceStale();
   try { return await connect({ onEvent }); } catch {}
   spawnHost();
   const until = Date.now() + waitMs;
@@ -103,7 +152,11 @@ export async function ensureHost({ onEvent = null, waitMs = 10_000 } = {}) {
 export async function call(op, payload = {}, { start = true } = {}) {
   let c;
   try { c = start ? await ensureHost() : await connect(); } catch (e) { return { ok: false, error: { code: "failed", message: e.message } }; }
-  try { return await c.call(op, payload); } finally { c.close(); }
+  let r;
+  try { r = await c.call(op, payload); } finally { c.close(); }
+  // A stale host kept because an agent was in a turn cannot answer an op it lacks: replace it now and ask the new one.
+  if (start && r?.error?.code === "bad-payload" && /^no op /.test(r.error.message ?? "") && await replaceStale({ force: true })) return call(op, payload, { start });
+  return r;
 }
 
 /** call() for a synchronous caller, through `rollcall _host-call` (stdin: { op, ...payload }). */

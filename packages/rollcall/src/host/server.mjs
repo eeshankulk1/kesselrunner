@@ -21,7 +21,7 @@ import { launchFile as codexLaunchFile } from "../harness/codex.mjs";
 import { trustWorktree } from "../harness/claude.mjs";
 import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
-import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
+import { codeStamp, hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
 import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { BIN, P } from "../session.mjs";
@@ -29,6 +29,8 @@ import { spawn } from "node:child_process";
 
 export const INTERFACE = 1;
 const VERSION = "0.1.0";
+/** The rollcall code this host runs (client.mjs codeStamp), read as it loads: a caller replaces a host whose code differs. */
+const CODE = codeStamp();
 export const STATES = ["running", "idle", "parked", "stopped", "terminal"];
 const SEND = { running: "join", idle: "start", parked: "wake", stopped: "wake", terminal: "hold" };
 const msEnv = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
@@ -803,7 +805,7 @@ async function handle(req, c) {
   };
   try {
     switch (req.op) {
-      case "hello": return { ok: true, pid: process.pid, version: VERSION, interface: INTERFACE };
+      case "hello": return { ok: true, pid: process.pid, version: VERSION, code: CODE, interface: INTERFACE };
       case "list": return { ok: true, agents: [...agents.values()].filter((a) => a.rec.state).map((a) => a.state()) };
       case "state": return { ok: true, agent: need().state() };
       case "start": return await need().start({ prompt: typeof req.prompt === "string" ? req.prompt : null, restart: req.restart === true, harness: req.harness ?? null });
@@ -961,8 +963,8 @@ export async function runHost() {
     }
   } catch {}
   await restore();
-  writeJson(infoFile(), { pid: process.pid, sock, at: Date.now(), version: VERSION });
-  log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored)`);
+  writeJson(infoFile(), { pid: process.pid, sock, at: Date.now(), version: VERSION, code: CODE });
+  log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored; code ${CODE})`);
   const archiver = setInterval(() => { try { archiveIdleChats(); } catch (e) { log(`the chat archiver failed: ${e.message}`); } }, archivePollMs());
   archiver.unref?.();
 
