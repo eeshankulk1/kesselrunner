@@ -241,14 +241,14 @@ export function writeChatLaunch(h, c, { session, resume = false }) {
 
 /**
  * Binds chat `h` to its Claude Code session `session`, as `rollcall supervise` binds a supervisor: the home's lock and
- * the session's record (`supervisor.chat`: its hooks mark turns and bring task news, and its edits are not denied).
+ * the session's record (`chat`, not `supervisor`: its hooks mark turns and bring task news, and its edits are allowed).
  * The record is written before the session runs; the session's hooks fill in the rest.
  */
 export function bindChat(h, session) {
   if (!session) return;
   store.writeHomeFile(h, "lock", { session, at: Date.now(), chat: true });
   const g = store.readGlobal(session);
-  store.writeGlobal({ id: session, startedAt: Date.now(), repos: [], firstPrompt: null, ...(g ?? {}), supervisor: { home: h, chat: true, at: g?.supervisor?.at ?? Date.now() } });
+  store.writeGlobal({ id: session, startedAt: Date.now(), repos: [], firstPrompt: null, ...(g ?? {}), supervisor: null, chat: { home: h, at: g?.chat?.at ?? Date.now() } });
 }
 
 /**

@@ -156,7 +156,9 @@ export function inheritHome(g, now = Date.now()) {
     if (!lock?.session || lock.session === g.id || currentSession(lock.session)?.id !== g.id) continue;
     store.writeHomeFile(h, "lock", { session: g.id, at: now, from: lock.session });
     const old = store.readGlobal(lock.session);
-    store.writeGlobal({ ...store.readGlobal(g.id), ...g, supervisor: { ...old?.supervisor, home: h, at: now }, mode: g.mode ?? old?.mode });
+    // A chat's session (host/chat.mjs) stays a chat: it edits, as a supervisor never does.
+    const role = old?.chat || lock.chat ? { chat: { ...old?.chat, home: h, at: now } } : { supervisor: { ...old?.supervisor, home: h, at: now } };
+    store.writeGlobal({ ...store.readGlobal(g.id), ...g, ...role, mode: g.mode ?? old?.mode });
     const open = store.listTasks(h).filter(isOpen).map((t) => t.id);
     lines.push(`${P} This session continues supervisor ${h} (session ${short(lock.session)} was sent to the background), so it runs ${h} now${open.length ? `: ${open.join(", ")}` : ""}.`);
   }
