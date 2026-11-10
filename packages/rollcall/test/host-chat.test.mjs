@@ -96,15 +96,18 @@ test("chat.new: worktree and branch, owner's words first, contract appended, dra
 });
 
 test("chat.new: the owner's rename wins over the title model; a named chat gets no model title", async (t) => {
-  const x = chatSetup(t, { FAKE_TITLE_MS: "1500" });
+  const x = chatSetup(t, { FAKE_TITLE_MS: "3000" });
   await x.startHost();
   const { home: h } = x.newChat();
   const r = x.api("chat.rename", { home: h, title: "My own name" });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.result.chat.titleBy, "owner");
   assert.equal(r.result.chat.branch, "chat/my-own-name");
-  await new Promise((res) => setTimeout(res, 2200));
-  assert.equal(x.chat(h).title, "My own name", "the model's title came later and lost");
+  // The model's title comes later (the host logs it either way) and loses.
+  const hostLog = join(x.sb.home, "_host", "host.log");
+  await until(() => { try { return readFileSync(hostLog, "utf8").includes(`${h}: titled`); } catch { return false; } }, { timeout: 30_000 });
+  assert.equal(x.chat(h).title, "My own name");
+  assert.equal(x.chat(h).titleBy, "owner");
   const named = x.newChat({ title: "Named up front" });
   assert.equal(named.chat.titleBy, "owner");
   assert.equal(named.chat.branch, `chat/${named.home}`, "the branch is renamed when a title lands, not at the start");
