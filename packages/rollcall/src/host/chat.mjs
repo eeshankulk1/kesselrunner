@@ -8,7 +8,7 @@
 // when the owner writes to it. Terminal crews (falcon, /supervisor) never meet any of this.
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { launchFile, readJson, writeJson } from "../claude/live.mjs";
@@ -346,13 +346,27 @@ export async function newChat({ folder, text, attachments = [], model = "opus", 
   writeChat(h, c);
   const session = randomUUID();
   writeChatLaunch(h, c, { session });
+  const r = callSync("chat-start", { ref: h, text, attachments }, { timeoutMs: 60_000 });
+  if (!r.ok) {
+    // Never started: no chat is left behind (the owner's words stay in their composer, to send again). One the host
+    // did start (it answered too late) stays, with its home.
+    const gone = !agentRecord(h, null) && dropChat(h, c);
+    return { ok: false, code: r.error?.code === "bad-payload" ? "bad-payload" : "failed", err: r.error?.message ?? "the agent host did not start the chat", ...(gone ? {} : { home: h }) };
+  }
   // The worktree's own setup (deps, env files), in the background, as a task's new worktree gets it.
   if (w.worktree) {
     try { const { checkoutFacts, startSetup } = await import("../runtime.mjs"); checkoutFacts(w.worktree); startSetup(w.worktree, { bin: BIN }); } catch {}
   }
-  const r = callSync("chat-start", { ref: h, text, attachments }, { timeoutMs: 60_000 });
-  if (!r.ok) return { ok: false, code: r.error?.code === "bad-payload" ? "bad-payload" : "failed", err: r.error?.message ?? "the agent host did not start the chat", home: h };
   return { ok: true, home: h, chat: chatView(h), session: r.session ?? session };
+}
+
+/** Undoes a chat that never started: its worktree, its branch (nothing is on it yet) and its home. Whether it went. */
+function dropChat(h, c) {
+  if (c.worktree && c.repo?.main) {
+    gitSync(c.repo.main, ["worktree", "remove", "--force", c.worktree]);
+    if (c.branch) gitSync(c.repo.main, ["branch", "-D", c.branch]);
+  }
+  try { rmSync(store.homeDir(h), { recursive: true, force: true }); return true; } catch { return false; }
 }
 
 // ---------------------------------------------------------------- archive
