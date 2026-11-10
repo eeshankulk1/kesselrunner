@@ -15,11 +15,11 @@ import * as store from "./store.mjs";
 import { deliverWords, holderOf, hostedTask, label, workerState } from "./supervisor.mjs";
 import { callSync, hostedHome } from "./host/client.mjs";
 import { endCrew, newCrew } from "./host/crew.mjs";
-import { CLAUDE_MODES, chatView, isChat, newChat, searchChats, setTitle, unarchiveChat } from "./host/chat.mjs";
+import { chatView, isChat, isCodexModel, modesOf, newChat, readChat, searchChats, setTitle, unarchiveChat } from "./host/chat.mjs";
 import { SET_MODES } from "./claude/stream.mjs";
 import * as live from "./claude/live.mjs";
 import { modelOk } from "./harness/claude.mjs";
-import { models as codexModels } from "./harness/codex.mjs";
+import { available as codexAvailable } from "./harness/codex.mjs";
 import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
 import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
 import { answerDecision, recordWords, taskCommand } from "./task.mjs";
@@ -270,11 +270,14 @@ export const ACTIONS = {
       const model = str(p, "model", { required: false, max: 100 });
       const mode = str(p, "mode", { required: false, max: 40 });
       if (!model && !mode) refuse("bad-payload", "model or mode is required");
-      const codex = !!x.t && harnessOf(x.t) === "codex";
-      if (codex && mode) refuse("bad-payload", "a Codex worker keeps the permission mode it started with: set its model only");
-      if (codex && !codexModels.ok(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
+      // A chat on Codex takes Codex's models and modes (host/chat.mjs); a Codex task's worker keeps its mode.
+      const codexChat = !x.t && isChat(x.h) && readChat(x.h)?.harness === "codex";
+      const codex = codexChat || (!!x.t && harnessOf(x.t) === "codex");
+      if (codex && mode && !codexChat) refuse("bad-payload", "a Codex worker keeps the permission mode it started with: set its model only");
+      if (codex && model && !isCodexModel(model)) refuse("bad-payload", `model is one of Codex's own, like gpt-5.6-terra: ${model}`);
       if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
-      if (mode && !SET_MODES.has(mode)) refuse("bad-payload", `mode is one of ${[...SET_MODES].join(", ")}`);
+      const modes = codexChat ? modesOf("codex").map((m) => m.id) : [...SET_MODES];
+      if (mode && !modes.includes(mode)) refuse("bad-payload", `mode is one of ${modes.join(", ")}`);
       // A chat with no process (parked, archived) takes the pick for its next start (host/server.mjs set).
       if (!x.t && isChat(x.h) && !live.record(x.h, x.id)) {
         const r = callSync("set", { ref: x.h, model, mode });
@@ -315,10 +318,13 @@ export const ACTIONS = {
       if (!text.trim()) refuse("bad-payload", "text is required");
       const attachments = attachmentsOf(p);
       const model = str(p, "model", { required: false, max: 100 }) ?? "opus";
-      if (codexModels.ok(model)) refuse("not-available", "a chat on Codex is not built yet: pick a Claude model");
-      if (!modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
+      // A Codex model makes a Codex chat: Codex must be installed and signed in (signing in is the owner's step).
+      const harness = isCodexModel(model) ? "codex" : "claude";
+      if (harness === "codex") { const c = codexAvailable(); if (!c.ok) refuse("not-available", c.err); }
+      if (harness === "claude" && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       const mode = str(p, "mode", { required: false, max: 40 }) ?? "default";
-      if (!CLAUDE_MODES.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${CLAUDE_MODES.map((m) => m.id).join(", ")}`);
+      const modes = modesOf(harness);
+      if (!modes.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${modes.map((m) => m.id).join(", ")}`);
       const title = str(p, "title", { required: false, max: 200 });
       if (title !== null && !title.trim()) refuse("bad-payload", "title is empty");
       const r = await newChat({ folder: cwd, text, attachments, model, mode, title: title?.trim() ?? null });

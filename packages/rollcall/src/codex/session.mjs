@@ -21,7 +21,7 @@ import { extname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { summaryOf, trimInput } from "../away.mjs";
 import { commandOf } from "../claude/stream.mjs";
-import { journalFile, launchFile } from "../harness/codex.mjs";
+import { journalFile, launchFile, policyFor, sandboxPolicyOf } from "../harness/codex.mjs";
 import { pidAlive } from "../proc.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -146,7 +146,9 @@ export function promptOf(id, method, params, d, { cwd = null, now = Date.now() }
  * Starts Codex's app server for task `h`:`id` on launch file `cfg` (codex-launch.json) and opens its thread: a new
  * one, or `cfg.thread` resumed. Resolves once the thread runs (rejects when the server or the thread does not start).
  * `sock` is the server's socket path; `envFile` the task's environment (the host's login shell sources it), `hosted`
- * says the agent host runs it (no window to open Codex's own screen in). `on(event)` hears:
+ * says the agent host runs it (no window to open Codex's own screen in). A chat's own session (`id` null) passes
+ * `hook(event, payload)` for what a worker's hooks do (host/chat-hooks.mjs); its launch's `instructions` file goes in
+ * as Codex's developer instructions. `on(event)` hears:
  *   { type: "turn-start", turn, at }
  *   { type: "taken", cid, text, injected }   a user message went in (`cid` its client id; `injected`: rollcall's note)
  *   { type: "item", item, phase, clientId }  an item journaled (phase "started" or "completed"; a skip has `skip`)
@@ -158,11 +160,13 @@ export function promptOf(id, method, params, d, { cwd = null, now = Date.now() }
  *   { type: "cancel", rid }                  resolved elsewhere
  *   { type: "exit", code, err }              the app server ended without close()
  */
-export async function startCodex({ h, id, cfg, sock, envFile = null, env = process.env, hosted = false, on = () => {}, log = null }) {
+export async function startCodex({ h, id, cfg, sock, envFile = null, env = process.env, hosted = false, hook: ownHook = null, on = () => {}, log = null }) {
   const { recordAsk } = await import("../task.mjs");
-  const say = (line) => { if (log) log(line); else { try { store.appendStatus(h, id, { ev: "codex", line: store.clip(String(line), 300) }); } catch {} } };
+  const say = (line) => { if (log || !id) log?.(line); else { try { store.appendStatus(h, id, { ev: "codex", line: store.clip(String(line), 300) }); } catch {} } };
   const emit = (e) => { try { on(e); } catch (x) { say(`a Codex event failed: ${x?.stack ?? x}`); } };
-  const hook = (event, p = {}) => { try { return workerHook(h, id, event, { session_id: cfg.session, ...p }, { recordAsk }); } catch { return null; } };
+  const hook = (event, p = {}) => {
+    try { return ownHook ? ownHook(event, { session_id: cfg.session, ...p }) : workerHook(h, id, event, { session_id: cfg.session, ...p }, { recordAsk }); } catch { return null; }
+  };
   // A turn snapshot of the worktree in its own detached process, as the Claude hooks start theirs (`turns take`
   // skips a main checkout). Nothing here waits on it, except the first prompt on the baseline: resolves when the
   // take exits, or after 10 s.
@@ -216,6 +220,7 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
   let usage = null; // the thread's last token usage
   let turnTotals = null; // its totals when the running turn started
   let nextModel = cfg.model ?? null; // a model set from a front end, for the next turn rollcall starts
+  let nextPolicy = null; // a chat's mode set from a front end: its approval policy and sandbox, for the next turn
   let conn;
 
   // ---- the journal
@@ -320,7 +325,7 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
         const injected = cid.startsWith(INJECTED);
         emit({ type: "taken", cid, text: textOf(item), injected });
         // A note of the worker's own (a steer from this process) starts nothing: busy is all it says.
-        if (injected) { try { store.appendStatus(h, id, { ev: "busy" }); } catch {} return; }
+        if (injected) { if (id) { try { store.appendStatus(h, id, { ev: "busy" }); } catch {} } return; }
         const out = hook("prompt-submit", { prompt: textOf(item), owner: !cid.startsWith("rollcall-") });
         void inject(contextIn(out));
         return;
@@ -374,6 +379,8 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
         usage = p.tokenUsage ?? usage;
         const c = contextOf(p.tokenUsage);
         if (!c) return;
+        // A chat's own context is the home's (`context`), as a Claude chat's is.
+        if (!id) { store.writeHomeFile(h, "context", { pct: c.pct, session: cfg.session, at: Date.now() }); return; }
         store.writeHomeFile(h, `context-${id}`, { pct: c.pct, at: Date.now(), session: cfg.session, tokens: c.tokens, size: c.size, total: c.total, harness: "codex" });
         const t = store.readTask(h, id);
         if (t) markCap(t, cfg.session, c.pct);
@@ -426,9 +433,13 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
     // A message that fails here is said on the task: the connection would swallow it.
     conn = await Promise.race([failed, connect(sock, (m) => { try { onMessage(m); } catch (e) { say(`a ${m?.method ?? "message"} from Codex failed: ${e?.stack ?? e}`); } })]);
     conn.done.then(() => { if (!closing) say("the app server closed its connection"); });
+    // A chat's contract, read at each start (a remade worktree rewrites it): Codex's developer instructions.
+    let instructions = "";
+    if (cfg.instructions) { try { instructions = readFileSync(cfg.instructions, "utf8").trim(); } catch {} }
     const settings = {
       cwd: cfg.cwd, approvalPolicy: cfg.approvalPolicy, approvalsReviewer: cfg.approvalsReviewer, sandbox: cfg.sandbox,
       ...(cfg.model ? { model: cfg.model } : {}),
+      ...(instructions ? { developerInstructions: instructions } : {}),
       config: {
         ...(cfg.effort ? { model_reasoning_effort: cfg.effort } : {}),
         ...(cfg.sandbox === "workspace-write" ? { sandbox_workspace_write: { network_access: true, writable_roots: cfg.writableRoots ?? [] } } : {}),
@@ -457,7 +468,7 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
   hook("session-start", { source: cfg.thread ? "resume" : "startup" });
   // The baseline goes first when a prompt follows at once, so a quick first turn's files are that turn's, not turn 0's.
   s.baseline = snapshot("--baseline");
-  void checkHooks(conn, cfg.cwd, h, id, { hosted });
+  void checkHooks(conn, cfg.cwd, h, id, { hosted, note: (text) => emit({ type: "item", item: { id: `rollcall-hooks-${randomBytes(4).toString("hex")}`, at: Date.now(), kind: "system", text }, phase: "completed", clientId: null }) });
 
   return Object.assign(s, {
     conn, hook, inject, answer, rememberLaunch,
@@ -474,8 +485,9 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
         try {
           if (turnId) await conn.request("turn/steer", { threadId: s.thread, expectedTurnId: turnId, input, clientUserMessageId: cid }, 5000);
           else {
-            await conn.request("turn/start", { threadId: s.thread, input, clientUserMessageId: cid, ...(nextModel ? { model: nextModel } : {}), ...(effort ? { effort } : {}) }, 5000);
-            nextModel = null; // a turn's model lasts for the turns after it
+            await conn.request("turn/start", { threadId: s.thread, input, clientUserMessageId: cid, ...(nextModel ? { model: nextModel } : {}), ...(nextPolicy ?? {}), ...(effort ? { effort } : {}) }, 5000);
+            nextModel = null; // a turn's model and mode last for the turns after it
+            nextPolicy = null;
           }
           return { how, uuid: cid };
         } catch (e) { if (i) throw e; }
@@ -490,6 +502,16 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
     },
     /** From the next turn rollcall starts, and for every resume after. */
     setModel(model) { nextModel = model; rememberLaunch({ model }); return Promise.resolve({}); },
+    /**
+     * A chat's mode (host/chat.mjs CODEX_MODES), from the next turn rollcall starts (a running turn keeps the one it
+     * started with), and for every resume after.
+     */
+    setMode(mode) {
+      const policy = policyFor(mode);
+      rememberLaunch({ mode, ...policy });
+      nextPolicy = { approvalPolicy: policy.approvalPolicy, approvalsReviewer: policy.approvalsReviewer, sandboxPolicy: sandboxPolicyOf({ sandbox: policy.sandbox, writableRoots: cfg.writableRoots ?? [] }) };
+      return Promise.resolve({});
+    },
     /** Ends the session: the SessionEnd hook, then the server. */
     close(reason = "exit") {
       if (closing) return;
@@ -526,12 +548,14 @@ function recordThread(h, id, session, thread) {
  * Hooks Codex has not been told to trust do not run, the owner's guards among them: said on the task once per
  * worker start, for the owner to trust them in Codex's /hooks (the one step that is theirs).
  */
-async function checkHooks(conn, cwd, h, id, { hosted = false } = {}) {
+async function checkHooks(conn, cwd, h, id, { hosted = false, note = null } = {}) {
   try {
     const r = await conn.request("hooks/list", { cwds: [cwd] });
     const hooks = (r?.data ?? []).flatMap((e) => e.hooks ?? []);
     const untrusted = hooks.filter((x) => x.enabled && (x.trustStatus === "untrusted" || x.trustStatus === "modified"));
     if (!untrusted.length) return;
+    // A chat has no task to note it on: the chat itself says it, once per start.
+    if (!id) { note?.(`${untrusted.length} of Codex's hooks are not trusted, so they do not run in this chat (your guards among them). Trust them once: run \`codex\` in this chat's folder, "Review hooks", then trust all.`); return; }
     const where = `in Codex's own screen (run \`codex\` in the task's worktree), "Review hooks", then trust all`;
     store.withTasksLock(h, () => {
       const x = store.readTask(h, id);

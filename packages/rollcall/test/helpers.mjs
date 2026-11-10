@@ -57,7 +57,7 @@ export function sandbox(t) {
     // directly, snapshot.test.mjs turns snapshots on).
     // ROLLCALL_TMUX_SOCKET: a private tmux server, never the real supervisors' one. No home's watcher starts by
     // itself: it would drain the queue a test reads (a test turns it on, or runs `watch <home>` itself).
-    env: cleanEnv({ ROLLCALL_HOME: home, ROLLCALL_FETCH_MINUTES: "999", ROLLCALL_WAIT_POLL_MS: "100", ROLLCALL_MAIN_EDITS: "allow", ROLLCALL_GC: "0", ROLLCALL_SNAPSHOTS: "0", ROLLCALL_WATCHER: "0", ROLLCALL_TMUX_SOCKET: `rollcall-test-${process.pid}` }),
+    env: cleanEnv({ ROLLCALL_HOME: home, ROLLCALL_FETCH_MINUTES: "999", ROLLCALL_WAIT_POLL_MS: "100", ROLLCALL_MAIN_EDITS: "allow", ROLLCALL_GC: "0", ROLLCALL_SNAPSHOTS: "0", ROLLCALL_WATCHER: "0", ROLLCALL_CODEX_MODELS: "0", ROLLCALL_TMUX_SOCKET: `rollcall-test-${process.pid}` }),
     /** A new worktree of the repo at <main>/.claude/worktrees/<name> on branch <name>. */
     worktree(name) {
       const path = join(main, ".claude", "worktrees", name);

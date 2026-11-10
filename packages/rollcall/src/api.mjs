@@ -9,7 +9,7 @@
 //   rollcall api conversation <ref> [--follow] a hosted crew's agent's history as items (host/conversation.mjs)
 // The contract is API.md beside this package's README; a breaking change bumps INTERFACE. rollcall stays daemonless:
 // a stream is a process the front end starts and stops, and nothing here runs on the hooks' hot path.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { asksText } from "./asked.mjs";
 import { awayState, heldView } from "./away.mjs";
 import { readComments } from "./comments.mjs";
@@ -202,7 +202,8 @@ export function snapshot({ home = null, now = Date.now() } = {}) {
     tmux: { socket: tmux.SOCKET(), available: tmuxAvailable() },
     supervisors: homes.map((h) => supervisorView(h, now)),
     // What a new chat offers: models, modes per harness, and the archive delay.
-    chatOptions: chatOptions({ codex: () => !!codexBin() }),
+    // Codex's models only where its CLI is there to run them (a named one that is gone counts as none).
+    chatOptions: chatOptions({ codex: () => { const b = codexBin(); return !!b && (!b.startsWith("/") || existsSync(b)); } }),
     tasks: views.map(({ t, v }) => taskView(t, now, v)),
     sessions: sessionsView(now),
     queues: queuesView(),
