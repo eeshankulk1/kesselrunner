@@ -122,6 +122,8 @@ export async function replaceStale({ force = false, waitMs = 15_000 } = {}) {
   let c;
   try { c = await connect({ sock: i.sock ?? socketPath() }); } catch { return false; }
   try {
+    // Another client may have replaced this host already: the socket then answers for the new one, which stays.
+    if ((await c.call("hello", {}, 5000)).pid !== i.pid) return false;
     if (!force) {
       const r = await c.call("list", {}, 5000);
       if (!r.ok || r.agents?.some((a) => a.state === "running")) return false;
