@@ -361,6 +361,9 @@ Old events and long-dead sessions are pruned at session start. This is coordinat
 | `ROLLCALL_CODEX_ADD_DIRS` | unset | More folders a sandboxed Codex worker may write to, colon-separated |
 | `ROLLCALL_CODEX_QUESTIONS` | on | `0` starts a Codex worker's app server without the `default_mode_request_user_input` flag, so it has no question tool outside plan mode |
 | `ROLLCALL_HOST_PARK_MS` | 3600000 | How long a hosted agent sits idle before the host parks it (stops its process; the next message resumes it) |
+| `ROLLCALL_CHAT_ARCHIVE_DAYS` | 7 | Days a cockpit chat sits unused (no open task, running turn or open request) before the host archives it |
+| `ROLLCALL_CHAT_ARCHIVE_POLL_MS` | 600000 | How often the host looks for chats to archive (tests shorten it) |
+| `ROLLCALL_CHAT_TITLE_CMD` | unset | Test only: a command that stands in for the one-shot Haiku title model of a new chat (reads the prompt on stdin, prints the title) |
 | `ROLLCALL_HOST_TERMINAL_POLL_MS` | 1000 | How often a restarted host checks that a terminal opened before the restart (`rollcall open`) still runs |
 | `ROLLCALL_CLAUDE_CONTRACT` | unset | Test only: `live` makes `test/claude-contract.test.mjs` run one real Haiku turn in stream mode (the host's protocol); `0` skips that test |
 | `ROLLCALL_USAGE_NEAR_PCT` | `85` | The percent of a window at which a plan counts as near its limit (the status line turns yellow; the watcher offers moves) |

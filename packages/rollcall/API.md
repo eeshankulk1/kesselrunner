@@ -101,7 +101,7 @@ A chat (`chat.new`) is a hosted home of kind `chat` (`runtime.json` `{ runtime: 
 | `createdAt`, `lastUsedAt` | ms | Made; last used (the owner's last words, or the last turn's end) |
 | `archivedAt`, `archivedBy` | ms \| null, `auto` \| `owner` \| null | Archived, and by whom |
 | `note` | string \| null | A plain line when something fell back: "Working in the folder itself: <git's reason>", or a worktree remade on unarchive |
-| `busy` | `working` \| `waiting` \| null | What its own session is doing that archiving would cut short: `waiting` (a question or permission prompt is open), `working` (a turn runs), from its `agent.json`. `chat.archive` refuses either |
+| `busy` | `working` \| `waiting` \| null | What its own session is doing that archiving would cut short: `waiting` (a question or permission prompt is open), `working` (a turn runs, or the chat is open in a terminal), from its `agent.json`. `chat.archive` refuses either |
 
 Its branch starts as `chat/<home>`; when a title lands (the model's or the owner's) it is renamed `chat/<title slug>` (`-2`, `-3`... when taken) while it has no upstream and origin has no branch of that name. The worktree folder keeps its first name. A long chat relies on Claude Code's own auto-compact; its history stays one list across sessions.
 

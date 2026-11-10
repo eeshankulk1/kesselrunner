@@ -385,8 +385,8 @@ export function chatView(h) {
   };
 }
 
-/** What the chat's agent does now, from its record (agent.json): "waiting" (a request open), "working" (a turn runs), or null. */
-const busyOf = (a) => (a?.requests > 0 ? "waiting" : a?.state === "running" ? "working" : null);
+/** What the chat's agent does now, from its record (agent.json): "waiting" (a request open), "working" (a turn runs, or open in a terminal: archive refuses both), or null. */
+const busyOf = (a) => (a?.requests > 0 ? "waiting" : a?.state === "running" || a?.state === "terminal" ? "working" : null);
 
 /** Every hosted home, as search sees them. */
 const hostedHomes = () => store.listHomes().filter((h) => runtimeOf(h) === "host");

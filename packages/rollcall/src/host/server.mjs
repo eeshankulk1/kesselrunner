@@ -880,14 +880,17 @@ async function chatStart(req) {
   return { ok: true, how: r.how, uuid: r.uuid, session: a.rec.session, agent: a.state() };
 }
 
+/** Whether a chat's agent is mid-turn, open in a terminal, or holding words not yet taken: archiving would cut it short. */
+const chatRunning = (a) => a.rec.state === "running" || a.rec.state === "terminal" || a.queued.length > 0;
+
 /**
  * Archives a chat (refused with open tasks, a turn running or a request open) and ends its process; its session is
  * saved, and words bring it back.
  */
 function archiveAgent(a, by) {
-  const r = archiveChat(a.h, by, Date.now(), { running: a.rec.state === "running", requests: a.hist.open.size });
+  const r = archiveChat(a.h, by, Date.now(), { running: chatRunning(a), requests: a.hist.open.size });
   if (!r.ok) return err(r.code, r.err);
-  if (a.rec.state && a.rec.state !== "stopped" && a.rec.state !== "terminal") a.stop();
+  if (a.rec.state && a.rec.state !== "stopped") a.stop(); // never "terminal": chatRunning refused it above
   log(`${a.ref}: archived (${by})`);
   return { ok: true, chat: r.chat };
 }
@@ -902,8 +905,7 @@ export function archiveIdleChats(now = Date.now()) {
     const c = readChat(h);
     if (!c || c.archivedAt) continue;
     const a = agentFor(h);
-    const running = a?.rec.state === "running" || a?.rec.state === "terminal" || (a?.queued.length ?? 0) > 0;
-    if (!archiveDue(c, { open: openTasks(h).length, running, requests: a ? a.hist.open.size : 0 }, now)) continue;
+    if (!archiveDue(c, { open: openTasks(h).length, running: a ? chatRunning(a) : false, requests: a ? a.hist.open.size : 0 }, now)) continue;
     if (a) archiveAgent(a, "auto");
   }
 }
