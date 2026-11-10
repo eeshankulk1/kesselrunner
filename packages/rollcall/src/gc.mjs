@@ -149,10 +149,10 @@ export async function gcRuntime() {
  * ({ id, state, baseSha, land(why, head), hold(head) }) or null: an open task keeps its worktree, unless
  * its branch has commits of its own since its base and that work has landed, which marks it landed
  * (`land`; it returns what keeps the task open instead, and `hold` says it without writing) and lets the
- * other checks decide. `runtime` (gcRuntime) cleans up after a worktree it removes. Returns { removed: [{ name,
+ * other checks decide. `chat(path)` says why a chat keeps a worktree (one not archived), else null. `runtime` (gcRuntime) cleans up after a worktree it removes. Returns { removed: [{ name,
  * branch, kb, why }], kept: [{ name, branch, why }] }.
  */
-export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task = () => null, runtime = NO_RUNTIME } = {}) {
+export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task = () => null, chat = () => null, runtime = NO_RUNTIME } = {}) {
   const out = { removed: [], kept: [] };
   const info = locate(mainPath);
   if (!info) return out;
@@ -193,6 +193,9 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
       const held = dryRun ? t.hold(w.head) : t.land(why, w.head);
       if (held) { keep(w, `task ${t.id} is open (${t.state}): ${held}`); continue; }
     }
+    // A chat not archived keeps its worktree, landed or not: a fresh one has no commits and reads as merged and unused.
+    const kept = chat(path);
+    if (kept) { keep(w, kept); continue; }
     if (!why) { keep(w, "not merged"); continue; }
     if (onMain && w.branch && untouchedNew(main, w.branch)) { keep(w, "new, nothing committed yet"); continue; }
     // A session in it, or work not committed, keeps it before anything of its runtime is touched.

@@ -102,6 +102,8 @@ export function pruneHomes(now = Date.now()) {
   if (!store.decisionsGathered()) return; // the lock was busy: a home dropped now would take its list with it
   for (const h of store.listHomes()) {
     try {
+      // A cockpit chat stays until the owner deletes it (archived, it waits for their words).
+      if (store.readHomeFile(h, "runtime")?.kind === "chat") continue;
       if (now - store.homeLastChange(h) <= 7 * 86400_000 || holderOf(h)) continue;
       const open = store.listTasks(h).filter(isOpen);
       if (tmux.windows(h).size || open.some((t) => workerState(t, now)?.alive)) continue;

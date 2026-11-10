@@ -40,6 +40,7 @@ import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from ".
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
 import { comeBack, contextOf, hostedSupervisor, markBack, startWindow, supervisorMark } from "./window.mjs";
 import { callSync as hostCall, hostedHome } from "./host/client.mjs";
+import { isChat } from "./host/chat.mjs";
 import { readJson } from "./claude/live.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
@@ -850,6 +851,8 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
     if (line) lines.unshift(`- ${line}`);
   }
   if (!lines.length) return null;
+  // A chat started these tasks itself (host/chat.mjs): it relays what the owner needs.
+  if (isChat(h)) return [`${P} news from the tasks this chat started. Tell the owner what they need from each line (a result, a question) in a line or two; act on the rest as the /supervisor skill says for news.`, ...lines].join("\n");
   return [`${P} supervisor ${h}: news from your tasks. Act on each line per the /supervisor skill, then end your turn.`, ...lines].join("\n");
 }
 

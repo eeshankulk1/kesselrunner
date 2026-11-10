@@ -10,7 +10,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexRecordFile, launchFile, readJson, recordFile, writeJson } from "../claude/live.mjs";
-import { PLAN_MODES, SET_MODES, commandOf, promptOf } from "../claude/stream.mjs";
+import { PLAN_MODES, SET_MODES, appendedPrompt, commandOf, promptOf } from "../claude/stream.mjs";
 import { dialogFlag } from "../delivery.mjs";
 import { pidAlive, sameProcess, startOf } from "../proc.mjs";
 import * as store from "../store.mjs";
@@ -23,6 +23,7 @@ import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
+import { archiveChat, archiveDue, bindChat, isChat, openTasks, readChat, setTitle, taskItem, touchChat, unarchiveChat, writeTitle } from "./chat.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
 
@@ -103,6 +104,9 @@ class Agent {
     this.terminal = null; // { at, cwd, pid, start } while open in a terminal (also on the record, rec.terminal)
     this.terminalWatch = null;
   }
+
+  /** Whether this is a chat's own session (host/chat.mjs): a hosted home of kind chat, and no task. */
+  get chat() { return !this.id && isChat(this.h); }
 
   /** The history, read from its file on first use. */
   get hist() { return (this._hist ??= new History(historyFile(this.h, this.id))); }
@@ -239,6 +243,11 @@ class Agent {
     writeJson(file, launch);
     const envFile = join(this.dir, "host-env.sh");
     this.ending = null;
+    // A chat's session holds its home as a supervisor's does (its hooks mark turns and bring task news), edits allowed.
+    if (this.chat) {
+      bindChat(this.h, cfg.session);
+      import("../supervisor.mjs").then((m) => m.ensureWatcher(this.h)).catch(() => {});
+    }
     const on = (e) => { if (this.proc === proc || !proc) this.onEvent(e); };
     let proc = null;
     if (harness === "codex") {
@@ -283,6 +292,13 @@ class Agent {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
+    if (this.chat && readChat(this.h)?.archivedAt) {
+      // An archived chat hears only the owner: their words unarchive it and wake it.
+      if ((from ?? "owner") !== "owner") return err("refused", `${this.ref} is archived`);
+      unarchiveChat(this.h);
+      log(`${this.ref}: unarchived by the owner's words`);
+    }
+    if (this.chat && (from ?? "owner") === "owner") touchChat(this.h);
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
     // A supervisor's prompt hook tells the owner's lines from rollcall's by this note (hooks.mjs keyed).
     if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
@@ -452,6 +468,7 @@ class Agent {
         ...(cfg.mode ? ["--permission-mode", cfg.mode] : []),
         ...(cfg.model ? ["--model", cfg.model] : []),
         ...(cfg.effort ? ["--effort", cfg.effort] : []),
+        ...(appendedPrompt(cfg) ? ["--append-system-prompt", appendedPrompt(cfg)] : []),
         ...(!started && cfg.name ? ["-n", cfg.name] : []),
         ...(first.trim() ? [first.startsWith("-") ? ` ${first}` : first] : []),
       ];
@@ -575,6 +592,7 @@ class Agent {
         return;
       case "turn-end":
         this.streaming.clear();
+        if (this.chat) touchChat(this.h);
         if (e.context) recordContext(this, e.context);
         if (this.rec.harness === "codex") {
           // Codex starts no turn for words steered in as one ended: they are gone, rather than shown waiting for good.
@@ -803,11 +821,70 @@ async function handle(req, c) {
         c.on("close", () => subscribers.delete(s));
         return { ok: true, subscribed: refs ? [...refs] : "all", agents: [...agents.values()].filter((a) => a.rec.state && (!refs || refs.has(a.ref))).map((a) => a.state()) };
       }
+      // A chat (host/chat.mjs): its first words and title, a task card, and archiving, all where its agent runs.
+      case "chat-start": return await chatStart(req);
+      case "chat-task": {
+        const a = agentFor(req.ref);
+        if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+        a.item(taskItem(a.h, String(req.task ?? ""), req.title));
+        return { ok: true };
+      }
+      case "chat-archive": {
+        const a = agentFor(req.ref);
+        if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+        return archiveAgent(a, req.by === "auto" ? "auto" : "owner");
+      }
       case "shutdown": setTimeout(() => shutdown?.(0), 20); return { ok: true };
       default: return err("bad-payload", `no op ${req.op}`);
     }
   } catch (e) {
     return err(e.code ?? "failed", e.message);
+  }
+}
+
+// ---------------------------------------------------------------- chats
+
+/**
+ * A new chat's first words (`chat.new`, after its launch is written): the owner's, attachments as `say` takes them,
+ * which starts its session. Then, unless the owner named it, a title from a one-shot model in the background.
+ */
+async function chatStart(req) {
+  const a = agentFor(req.ref);
+  if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+  const r = await a.say({ text: req.text, attachments: req.attachments ?? [], from: "owner" });
+  if (!r.ok) return r;
+  if (readChat(a.h)?.titleBy === "draft") {
+    void writeTitle(String(req.text ?? ""), { env: childEnv() }).then((title) => {
+      if (!title) { log(`${a.ref}: no title came back; the draft stays`); return; }
+      const c = setTitle(a.h, title, "auto");
+      log(`${a.ref}: titled "${c?.title ?? title}"${c?.branch ? ` (${c.branch})` : ""}`);
+    }).catch((e) => log(`${a.ref}: the title failed: ${e.message}`));
+  }
+  return { ok: true, how: r.how, uuid: r.uuid, session: a.rec.session, agent: a.state() };
+}
+
+/** Archives a chat (refused with open tasks) and ends its process; its session is saved, and words bring it back. */
+function archiveAgent(a, by) {
+  const r = archiveChat(a.h, by);
+  if (!r.ok) return err(r.code, r.err);
+  if (a.rec.state && a.rec.state !== "stopped" && a.rec.state !== "terminal") a.stop();
+  log(`${a.ref}: archived (${by})`);
+  return { ok: true, chat: r.chat };
+}
+
+/** How often the host looks for chats to archive: every 10 minutes (ROLLCALL_CHAT_ARCHIVE_POLL_MS). */
+const archivePollMs = () => msEnv("ROLLCALL_CHAT_ARCHIVE_POLL_MS", 600_000);
+
+/** Archives each chat unused for the delay, with no open tasks, no turn running and no open request. */
+export function archiveIdleChats(now = Date.now()) {
+  for (const h of store.listHomes()) {
+    if (!isChat(h)) continue;
+    const c = readChat(h);
+    if (!c || c.archivedAt) continue;
+    const a = agentFor(h);
+    const running = a?.rec.state === "running" || a?.rec.state === "terminal" || (a?.queued.length ?? 0) > 0;
+    if (!archiveDue(c, { open: openTasks(h).length, running, requests: a ? a.hist.open.size : 0 }, now)) continue;
+    if (a) archiveAgent(a, "auto");
   }
 }
 
@@ -864,6 +941,8 @@ export async function runHost() {
   await restore();
   writeJson(infoFile(), { pid: process.pid, sock, at: Date.now(), version: VERSION });
   log(`host ${process.pid} listens on ${sock} (${agents.size} agents restored)`);
+  const archiver = setInterval(() => { try { archiveIdleChats(); } catch (e) { log(`the chat archiver failed: ${e.message}`); } }, archivePollMs());
+  archiver.unref?.();
 
   let ended = false;
   shutdown = async (code) => {

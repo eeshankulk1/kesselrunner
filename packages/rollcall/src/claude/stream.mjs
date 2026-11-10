@@ -47,8 +47,17 @@ export function promptOf(req, requestId, { cwd = null, relays = null, now = Date
   };
 }
 
-/** The modes a front end or the pane may set: the ones Shift-Tab cycles in the CLI. Wider ones stay the launch's. */
-export const SET_MODES = new Set(["default", "acceptEdits", "plan"]);
+/**
+ * The modes a front end or the pane may set: the ones Shift-Tab cycles in the CLI, and auto (Claude Code's own
+ * classifier decides each call). Wider ones (bypassPermissions, dontAsk) stay the launch's.
+ */
+export const SET_MODES = new Set(["default", "acceptEdits", "plan", "auto"]);
+
+/** A chat's appended system prompt (host/chat.mjs writeContract), read from its file at each launch: "" when gone. */
+export function appendedPrompt(cfg) {
+  if (!cfg?.appendPrompt) return "";
+  try { return readFileSync(cfg.appendPrompt, "utf8").trim(); } catch { return ""; }
+}
 /** The modes an approved plan may continue in. */
 export const PLAN_MODES = new Set(["default", "acceptEdits"]);
 
@@ -102,6 +111,7 @@ export function argsOf(cfg, resume) {
     ...(cfg.mode ? ["--permission-mode", cfg.mode] : []),
     ...(cfg.model ? ["--model", cfg.model] : []),
     ...(cfg.effort ? ["--effort", cfg.effort] : []),
+    ...(appendedPrompt(cfg) ? ["--append-system-prompt", appendedPrompt(cfg)] : []),
   ];
 }
 

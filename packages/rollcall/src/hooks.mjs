@@ -159,7 +159,7 @@ function sessionStart(p, now) {
   if (!focus) return inherited.length ? inherited : null;
   const { info, repo } = focus;
   // Turn 0: the worktree as this session found it, so its first turn's diff has a start (a no-op once there is one).
-  if (!g.supervisor) snapshotDetached(info, ["--baseline", "--session", g.id]);
+  if (!g.supervisor || g.supervisor.chat) snapshotDetached(info, ["--baseline", "--session", g.id]);
   store.prune(repo.key);
   store.pruneTasks(now);
   pruneHomes(now);
@@ -203,7 +203,8 @@ function preToolUse(p, now) {
   if (!focus) return null;
   const { info, repo } = focus;
   const g = ensureSession(p);
-  if (g.supervisor) return { deny: supervisorDenial(info) };
+  // A chat (host/chat.mjs) holds its home as a supervisor does, but does the work itself.
+  if (g.supervisor && !g.supervisor.chat) return { deny: supervisorDenial(info) };
   const mine = store.readRecord(repo.key, g.id);
   // A session already editing this checkout (started before the rule, or while the repo allowed it) finishes there.
   if (mainGuarded(info) && !(mine?.checkout === info.top && mine.editedAt)) return { deny: mainDenial(info) };
@@ -495,7 +496,7 @@ function stop(p, now) {
   const g = ensureSession(p);
   const focus = cwdFocus(p);
   refresh(g, now, focus, { idle: true });
-  if (!g.supervisor) snapshotDetached(focus?.info, ["--session", g.id]);
+  if (!g.supervisor || g.supervisor.chat) snapshotDetached(focus?.info, ["--session", g.id]);
   const h = g.supervisor ? homeOf(g.id) : null;
   if (h) turnEnded(h, g, now);
   return null;

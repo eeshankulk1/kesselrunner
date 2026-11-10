@@ -3,7 +3,7 @@
 // It finds its own session by walking up its process ancestry to a harness pid
 // the hooks recorded, so no session id is passed around.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -33,6 +33,7 @@ import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskComm
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
 import { hostedHome } from "./host/client.mjs";
+import { isChat, readChat } from "./host/chat.mjs";
 
 const USAGE = `rollcall - awareness for parallel agent sessions on one machine
 
@@ -484,6 +485,8 @@ function supervise(args) {
     return 0;
   }
   const h = name ?? homeOf(g.id) ?? pickName();
+  // A cockpit chat holds its own home (host/chat.mjs): no supervisor takes it.
+  if (isChat(h)) fail(`${h} is a chat in cockpit, not a supervisor: open it there, or pick another name`);
   if (!store.HOME_NAME.test(h)) fail(`a supervisor name is lowercase letters, digits and -, starting with a letter (like alpha): "${h}"`);
   const took = takeHome(g, h);
   if (!took.ok) {
@@ -507,7 +510,7 @@ function supervise(args) {
   if (legacy.length) say(`  ${legacy.map((t) => t.id).join(", ")} still ${legacy.length === 1 ? "has a v2 worker" : "have v2 workers"} (claude --bg): \`start.mjs <id> --resume "<why>"\` moves one into tmux with its context, when there is work for it.`);
   // Other supervisors running, and those with open work, so a list split across tabs is not lost.
   const count = (n, what) => `${n} ${what}${n === 1 ? "" : "s"}`;
-  const others = store.listHomes().filter((x) => x !== h)
+  const others = store.listHomes().filter((x) => x !== h && !isChat(x))
     .map((x) => ({ x, running: !!holderOf(x), open: store.listTasks(x).filter(isOpen).length }))
     .filter((o) => o.running || o.open);
   if (others.length) {
@@ -576,6 +579,18 @@ function attach(args) {
 
 // ---------------------------------------------------------------- gc
 
+/** gc's `chat(path)`: why a chat keeps its worktree (it is not archived), else null; an archived one's goes as any. */
+function chatKeeps() {
+  const open = new Map();
+  for (const h of store.listHomes()) {
+    if (!isChat(h)) continue;
+    const c = readChat(h);
+    if (c?.worktree && !c.archivedAt) open.set(realOf(c.worktree), `chat ${h} is open`);
+  }
+  return (path) => open.get(realOf(path)) ?? null;
+}
+const realOf = (p) => { try { return realpathSync(p); } catch { return p; } };
+
 /**
  * Removes worktrees whose work already landed (see gc.mjs for the rules).
  * `--report` is the hooks' background mode: quiet, and the summary is saved for
@@ -608,7 +623,7 @@ async function gc(args) {
     let res;
     let refs = 0;
     try {
-      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task, runtime: await gcRuntime() });
+      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task, chat: chatKeeps(), runtime: await gcRuntime() });
       if (!dryRun && store.claimRefsSlot(key)) refs = pruneRefs(main, { queued: Object.keys(store.readQueue(key).entries) });
     } finally { release(); }
     const line = summary(name, res, { dryRun });
