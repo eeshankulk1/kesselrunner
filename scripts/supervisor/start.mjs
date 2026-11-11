@@ -77,8 +77,11 @@ if (!id) die('usage: node start.mjs <task> [--fresh "<why>"] [--dry-run] [--home
 const task = readJson(rollcall(["task", "show", id, "--json", ...(home ? ["--home", home] : [])]), "rollcall task show");
 if (dryRun) { process.stdout.write(`${composeBrief(task, { fresh, rc: rollcallCommand() })}\n`); process.exit(0); }
 const me = readJson(rollcall(["status", "--json"]), "rollcall status").me;
-// A worker runs in its supervisor's permission mode; the watcher, which is no session, names it.
-const mode = modeArg ?? me?.mode ?? null;
+// A worker runs in its supervisor's permission mode; the watcher, which is no session, names it. A cockpit chat's
+// mode is the owner's pick on its chip: its session's record lags behind a pick made mid-chat.
+const { claudeModeOf, readChat } = await src("host/chat.mjs");
+const chat = readChat(task.home);
+const mode = modeArg ?? (chat ? claudeModeOf(chat) : null) ?? me?.mode ?? null;
 const w = workerState(task);
 
 if (stop || interrupt) {

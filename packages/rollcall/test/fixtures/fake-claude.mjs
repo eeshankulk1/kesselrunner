@@ -19,7 +19,7 @@
 // $FAKE_CLAUDE_TRANSCRIPT=1: stream mode writes each turn to the session's transcript as Claude Code does: the user
 // line under the uuid it was sent with, the reply, and a stop_hook_summary line whose uuid is not the result's.
 //
-// $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv }, { in } (every stdin line), { replayed }, { sigterm }.
+// $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv, task }, { in } (every stdin line), { replayed }, { sigterm }.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -35,7 +35,7 @@ const transcriptOf = (session) => {
   return join(dir, `${session}.jsonl`);
 };
 
-log({ argv: args });
+log({ argv: args, task: process.env.ROLLCALL_TASK ?? null, claudeSession: process.env.CLAUDE_CODE_SESSION_ID ?? null });
 
 if (!args.includes("-p")) {
   process.stdout.write("fake claude: the real CLI\n");

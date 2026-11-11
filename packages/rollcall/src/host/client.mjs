@@ -99,19 +99,50 @@ export function connect({ onEvent = null, timeoutMs = 3000, sock = socketPath() 
 }
 
 /** Starts the host detached, its output to its log. */
+/**
+ * The settings one session or task carries, which the host and every agent it runs must not inherit from whoever
+ * started the host: a Claude Code session's own markers (its id, its messaging socket, its effort), a task's rollcall
+ * settings (each task's launch sets its own), and the tmux pane it ran in. A host first called from task t33's worker
+ * once ran every chat with t33's settings, so `rollcall task new` in a chat filed the task under t33's supervisor.
+ */
+export const SESSION_ENV = [
+  "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+  "ROLLCALL_SESSION", "ROLLCALL_TASK", "ROLLCALL_TASK_ID", "ROLLCALL_TASK_HOME", "ROLLCALL_TASK_NAME", "ROLLCALL_WORKTREE",
+  "ROLLCALL_MAIN_CHECKOUT", "ROLLCALL_DEFAULT_BRANCH", "PLAYWRIGHT_MCP_OUTPUT_DIR", "TMUX", "TMUX_PANE",
+];
+
+/** `env` without SESSION_ENV. */
+export function withoutSessionEnv(env) {
+  const out = { ...env };
+  for (const k of SESSION_ENV) delete out[k];
+  return out;
+}
+
 export function spawnHost(env = process.env) {
   mkdirSync(hostDir(), { recursive: true });
   const fd = openSync(logFile(), "a");
-  const p = spawn(process.execPath, [BIN, "host"], { detached: true, stdio: ["ignore", fd, fd], env, cwd: hostDir() });
+  const p = spawn(process.execPath, [BIN, "host"], { detached: true, stdio: ["ignore", fd, fd], env: withoutSessionEnv(env), cwd: hostDir() });
   closeSync(fd);
   p.unref();
   return p.pid;
 }
 
 /**
+ * How long an agent's turn may wait on the owner (an open question, permission or plan) before a stale host is
+ * replaced anyway. Its request outlives the restart, and the answer goes in as the owner's words on the resumed
+ * session (server.mjs answer). Without this, one unanswered question kept a host on old code for good.
+ */
+export const STALE_WAIT_MS = 10 * 60_000;
+const staleWaitMs = () => Number(process.env.ROLLCALL_HOST_STALE_WAIT_MS) || STALE_WAIT_MS;
+const waitsOnOwner = (a, now) => Array.isArray(a.requests) && a.requests.length > 0 && a.requests.every((q) => Number.isFinite(q?.at) && now - q.at > staleWaitMs());
+
+/**
  * Stops a host that runs other rollcall code than the code on disk (an update landed while it ran: it lacks the new
  * ops and answers with the old behaviour), so the next start runs the new code. It waits while an agent is in a turn,
- * which a restart would cut, unless `force`; the rest park and a message brings each back (server.mjs restore).
+ * which a restart would cut, unless `force` or the turn has waited on the owner past STALE_WAIT_MS; the rest park and
+ * a message brings each back (server.mjs restore).
  * Whether it stopped one.
  */
 export async function replaceStale({ force = false, waitMs = 15_000 } = {}) {
@@ -126,7 +157,8 @@ export async function replaceStale({ force = false, waitMs = 15_000 } = {}) {
     if ((await c.call("hello", {}, 5000)).pid !== i.pid) return false;
     if (!force) {
       const r = await c.call("list", {}, 5000);
-      if (!r.ok || r.agents?.some((a) => a.state === "running")) return false;
+      const now = Date.now();
+      if (!r.ok || r.agents?.some((a) => a.state === "running" && !waitsOnOwner(a, now))) return false;
     }
     if (!(await c.call("shutdown", {}, 5000)).ok) return false;
   } catch { return false; } finally { c.close(); }

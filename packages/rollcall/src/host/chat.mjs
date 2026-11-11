@@ -311,7 +311,7 @@ export function writeCodexChatLaunch(h, c, { session = null } = {}) {
 }
 
 /** The Claude Code mode a Codex chat's pick matches: the one its tasks' workers start in (start.mjs reads it). */
-const claudeModeOf = (c) => (c?.harness === "codex" ? (c.mode === "auto" ? "auto" : "default") : c?.mode ?? null);
+export const claudeModeOf = (c) => (c?.harness === "codex" ? (c.mode === "auto" ? "auto" : "default") : c?.mode ?? null);
 
 /**
  * Binds chat `h` to its Claude Code session `session`, as `rollcall supervise` binds a supervisor: the home's lock and

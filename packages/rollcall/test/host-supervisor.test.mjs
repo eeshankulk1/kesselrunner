@@ -97,6 +97,39 @@ test("host supervisor: a relayed question answered from the task's side closes t
   assert.equal(x.readTask().answered.by, "the Mac");
 });
 
+test("host supervisor: a relayed question the supervisor reworded still closes when the task's side answers it", async (t) => {
+  // The supervisor words a worker's question its own way ("yoda asks: ..."); only its header names the task.
+  const reworded = [{ ...QUESTIONS[0], question: `yoda asks: ${QUESTIONS[0].question} Rivals use a subtitle.` }];
+  const x = supervisorSetup(t, { env: { FAKE_CLAUDE_QUESTIONS: JSON.stringify(reworded) } });
+  x.supLaunch();
+  await x.startHost();
+  const c = await x.client();
+  const req = await askTagged(x, c);
+  assert.deepEqual(req.relays, { ref: "alpha:t1", question: x.qid });
+  const api = spawnSync(process.execPath, [BIN, "api", "do", "question.answer", JSON.stringify({ task: "alpha:t1", question: x.qid, answer: "Subtitle", client: "the Mac" })], { env: x.sb.env, encoding: "utf8" });
+  const out = JSON.parse(api.stdout);
+  assert.equal(out.ok, true, api.stdout + api.stderr);
+  assert.equal(out.result.pickerClosed, true, "the supervisor's request closes by the question's id, whatever its words");
+  await until(() => x.supHistory().some((e) => e.ev === "closed" && e.id === req.id));
+  await until(() => x.supAgent()?.state === "idle");
+});
+
+test("host supervisor: a pick on a relayed question the task's side answered already closes the request too", async (t) => {
+  const x = supervisorSetup(t);
+  x.supLaunch();
+  await x.startHost();
+  const c = await x.client();
+  const req = await askTagged(x, c);
+  // The task's question was answered meanwhile and nothing closed this request (as a host before this fix left it).
+  x.task({ state: "working", stateAt: Date.now(), ask: null, answered: { at: Date.now(), by: "the Mac", qid: x.qid, questions: [QUESTIONS[0].question], answer: "Subtitle" }, words: [], notes: [] });
+  const r = await c.call("answer", { request: req.id, answers: { [QUESTIONS[0].question]: "Bold" }, by: "the phone" });
+  assert.equal(r.error?.code, "already-answered");
+  await until(() => x.supHistory().some((e) => e.ev === "closed" && e.id === req.id));
+  const resp = await until(() => x.inputs().find((i) => i.type === "control_response" && i.response?.response?.behavior === "deny"));
+  assert.match(resp.response.response.message, /answered this from the Mac/);
+  await until(() => x.supAgent()?.state === "idle");
+});
+
 test("host escape hatch: terminal state, words held, the terminal's turns join the history", async (t) => {
   const x = supervisorSetup(t, { env: { FAKE_CLAUDE_TERMINAL_TURN: "from the terminal", FAKE_CLAUDE_TERMINAL_MS: "1500" } });
   const cfg = x.launch();

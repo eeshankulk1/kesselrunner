@@ -115,6 +115,52 @@ test("host: a request answered from two clients: the first wins, the other hears
   assert.deepEqual(again, { ok: true, already: true });
 });
 
+test("host: the owner's words while a question waits decline it and go in; rollcall's words wait behind it", async (t) => {
+  const x = setup(t);
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "ASK please" });
+  const req = await until(async () => (await c.call("state", { ref })).agent.requests[0]);
+  // News from rollcall does not answer for the owner: the question stays open.
+  assert.equal((await c.call("say", { ref, text: "news", from: "rollcall" })).how, "queued");
+  assert.equal((await c.call("state", { ref })).agent.requests.length, 1);
+  // The owner's own words: the question closes as declined, and the words go in with the turn.
+  const r = await c.call("say", { ref, text: "stop asking, just go" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.declined, [req.id]);
+  await until(() => x.history().some((e) => e.ev === "closed" && e.id === req.id && e.by === "the owner's message"));
+  const deny = await until(() => x.inputs().find((i) => i.type === "control_response" && i.response?.response?.behavior === "deny"));
+  assert.match(deny.response.response.message, /wrote a message instead/);
+  await until(() => x.agent()?.state === "idle");
+  const page = await c.call("history", { ref });
+  const users = page.items.filter((i) => i.kind === "user");
+  assert.deepEqual(users.map((i) => i.text), ["ASK please", "news", "stop asking, just go"]);
+  assert.ok(users.every((i) => !i.queued), "every word went in");
+});
+
+test("host: a task worker's mode pick lasts into the session the host wakes after a park", async (t) => {
+  const x = setup(t, { env: { ROLLCALL_HOST_PARK_MS: "400" } });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "first" });
+  await until(() => x.agent()?.state === "idle" || x.agent()?.state === "parked");
+  if (x.agent().state === "parked") await c.call("say", { ref, text: "wake" });
+  await until(() => x.agent()?.state === "idle");
+  const r = await c.call("set", { ref, mode: "auto" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(readJson(join(x.dir, "claude-launch.json")).mode, "auto");
+  await until(() => x.agent()?.state === "parked", { timeout: 15_000 });
+  assert.equal((await c.call("say", { ref, text: "again" })).how, "resumed");
+  await until(() => x.agent()?.state === "idle");
+  const argv = x.fake().filter((l) => l.argv).at(-1).argv;
+  assert.equal(argv[argv.indexOf("--permission-mode") + 1], "auto", "the woken session starts in the owner's pick");
+  assert.equal(x.agent().mode, "auto");
+});
+
 test("host: an idle agent parks; a message wakes it on its session", async (t) => {
   const x = setup(t, { env: { ROLLCALL_HOST_PARK_MS: "400" } });
   const cfg = x.launch();

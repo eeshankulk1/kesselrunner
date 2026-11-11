@@ -21,7 +21,7 @@ import { launchFile as codexLaunchFile, policyFor } from "../harness/codex.mjs";
 import { trustWorktree } from "../harness/claude.mjs";
 import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
-import { codeStamp, hostDir, infoFile, lockFile, logFile, socketPath } from "./client.mjs";
+import { SESSION_ENV, codeStamp, hostDir, infoFile, lockFile, logFile, socketPath, withoutSessionEnv } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
 import { archiveChat, archiveDue, bindChat, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { chatHook } from "./chat-hooks.mjs";
@@ -323,6 +323,16 @@ class Agent {
       this.persist();
       return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
     }
+    // The owner writes while the agent waits on their answer (a question, a permission, a plan): its turn cannot end
+    // until that request closes, so words queued behind it would never go in. They decline it, as Esc does in the
+    // terminal, and go in as the next message.
+    const declined = [];
+    if ((from ?? "owner") === "owner" && this.proc) {
+      for (const rid of [...this.pending.keys()]) {
+        const r = await this.answer({ request: rid, allow: false, why: `${P} The owner did not answer this: they wrote a message instead, which follows. Read it before you ask again.` }, "the owner's message");
+        if (r.ok) declined.push(rid);
+      }
+    }
     let how;
     if (!this.proc) {
       const r = await this.start();
@@ -330,7 +340,7 @@ class Agent {
       how = "resumed";
     } else how = this.rec.state === "running" ? "queued" : "sent";
     const id = this.send(text, attachments, from ?? "owner", typeof uuid === "string" && uuid ? uuid : randomUUID());
-    return { ok: true, how, uuid: id };
+    return { ok: true, how, uuid: id, ...(declined.length ? { declined } : {}) };
   }
 
   async interrupt() {
@@ -362,13 +372,12 @@ class Agent {
         const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
         if (r?.error) return err("failed", r.error);
       }
-      // A chat keeps the owner's pick across park, archive and wake (its chip shows it), as a model carries into a
-      // resume; a parked chat takes it for its next start. A task's worker keeps its supervisor's mode per session.
-      if (this.chat) {
-        const harness = codex ? "codex" : "claude";
-        const cfg = readJson(launchOf(this.h, this.id, harness));
-        if (cfg) writeJson(launchOf(this.h, this.id, harness), { ...cfg, mode, ...(codex ? policyFor(mode) : {}) });
-      }
+      // The owner's pick lasts across park and wake (its chip shows it), as a model carries into a resume: a chat's
+      // across archive too, and a task's worker's when the host wakes it after a park. A worker the host resumed in
+      // its first mode kept asking for permissions the owner had switched off.
+      const harness = codex ? "codex" : "claude";
+      const cfg = readJson(launchOf(this.h, this.id, harness));
+      if (cfg) writeJson(launchOf(this.h, this.id, harness), { ...cfg, mode, ...(codex ? policyFor(mode) : {}) });
       this.rec.mode = mode;
       done.mode = mode;
     }
@@ -402,8 +411,10 @@ class Agent {
     if (req.relays?.ref && a.allow !== false && a.answers && typeof a.answers === "object") {
       const r = await relayAnswer(req, a, by);
       if (r.ok || r.error?.code === "already-answered") {
+        // Answered already on the task's side: this request waits on nothing, so it closes too, or the turn stays stuck.
+        const from = r.ok ? by ?? "a front end" : r.error.answered?.by ?? "another surface";
+        if (this.hist.open.has(id)) await this.answer({ request: id, allow: false, why: `${P} The owner answered this from ${from}, and the answer reached the worker already. Do not ask it again.` }, by);
         if (!r.ok) return err("already-answered", r.error.message);
-        if (this.hist.open.has(id)) await this.answer({ request: id, allow: false, why: `${P} The owner answered this from ${by ?? "a front end"}, and the answer reached the worker already. Do not ask it again.` }, by);
         return { ok: true, answered: true, how: "relayed", delivered: r.how ?? null };
       }
       // The task asks nothing now (or something newer): the pick is the supervisor's own, as in its picker.
@@ -686,13 +697,9 @@ class Agent {
 /** Words sent and not taken yet, as an item: `queued` only while they wait (behind a running turn, or a terminal). */
 const sentItem = (q) => ({ id: q.uuid, at: q.at, kind: "user", text: q.text, images: [], from: q.from, ...(q.wait === false ? {} : { queued: true }) });
 
-/** What an agent's process must not inherit: a Claude Code session's own markers, and rollcall's session. */
-export const CHILD_UNSET = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PROJECT_DIR", "CLAUDE_ENV_FILE", "ROLLCALL_SESSION"];
-function childEnv() {
-  const env = { ...process.env };
-  for (const k of CHILD_UNSET) delete env[k];
-  return env;
-}
+/** What an agent's process must not inherit (client.mjs SESSION_ENV): another session's or task's own settings. */
+export const CHILD_UNSET = SESSION_ENV;
+const childEnv = () => withoutSessionEnv(process.env);
 
 /**
  * Answers the task question a supervisor's question relays, as a front end does (the question.answer action). Run as

@@ -130,7 +130,11 @@ export function closeFalconPicker(h, by) {
     const p = liveRecord(h, null)?.prompt;
     if (p?.kind !== "question" || !p.questions?.length) return false;
     const tasks = new Set();
-    for (const x of p.questions) {
+    // A request that relays a task's question names that question by id (host/relays.mjs). The supervisor words its
+    // own question as it likes ("yoda asks: ..."), so the texts need not match: the id says it was answered.
+    const relayed = p.relays?.ref?.startsWith(`${h}:`) ? store.readTask(h, p.relays.ref.slice(h.length + 1)) : null;
+    if (relayed && relayed.answered?.qid === p.relays.question && questionId(relayed) !== p.relays.question) tasks.add(relayed.id);
+    else for (const x of p.questions) {
       const id = taskOfQuestion(x);
       const t = id && store.readTask(h, id);
       if (!t || !answeredElsewhere(t, x.question)) return false;
