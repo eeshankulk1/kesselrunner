@@ -259,7 +259,7 @@ test("chat: search, snapshot chat and chatOptions, gc keeps its worktree, worker
   assert.equal(old.chat.title, "alpha");
   assert.equal(old.chat.folder, x.sb.main);
   assert.equal(snap.chatOptions.defaultModel, "opus");
-  assert.deepEqual(snap.chatOptions.models.map((m) => m.harness), ["claude", "claude", "claude"]);
+  assert.deepEqual(snap.chatOptions.models.map((m) => m.harness), ["claude", "claude", "claude", "claude"]);
   assert.deepEqual(snap.chatOptions.modes.claude.map((m) => m.id), ["default", "acceptEdits", "plan", "auto"]);
   assert.equal(snap.chatOptions.modeFixed.codex, false);
   assert.equal(snap.chatOptions.archiveAfterDays, 7);

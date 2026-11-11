@@ -110,8 +110,8 @@ A Codex chat runs Codex's app server as a task's hosted Codex worker does, with 
 `chatOptions`:
 
 ```json
-{ "models": [ { "id": "opus", "label": "Opus", "harness": "claude" }, { "id": "sonnet", "label": "Sonnet", "harness": "claude" },
-              { "id": "haiku", "label": "Haiku", "harness": "claude" }, { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "harness": "codex" } ],
+{ "models": [ { "id": "fable", "label": "Fable", "harness": "claude" }, { "id": "opus", "label": "Opus", "harness": "claude" },
+              { "id": "sonnet", "label": "Sonnet", "harness": "claude" }, { "id": "haiku", "label": "Haiku", "harness": "claude" }, { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "harness": "codex" } ],
   "defaultModel": "opus",
   "modes": { "claude": [ { "id": "default", "label": "Ask" }, { "id": "acceptEdits", "label": "Accept edits" },
                          { "id": "plan", "label": "Plan" }, { "id": "auto", "label": "Auto" } ],
@@ -186,7 +186,7 @@ A Codex model makes a Codex chat. `models` lists Codex's only where its CLI is i
 | `upAt` | ms \| null | When its Claude Code last started |
 | `started` | bool \| null | Its session has started (false while it waits at the trust prompt) |
 | `lastWords`, `background` | \| null | Once idle: its last words, and the background work it left running |
-| `mode`, `model`, `effort` | string \| null | What it was launched with |
+| `mode`, `model`, `effort` | string \| null | What it was launched with; a hosted Claude worker launched without a model or mode shows what Claude Code says it runs |
 
 **A hosted agent's request.** `{ id, at, kind, tool, input, summary, reason, questions, plan, relays, suggestions }`, open until answered: the host's `request` events and `history` page, and `api conversation`'s `prompt`. A tmux worker has none: its `dialog` says what is open in its window.
 - `id`: what `prompt.answer` names. `kind`: `permission` (a tool needs approval), `plan` (ExitPlanMode: approve the plan) or `question` (the session's own AskUserQuestion).
