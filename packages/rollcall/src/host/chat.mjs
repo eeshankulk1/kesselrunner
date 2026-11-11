@@ -18,7 +18,7 @@ import { defaultBranch, gitSync, locate, mainCheckout, repoKey } from "../git.mj
 import { BIN } from "../session.mjs";
 import { isOpen } from "../state.mjs";
 import * as store from "../store.mjs";
-import { agentRecord, callSync, runtimeOf } from "./client.mjs";
+import { agentRecord, callSync, hostedHome, runtimeOf } from "./client.mjs";
 
 const CONTRACT = new URL("./chat-contract.md", import.meta.url);
 export const CHAT_HOME = /^chat-[a-z0-9]{6}$/;
@@ -26,13 +26,21 @@ const DAY = 86400_000;
 
 /** Whether home `h` is a chat (a hosted home of kind chat). */
 export const isChat = (h) => !!h && store.readHomeFile(h, "runtime")?.kind === "chat";
+/**
+ * Whether home `h` takes the owner's chat actions (rename, archive, unarchive): a chat, or a hosted crew made before
+ * chats, which cockpit lists as a chat too. Such a crew gets a chat record from its first rename or archive.
+ */
+export const takesChatActions = hostedHome;
 export const readChat = (h) => store.readHomeFile(h, "chat");
 const writeChat = (h, c) => { store.writeHomeFile(h, "chat", c); store.pokeWatcher(h); };
 
-/** Changes `h`'s chat record under its home's lock: `fn(chat)` edits it in place; returns the record, or null. */
-export function updateChat(h, fn) {
+/**
+ * Changes `h`'s chat record under its home's lock: `fn(chat)` edits it in place; returns the record, or null.
+ * `adopt`: a hosted crew made before chats, which has no record, starts from the one chatView shows for it.
+ */
+export function updateChat(h, fn, { adopt = false } = {}) {
   const r = store.withHomeLock(h, () => {
-    const c = readChat(h);
+    const c = readChat(h) ?? (adopt && takesChatActions(h) ? crewChat(h) : null);
     if (!c) return null;
     const out = fn(c);
     if (out === false) return c;
@@ -183,7 +191,7 @@ export function setTitle(h, title, by) {
     const b = renameBranch(c, title);
     if (b) c.branch = b;
     return true;
-  });
+  }, { adopt: by === "owner" });
 }
 
 /** The prompt the one-shot title model gets: the owner's first words, cut to 2000 characters. */
@@ -408,7 +416,7 @@ export function archiveChat(h, by, now = Date.now(), busy = {}) {
     x.archivedAt = now;
     x.archivedBy = by;
     return true;
-  });
+  }, { adopt: true });
   return c ? { ok: true, chat: c } : { ok: false, code: "not-found", err: `${h} is not a chat` };
 }
 
@@ -455,16 +463,20 @@ export function touchChat(h, now = Date.now()) {
 export function chatView(h) {
   if (runtimeOf(h) !== "host") return null;
   const a = agentRecord(h, null);
-  const c = readChat(h);
-  if (c) {
-    return {
-      title: c.title, titleBy: c.titleBy, folder: c.folder, folderName: basename(c.folder ?? "") || null, repo: c.repo ?? null,
-      worktree: c.worktree ?? null, branch: c.branch ?? null, harness: a?.harness ?? c.harness ?? "claude", model: a?.model ?? c.model ?? null,
-      mode: a?.mode ?? c.mode ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null, archivedAt: c.archivedAt ?? null,
-      archivedBy: c.archivedBy ?? null, note: c.note ?? null, busy: busyOf(a),
-    };
-  }
-  // A hosted crew made before chats: titled by its name, in the folder it was started in (writeHostedLaunch's falcon.json).
+  const c = readChat(h) ?? crewChat(h, a);
+  return {
+    title: c.title, titleBy: c.titleBy, folder: c.folder, folderName: basename(c.folder ?? "") || null, repo: c.repo ?? null,
+    worktree: c.worktree ?? null, branch: c.branch ?? null, harness: a?.harness ?? c.harness ?? "claude", model: a?.model ?? c.model ?? null,
+    mode: a?.mode ?? c.mode ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null, archivedAt: c.archivedAt ?? null,
+    archivedBy: c.archivedBy ?? null, note: c.note ?? null, busy: busyOf(a),
+  };
+}
+
+/**
+ * A hosted crew made before chats, as a chat record: titled by its name, in the folder it was started in
+ * (writeHostedLaunch's falcon.json), last used at its last turn.
+ */
+function crewChat(h, a = agentRecord(h, null)) {
   const folder = store.readHomeFile(h, "falcon")?.cwd ?? readJson(launchFile(h, null))?.cwd ?? null;
   const info = folder && existsSync(folder) ? locate(folder) : null;
   const rk = info ? repoKey(info) : null;
@@ -472,9 +484,9 @@ export function chatView(h) {
   let used = a?.turnAt ?? a?.at ?? null;
   if (!used) { try { used = statSync(store.homeDir(h)).mtimeMs; } catch {} }
   return {
-    title: h, titleBy: "name", folder, folderName: folder ? basename(folder) : null, repo: rk ? { key: rk.key, name: rk.name, main: mainCheckout(info) } : null,
-    worktree: null, branch: null, harness: a?.harness ?? "claude", model: a?.model ?? null, mode: a?.mode ?? null,
-    createdAt: made, lastUsedAt: used ?? made, archivedAt: null, archivedBy: null, note: null, busy: busyOf(a),
+    title: h, titleBy: "name", folder, repo: rk ? { key: rk.key, name: rk.name, main: mainCheckout(info) } : null,
+    worktree: null, branch: null, harness: a?.harness ?? "claude", model: null, mode: null, // its agent's own, in chatView
+    createdAt: made, lastUsedAt: used ?? made, archivedAt: null, archivedBy: null, note: null,
   };
 }
 

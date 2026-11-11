@@ -23,7 +23,7 @@ import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { SESSION_ENV, codeStamp, hostDir, infoFile, lockFile, logFile, socketPath, withoutSessionEnv } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
-import { archiveChat, archiveDue, bindChat, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
+import { archiveChat, archiveDue, bindChat, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, takesChatActions, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { chatHook } from "./chat-hooks.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
@@ -304,13 +304,15 @@ class Agent {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
-    if (this.chat && readChat(this.h)?.archivedAt) {
+    // A chat's record, or a hosted crew's from before chats once the owner renamed or archived it.
+    const listed = this.id ? null : readChat(this.h);
+    if (listed?.archivedAt) {
       // An archived chat hears only the owner: their words unarchive it and wake it.
       if ((from ?? "owner") !== "owner") return err("refused", `${this.ref} is archived`);
       unarchiveChat(this.h);
       log(`${this.ref}: unarchived by the owner's words`);
     }
-    if (this.chat && (from ?? "owner") === "owner") touchChat(this.h);
+    if (listed && (from ?? "owner") === "owner") touchChat(this.h);
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
     // A supervisor's prompt hook tells the owner's lines from rollcall's by this note (hooks.mjs keyed).
     if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
@@ -646,7 +648,7 @@ class Agent {
         return;
       case "turn-end":
         this.streaming.clear();
-        if (this.chat) touchChat(this.h);
+        if (!this.id) touchChat(this.h); // a chat record's, when it has one
         if (e.context) recordContext(this, e.context);
         if (this.rec.harness === "codex") {
           // Codex starts no turn for words steered in as one ended: they are gone, rather than shown waiting for good.
@@ -884,7 +886,7 @@ async function handle(req, c) {
       }
       case "chat-archive": {
         const a = agentFor(req.ref);
-        if (!a?.chat) return err("not-found", `${req.ref} is not a chat`);
+        if (!a || a.id || !takesChatActions(a.h)) return err("not-found", `${req.ref} is not a chat`);
         return archiveAgent(a, req.by === "auto" ? "auto" : "owner");
       }
       case "shutdown": setTimeout(() => shutdown?.(0), 20); return { ok: true };
