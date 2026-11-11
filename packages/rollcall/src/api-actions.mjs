@@ -15,7 +15,7 @@ import * as store from "./store.mjs";
 import { deliverWords, holderOf, hostedTask, label, workerState } from "./supervisor.mjs";
 import { callSync, hostedHome } from "./host/client.mjs";
 import { endCrew, newCrew } from "./host/crew.mjs";
-import { chatView, isChat, isCodexModel, modesOf, newChat, readChat, searchChats, setTitle, unarchiveChat } from "./host/chat.mjs";
+import { chatView, isChat, isCodexModel, modesOf, newChat, readChat, searchChats, setTitle, takesChatActions, unarchiveChat } from "./host/chat.mjs";
 import { SET_MODES } from "./claude/stream.mjs";
 import * as live from "./claude/live.mjs";
 import { modelOk } from "./harness/claude.mjs";
@@ -130,10 +130,10 @@ function attachmentsOf(p) {
   return p.attachments;
 }
 
-/** The chat a payload's `home` names. */
+/** The chat a payload's `home` names: a chat, or a hosted crew from before chats (cockpit lists both as chats). */
 function chatHome(p) {
   const h = homeOf(p);
-  if (!isChat(h)) refuse("not-found", `no chat ${h}`);
+  if (!takesChatActions(h)) refuse("not-found", `no chat ${h}`);
   return h;
 }
 

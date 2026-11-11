@@ -1,0 +1,1 @@
+{"date": "2026-11-11", "project": "kesselrunner", "summary": "rollcall: chat.archive, chat.unarchive and chat.rename now work on a hosted crew made before chats, which cockpit already listed as a chat; its first archive or rename writes it a chat record.", "pr": 21, "why": "The owner could not archive the tantis chat in cockpit: the actions refused it with \"no chat tantis\"."}

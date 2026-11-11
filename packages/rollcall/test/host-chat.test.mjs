@@ -8,6 +8,7 @@
 // auto review) changed mid-chat, task news and its own `rollcall task` commands, as a Claude chat has them.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -194,6 +195,47 @@ test("chat: a task it makes is a card in its history; archive is refused with op
   assert.ok(existsSync(wt2));
   assert.equal(u.result.chat.branch, `chat/${h2}`);
   assert.match(u.result.chat.note, /new one from origin\/main/);
+});
+
+test("chat: a hosted crew from before chats archives, wakes on words and renames as a chat; a terminal crew does not", async (t) => {
+  const x = chatSetup(t);
+  await x.startHost();
+  // alpha: a hosted crew from before chats (runtime.json with no kind), started in the repo, with a supervisor launch.
+  writeFileSync(join(x.home("alpha"), "falcon.json"), JSON.stringify({ session: "s", cwd: x.sb.main, at: Date.now() }));
+  const sup = join(x.home("alpha"), "workers", "alpha");
+  mkdirSync(sup, { recursive: true });
+  writeFileSync(join(sup, "claude-launch.json"), JSON.stringify({ home: "alpha", task: null, session: randomUUID(), resume: false, settings: join(x.sb.root, "settings.json"), cwd: x.sb.main, bin: FAKE, prompt: null, mode: null, model: null, effort: null, addDir: [], name: "alpha", view: "chat" }));
+  // Its open task refuses the archive, as a chat's does, and a refusal writes no record.
+  const refused = x.api("chat.archive", { home: "alpha" });
+  assert.equal(refused.error?.code, "refused", JSON.stringify(refused));
+  assert.match(refused.error.message, /it has 1 open task/);
+  assert.equal(x.chat("alpha"), null);
+  x.task({ state: "landed" });
+  const a = x.api("chat.archive", { home: "alpha" });
+  assert.equal(a.ok, true, JSON.stringify(a));
+  assert.equal(a.result.chat.archivedBy, "owner");
+  assert.ok(a.result.chat.archivedAt);
+  assert.equal(a.result.chat.title, "alpha", "still titled by its name");
+  assert.equal(a.result.chat.titleBy, "name");
+  assert.equal(a.result.chat.folder, x.sb.main);
+  const snap = JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout);
+  assert.ok(snap.supervisors.find((s) => s.name === "alpha").chat.archivedAt, "the snapshot shows it archived");
+  // The owner's words unarchive it and wake it.
+  const told = x.api("task.tell", { task: "alpha", text: "still there" });
+  assert.equal(told.ok, true, JSON.stringify(told));
+  assert.equal(x.chat("alpha").archivedAt, null, "words unarchive it");
+  await until(() => lines(join(sup, "history.jsonl")).some((e) => e.ev === "item" && e.item.text === "done: still there"));
+  // gamma: another crew from before chats, renamed before anything else gave it a record.
+  mkdirSync(x.home("gamma"), { recursive: true });
+  writeFileSync(join(x.home("gamma"), "runtime.json"), JSON.stringify({ runtime: "host", at: Date.now() }));
+  const r = x.api("chat.rename", { home: "gamma", title: "Old crew" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.result.chat.title, "Old crew");
+  assert.equal(r.result.chat.titleBy, "owner");
+  assert.equal(x.chat("gamma").title, "Old crew");
+  // A terminal crew is no chat.
+  mkdirSync(x.home("beta"), { recursive: true });
+  assert.equal(x.api("chat.archive", { home: "beta" }).error?.code, "not-found");
 });
 
 test("chat: archive by hand is refused while a turn runs or a request is open; the snapshot says which", async (t) => {
