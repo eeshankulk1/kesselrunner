@@ -127,7 +127,7 @@ export function commandOf(bin, args, envFile) {
 
 /**
  * Starts Claude Code for one agent. `on(event)` hears:
- *   { type: "init", session }
+ *   { type: "init", session, model, mode }      Claude Code's model and permission mode as it started
  *   { type: "items", items }                      items new or changed, in order (children carry `parent`)
  *   { type: "text", id, kind, append, parent }    streamed text on an item not finished yet
  *   { type: "text-end", id }                      that text's block finished
@@ -182,7 +182,7 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
   const onMessage = (m) => {
     switch (m.type) {
       case "system":
-        if (m.subtype === "init") { if (m.session_id) session = m.session_id; emit({ type: "init", session }); return; }
+        if (m.subtype === "init") { if (m.session_id) session = m.session_id; emit({ type: "init", session, model: m.model ?? null, mode: m.permissionMode ?? null }); return; }
         if (m.subtype === "compact_boundary") {
           const md = m.compact_metadata ?? m.compactMetadata ?? {};
           fold({ type: "system", subtype: "compact_boundary", uuid: m.uuid ?? randomUUID(), compactMetadata: { trigger: md.trigger, preTokens: md.pre_tokens ?? md.preTokens } });

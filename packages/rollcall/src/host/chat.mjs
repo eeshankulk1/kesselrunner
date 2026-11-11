@@ -53,7 +53,7 @@ export const archiveDays = () => { const v = Number(process.env.ROLLCALL_CHAT_AR
  */
 export const CLAUDE_MODES = [{ id: "default", label: "Ask" }, { id: "acceptEdits", label: "Accept edits" }, { id: "plan", label: "Plan" }, { id: "auto", label: "Auto" }];
 export const CODEX_MODES = [{ id: "default", label: "Ask" }, { id: "auto", label: "Auto" }, { id: "read-only", label: "Read only" }];
-const CLAUDE_MODELS = [{ id: "opus", label: "Opus", harness: "claude" }, { id: "sonnet", label: "Sonnet", harness: "claude" }, { id: "haiku", label: "Haiku", harness: "claude" }];
+const CLAUDE_MODELS = [{ id: "fable", label: "Fable", harness: "claude" }, { id: "opus", label: "Opus", harness: "claude" }, { id: "sonnet", label: "Sonnet", harness: "claude" }, { id: "haiku", label: "Haiku", harness: "claude" }];
 /** Codex's models before its own list has been read (codexModels). */
 const CODEX_FALLBACK = [{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra", harness: "codex" }];
 /** The modes a chat of `harness` takes. */

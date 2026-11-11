@@ -1,0 +1,1 @@
+{"date": "2026-11-10", "project": "kesselrunner", "summary": "rollcall offers Fable among the Claude models, and a hosted Claude worker launched without a model or mode records the ones Claude Code reports, so cockpit can show them.", "pr": 18, "why": "Cockpit had no Fable choice and showed nothing for most hosted workers' model and mode."}

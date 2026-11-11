@@ -592,6 +592,13 @@ class Agent {
     switch (e.type) {
       case "init":
         if (this.rec.harness !== "claude") return;
+        // A launch that named no model or mode runs Claude Code's own defaults: record what it says it runs, so a
+        // front end shows the worker's real model and mode instead of nothing.
+        if ((!this.rec.model && e.model) || (!this.rec.mode && e.mode)) {
+          if (!this.rec.model && e.model) this.rec.model = e.model;
+          if (!this.rec.mode && e.mode) this.rec.mode = e.mode;
+          this.persist();
+        }
         if (e.session && e.session !== this.rec.session) {
           this.rec.session = e.session;
           const cfg = readJson(launchFile(this.h, this.id));

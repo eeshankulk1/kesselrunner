@@ -41,6 +41,9 @@ test("host: start, say, the history and the push lines", async (t) => {
   assert.equal(page.items[1].id, said.uuid, "the words keep the id they were sent with");
   assert.equal(page.items[2].text, "done: hello there");
   assert.equal(page.items[3].tokens.output, 42);
+  // A launch that named no model or mode records what Claude Code says it runs.
+  assert.equal(x.agent().model, "claude-fake-1");
+  assert.equal(x.agent().mode, "default");
   // The push connection saw the same, live: state changes, the words sent, streamed text, the items.
   const evs = events.map((e) => e.ev);
   for (const ev of ["state", "session", "item", "text"]) assert.ok(evs.includes(ev), `a ${ev} event: ${evs.join(",")}`);

@@ -73,7 +73,7 @@ function stream() {
   let ended = false;
   let n = 0;
 
-  out({ type: "system", subtype: "init", ...base, model, tools: ["Bash"], cwd: process.cwd() });
+  out({ type: "system", subtype: "init", ...base, model, permissionMode: argAfter("--permission-mode") ?? "default", tools: ["Bash"], cwd: process.cwd() });
 
   const textOf = (m) => {
     const c = m.message?.content;
