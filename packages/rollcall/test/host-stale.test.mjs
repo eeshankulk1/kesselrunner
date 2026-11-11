@@ -77,6 +77,47 @@ test("host: a stale host stays while an agent is in a turn, until a call needs a
   assert.ok(readFileSync(join(x.dir, "history.jsonl"), "utf8").includes("The host restarted"));
 });
 
+test("host: a stale host goes once every turn has waited on the owner a while; the question outlives it", async (t) => {
+  const x = staleSetup(t, { env: { ROLLCALL_HOST_STALE_WAIT_MS: "300" } });
+  x.launch();
+  const p = await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "ASK please" });
+  const req = await until(async () => (await c.call("state", { ref })).agent.requests[0]);
+  const old = x.markStale();
+  // A turn that has waited on the owner past the limit no longer holds the old code.
+  await new Promise((r) => setTimeout(r, 400));
+  const r = await x.hostCall("hello");
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.notEqual(r.pid, old);
+  await p.exited;
+  assert.equal(x.info().code, codeStamp());
+  // The question is still open on the new host, and its answer goes in as the owner's words.
+  const st = await x.hostCall("state", { ref });
+  assert.equal(st.agent.requests[0]?.id, req.id);
+});
+
+test("host: a host started from inside a task's session carries none of that session's settings to its agents", async (t) => {
+  const x = staleSetup(t);
+  x.launch();
+  // As when a worker of another crew made the first call: its task and its Claude Code session ride in its env.
+  const env = { ...x.hostEnv, ROLLCALL_TASK: "executor:t33", ROLLCALL_TASK_HOME: "executor", CLAUDE_CODE_SESSION_ID: "other-session", TMUX: "/tmp/tmux-x/rollcall,1,1" };
+  const r = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [BIN, "_host-call"], { env });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.on("close", () => resolve(JSON.parse(out.trim().split("\n").at(-1))));
+    p.stdin.end(JSON.stringify({ op: "start", ref }));
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const started = await until(() => x.fake().find((l) => l.argv));
+  assert.equal(started.task, null, "the agent never sees executor's task");
+  assert.equal(started.claudeSession, null);
+  const hostEnv = spawnSync("ps", ["eww", "-p", String(x.info().pid)], { encoding: "utf8" }).stdout;
+  assert.doesNotMatch(hostEnv, /ROLLCALL_TASK=executor/);
+});
+
 test("chat.new: a start the host refuses leaves no chat, worktree or branch behind", async (t) => {
   const x = staleSetup(t);
   // A host on today's code that refuses every call, as one would refuse chat-start.

@@ -103,7 +103,8 @@ export function chatOptions({ codex = () => false } = {}) {
     models: [...CLAUDE_MODELS, ...(codex() ? codexModels() : [])],
     defaultModel: "opus",
     modes: { claude: CLAUDE_MODES, codex: CODEX_MODES },
-    defaultMode: { claude: "default", codex: "default" },
+    // The owner runs every session in Auto: a new chat, and the tasks it starts, run without asking for each command.
+    defaultMode: { claude: "auto", codex: "auto" },
     modeFixed: { claude: false, codex: false },
     archiveAfterDays: archiveDays(),
   };
@@ -311,7 +312,7 @@ export function writeCodexChatLaunch(h, c, { session = null } = {}) {
 }
 
 /** The Claude Code mode a Codex chat's pick matches: the one its tasks' workers start in (start.mjs reads it). */
-const claudeModeOf = (c) => (c?.harness === "codex" ? (c.mode === "auto" ? "auto" : "default") : c?.mode ?? null);
+export const claudeModeOf = (c) => (c?.harness === "codex" ? (c.mode === "auto" ? "auto" : "default") : c?.mode ?? null);
 
 /**
  * Binds chat `h` to its Claude Code session `session`, as `rollcall supervise` binds a supervisor: the home's lock and

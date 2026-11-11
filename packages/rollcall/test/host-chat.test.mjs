@@ -332,7 +332,7 @@ test("chat hooks: a chat's session edits in its worktree, and its turns are mark
 test("chat unit: Codex's modes in the chip, as its approval policy and sandbox", () => {
   const o = chatOptions({ codex: () => false });
   assert.deepEqual(o.modes.codex.map((m) => m.id), ["default", "auto", "read-only"]);
-  assert.equal(o.defaultMode.codex, "default");
+  assert.equal(o.defaultMode.codex, "auto");
   assert.ok(o.models.every((m) => m.harness === "claude"), "no Codex models without Codex");
   assert.ok(chatOptions({ codex: () => true }).models.some((m) => m.harness === "codex"));
   assert.equal(policyFor("auto").approvalsReviewer, "auto_review");
