@@ -115,7 +115,7 @@ test("host: a request answered from two clients: the first wins, the other hears
   assert.deepEqual(again, { ok: true, already: true });
 });
 
-test("host: the owner's words while a question waits decline it and go in; rollcall's words wait behind it", async (t) => {
+test("host: the owner's words queue behind a waiting question; send now declines it and goes in", async (t) => {
   const x = setup(t);
   x.launch();
   await x.startHost();
@@ -123,21 +123,37 @@ test("host: the owner's words while a question waits decline it and go in; rollc
   await c.call("start", { ref });
   await c.call("say", { ref, text: "ASK please" });
   const req = await until(async () => (await c.call("state", { ref })).agent.requests[0]);
-  // News from rollcall does not answer for the owner: the question stays open.
-  assert.equal((await c.call("say", { ref, text: "news", from: "rollcall" })).how, "queued");
+  // Words sent as usual queue, as in Claude Code: the question stays open.
+  const q = await c.call("say", { ref, text: "later words" });
+  assert.equal(q.how, "queued");
+  assert.equal(q.declined, undefined);
   assert.equal((await c.call("state", { ref })).agent.requests.length, 1);
-  // The owner's own words: the question closes as declined, and the words go in with the turn.
-  const r = await c.call("say", { ref, text: "stop asking, just go" });
+  // "Send now": the question closes as declined, and both words go in with the turn.
+  const r = await c.call("say", { ref, text: "stop asking, just go", now: true });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.deepEqual(r.declined, [req.id]);
   await until(() => x.history().some((e) => e.ev === "closed" && e.id === req.id && e.by === "the owner's message"));
   const deny = await until(() => x.inputs().find((i) => i.type === "control_response" && i.response?.response?.behavior === "deny"));
-  assert.match(deny.response.response.message, /wrote a message instead/);
+  assert.match(deny.response.response.message, /sent a message instead/);
   await until(() => x.agent()?.state === "idle");
-  const page = await c.call("history", { ref });
-  const users = page.items.filter((i) => i.kind === "user");
-  assert.deepEqual(users.map((i) => i.text), ["ASK please", "news", "stop asking, just go"]);
+  const users = (await c.call("history", { ref })).items.filter((i) => i.kind === "user");
+  assert.deepEqual(users.map((i) => i.text), ["ASK please", "later words", "stop asking, just go"]);
   assert.ok(users.every((i) => !i.queued), "every word went in");
+});
+
+test("host: send now with no question open interrupts the turn, and the words start the next", async (t) => {
+  const x = setup(t, { env: { FAKE_CLAUDE_SLOW_MS: "200" } });
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  await c.call("start", { ref });
+  await c.call("say", { ref, text: "SLOW please" });
+  await until(() => x.agent()?.state === "running");
+  const r = await c.call("say", { ref, text: "do this instead", now: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.interrupted, true);
+  await until(async () => (await c.call("history", { ref })).items.some((i) => i.kind === "assistant" && /do this instead/.test(i.text ?? "")), { timeout: 15_000 });
+  await until(() => x.agent()?.state === "idle");
 });
 
 test("host: a task worker's mode pick lasts into the session the host wakes after a park", async (t) => {

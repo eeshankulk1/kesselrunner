@@ -103,7 +103,8 @@ export function chatOptions({ codex = () => false } = {}) {
     models: [...CLAUDE_MODELS, ...(codex() ? codexModels() : [])],
     defaultModel: "opus",
     modes: { claude: CLAUDE_MODES, codex: CODEX_MODES },
-    defaultMode: { claude: "default", codex: "default" },
+    // The owner runs every session in Auto: a new chat, and the tasks it starts, run without asking for each command.
+    defaultMode: { claude: "auto", codex: "auto" },
     modeFixed: { claude: false, codex: false },
     archiveAfterDays: archiveDays(),
   };

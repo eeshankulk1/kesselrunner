@@ -300,7 +300,7 @@ class Agent {
     return uuid;
   }
 
-  async say({ text = "", attachments = [], from = "owner", uuid = null } = {}) {
+  async say({ text = "", attachments = [], from = "owner", uuid = null, now = false } = {}) {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
@@ -323,14 +323,21 @@ class Agent {
       this.persist();
       return { ok: true, how: "held", uuid: q.uuid, why: `${this.ref} is open in a terminal: the words go in when it closes` };
     }
-    // The owner writes while the agent waits on their answer (a question, a permission, a plan): its turn cannot end
-    // until that request closes, so words queued behind it would never go in. They decline it, as Esc does in the
-    // terminal, and go in as the next message.
+    // Words sent during a turn queue behind it, as in Claude Code. `now` (the owner's "send now") goes in at once:
+    // it declines what waits on the owner's answer (a question, a permission, a plan), as Esc does in the terminal,
+    // and otherwise interrupts the turn, so the words start the next one.
     const declined = [];
-    if ((from ?? "owner") === "owner" && this.proc) {
+    let interrupted = false;
+    if (now === true && (from ?? "owner") === "owner" && this.proc && this.rec.state === "running") {
       for (const rid of [...this.pending.keys()]) {
-        const r = await this.answer({ request: rid, allow: false, why: `${P} The owner did not answer this: they wrote a message instead, which follows. Read it before you ask again.` }, "the owner's message");
+        const r = await this.answer({ request: rid, allow: false, why: `${P} The owner did not answer this: they sent a message instead, which follows. Read it before you ask again.` }, "the owner's message");
         if (r.ok) declined.push(rid);
+      }
+      if (!declined.length) {
+        interrupted = (await this.interrupt()).interrupted === true;
+        // Words written before the cut turn ends would join it and get no reply: they wait for its end.
+        const until = Date.now() + 10_000;
+        while (interrupted && this.proc && this.rec.state === "running" && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
       }
     }
     let how;
@@ -340,7 +347,7 @@ class Agent {
       how = "resumed";
     } else how = this.rec.state === "running" ? "queued" : "sent";
     const id = this.send(text, attachments, from ?? "owner", typeof uuid === "string" && uuid ? uuid : randomUUID());
-    return { ok: true, how, uuid: id, ...(declined.length ? { declined } : {}) };
+    return { ok: true, how, uuid: id, ...(declined.length ? { declined } : {}), ...(interrupted ? { interrupted } : {}) };
   }
 
   async interrupt() {
@@ -527,7 +534,7 @@ class Agent {
     this.setState("terminal");
     log(`${this.ref}: open in a terminal on session ${cfg.session}`);
     if (c) c.once("close", () => { void this.closeTerminal(); });
-    return { ok: true, argv: [cmd, ...argv], cwd: cfg.cwd && existsSync(cfg.cwd) ? cfg.cwd : null, unset: CHILD_UNSET, agent: this.state() };
+    return { ok: true, argv: [cmd, ...argv], cwd: cfg.cwd && existsSync(cfg.cwd) ? cfg.cwd : null, unset: CHILD_UNSET.filter((k) => !k.startsWith("TMUX")), agent: this.state() };
   }
 
   /**
@@ -710,7 +717,6 @@ function relayAnswer(req, a, by) {
   const single = qs.length === 1 && typeof a.answers[qs[0].question] === "string" ? a.answers[qs[0].question] : null;
   const payload = { task: req.relays.ref, question: req.relays.question, answers: a.answers, ...(single ? { answer: single } : {}), client: by ?? "the chat" };
   const env = childEnv();
-  delete env.ROLLCALL_TASK;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [BIN, "api", "do", "question.answer", JSON.stringify(payload)], { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";

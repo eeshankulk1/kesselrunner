@@ -98,7 +98,6 @@ export function connect({ onEvent = null, timeoutMs = 3000, sock = socketPath() 
   });
 }
 
-/** Starts the host detached, its output to its log. */
 /**
  * The settings one session or task carries, which the host and every agent it runs must not inherit from whoever
  * started the host: a Claude Code session's own markers (its id, its messaging socket, its effort), a task's rollcall
@@ -120,6 +119,7 @@ export function withoutSessionEnv(env) {
   return out;
 }
 
+/** Starts the host detached, its output to its log. */
 export function spawnHost(env = process.env) {
   mkdirSync(hostDir(), { recursive: true });
   const fd = openSync(logFile(), "a");
