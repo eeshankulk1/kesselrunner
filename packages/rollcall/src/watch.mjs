@@ -28,13 +28,13 @@ import { P, cli } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as trouble from "./trouble.mjs";
 import {
-  HANDOFF, closesAt, closing, hostedTask, stopWorker, colorOf, ensureWatcher, holderOf, homeOf, label, markCap, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
-  unpark, watcherEnv, workerState,
+  HANDOFF, closesAt, closing, hostedTask, stopWorker, colorOf, ensureWatcher, freshDue, freshPrOn, freshUndo, holderOf, homeOf, label, markCap, markFresh, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
+  unpark, watcherEnv, whereCurrent, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
 import { allSpotlights, setupState } from "./checkout.mjs";
 import { defaultBranch, locate, repoKey } from "./git.mjs";
-import { allDecisions, mergeSeen, ownerTypedInWorker, queueState } from "./task.mjs";
+import { allDecisions, mergeSeen, ownerTypedInWorker, queueState, shipHolds } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
@@ -387,6 +387,10 @@ export function tick(h, now = Date.now()) {
         // set it working): any news is on its session, and its hooks read it out with this prompt.
         const n = t.notes.findLast((x) => x.at >= (w.since ?? 0))?.text;
         unpark(t, `[rollcall] You were parked (stopped while idle, to free memory), and task ${t.id} is being worked again${n ? `: ${store.clip(store.oneLine(n), 300)}` : ""}. Carry on; \`rollcall task show ${t.id}\` has the record.`, w);
+      } else if (isOpen(t) && prFresh(t, w, now)) {
+        // Its PR is open and the ship script has it: the worker stops now, and the next time it is needed a fresh
+        // worker starts from the task record, not this long conversation.
+        if (markFresh(t, w, "its PR is open and rollcall's ship script has it", now)) park(store.readTask(h, t.id) ?? t, w, now);
       } else if (isOpen(t) && parkDue(t, w, now)) park(t, w, now);
     } catch {} // one task's worker never costs the others their look
     if (isOpen(t)) {
@@ -458,6 +462,19 @@ export function tick(h, now = Date.now()) {
   try { followSpotlights(h); } catch {}
   try { remindOwner(h, now); } catch {}
   drawTabs(h, now);
+}
+
+/**
+ * Whether task `t`'s worker `w` stops now for a fresh start later (the PR trigger): its PR is open and the ship script
+ * holds it, the worker sits idle with nothing in flight (no dialog, no background work, nothing waiting for it, no
+ * terminal showing it) and it wrote its where-I-am note in its last turn. ROLLCALL_FRESH_PR=0 turns it off.
+ */
+function prFresh(t, w, now) {
+  if (!freshPrOn() || (t.state !== "pr-open" && t.state !== "queued") || t.wait) return false;
+  if (!w || w.legacy || w.hosted || !w.alive || w.busy || w.dialog || !Array.isArray(w.bg) || w.bg.length) return false;
+  if (t.fresh?.session === w.session || waiting(t.home, t.id).length) return false;
+  if (!whereCurrent(t, w) || !shipHolds(t, now)) return false;
+  return !tmux.viewed(t.home, t.id);
 }
 
 /**
@@ -707,11 +724,29 @@ function resumeStep(h, t, now) {
   return { args: ["--resume", "it exited while the task was being worked"], line: `${label(t)}: its worker exited mid-task; rollcall resumed it.` };
 }
 
-/** A worker that left before its work merged comes back for what follows the merge; one already back needs nothing. */
+const AFTER_MERGE = "its work merged: run its after-merge steps, save your report and set the task landed";
+
+/**
+ * A worker that left before its work merged comes back for what follows the merge; one already back needs nothing.
+ * One due a fresh start gives way to a fresh worker, which hears why in its brief.
+ */
 function afterMergeStep(t, now) {
   const w = workerState(t, now);
   if (!w || w.alive || w.stopped) return null; // a worker stopped on purpose is not called back (mergeHold lands it)
-  return { args: ["--resume", "its work merged: run its after-merge steps, save your report and set the task landed"], line: `${label(t)}: its work merged; its worker came back for what follows.` };
+  if (freshDue(t, w, now)) { unpark(t, `${P} Task ${t.id}'s ${AFTER_MERGE}.`, w); return null; }
+  return { args: ["--resume", AFTER_MERGE], line: `${label(t)}: its work merged; its worker came back for what follows.` };
+}
+
+/**
+ * A fresh worker takes over from a parked one (supervisor.mjs goFresh). When the old one came back first (Enter in
+ * its tab), what waited goes to it instead.
+ */
+function freshStep(t, now) {
+  if (!t.fresh?.queued) return null;
+  const w = workerState(t, now);
+  if (w?.session !== t.fresh.session) return null;
+  if (w.alive || w.stopped) { freshUndo(t); return null; }
+  return { args: ["--fresh", t.fresh.why], fresh: true, line: `${label(t)}: a fresh worker took over (${t.fresh.why}); the old conversation stays on disk and can be resumed.` };
 }
 
 /** The step a queued `e` asks for now: { args, line }, "wait", or null when it no longer stands. */
@@ -720,6 +755,7 @@ function stepFor(h, e, t, now) {
   if (e.kind === "handoff") return handoffStep(t, now);
   if (e.kind === "exited") return resumeStep(h, t, now);
   if (e.kind === "after-merge") return afterMergeStep(t, now);
+  if (e.kind === "fresh") return freshStep(t, now);
   if (e.kind === "ready") return readyToStart(t) ? { args: [], line: `${label(t)}: nothing holds it now; its worker started.` } : null;
   return !workerState(t, now) ? { args: [], line: `${label(t)}: your words started its worker.` } : null;
 }
@@ -746,7 +782,11 @@ function runStep(h, t, e, step) {
     // Exit 4: it waits on Claude Code's trust prompt, which the owner answers in its window.
     if (code === 0) told(h, t, step.line);
     else if (code === 4) told(h, t, `${label(t)}: its worker waits on Claude Code's trust prompt for this repo. Answer it in ${nameOf(t.id)}'s tab.`, { sound: true });
-    else store.enqueueWake(h, { task: t.id, kind: "failed", what: step.args[0] ?? "start", err: store.clip(store.oneLine(err), 400) });
+    else {
+      // A fresh start that failed falls back to the old worker, with what waited for the fresh one.
+      if (step.fresh) { try { freshUndo(t); } catch {} }
+      store.enqueueWake(h, { task: t.id, kind: "failed", what: step.args[0] ?? "start", err: store.clip(store.oneLine(err), 400) });
+    }
     store.pokeWatcher(h);
   };
   c.on("error", (x) => { err = x.message; end(1); });
@@ -755,7 +795,7 @@ function runStep(h, t, e, step) {
 
 // ---------------------------------------------------------------- the news a model turn is for
 
-const STEPS = new Set(["handoff", "exited", "after-merge", "ready", "undelivered"]);
+const STEPS = new Set(["handoff", "exited", "after-merge", "ready", "undelivered", "fresh"]);
 const TOLD = new Set(["pr-open", "queued", "landed", "closed", "decision", "merged", "prompt"]);
 const judgment = (e) => !STEPS.has(e.kind) && !TOLD.has(e.kind);
 

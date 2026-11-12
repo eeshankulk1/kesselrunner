@@ -401,7 +401,7 @@ const LEAVE = /^@\s*$/;
 /** "→ luke · header: typed into its worker", or why the words wait or did not get there. */
 function sent(t, r) {
   if (!r.ok) return `${label(t)}: your words are recorded, but ${r.why}.`;
-  return `→ ${label(t)}: ${r.how === "typed" ? "typed into its worker" : r.how === "resumed" ? "its worker had stopped; it resumes with your words as its prompt" : r.why}`;
+  return `→ ${label(t)}: ${r.how === "typed" ? "typed into its worker" : r.how === "resumed" ? "its worker had stopped; it resumes with your words as its prompt" : r.how === "fresh" ? "its worker had stopped after writing where it stood; a fresh worker starts with your words in its brief" : r.why}`;
 }
 
 /** Whether the owner's words can reach the task: an open one, or a finished one that had a worker (it runs, or resumes). */
