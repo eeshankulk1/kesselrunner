@@ -244,8 +244,9 @@ async function watchMerge(c, sha) {
       last = m.items;
       const settled = m.items.every((x) => x.state !== "pending");
       if (!m.items.length && Date.now() - start > NONE_MS()) return { none: true, items: [] };
-      // Something may still be about to start: a settled set counts once the merge is a minute old.
-      if (m.items.length && settled && Date.now() - start > Math.min(NONE_MS(), 60_000)) {
+      // Something may still be about to start (a deploy app registers its deployment a while after the merge): a
+      // settled set counts only once the merge is as old as the wait for anything at all.
+      if (m.items.length && settled && Date.now() - start > NONE_MS()) {
         const failed = m.items.filter((x) => x.state === "failed");
         return failed.length ? { failed, items: m.items } : { ok: true, items: m.items };
       }
