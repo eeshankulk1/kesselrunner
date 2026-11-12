@@ -24,7 +24,7 @@ import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { SESSION_ENV, codeStamp, hostDir, infoFile, lockFile, logFile, socketPath, withoutSessionEnv } from "./client.mjs";
 import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
-import { archiveChat, archiveDue, bindChat, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, takesChatActions, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
+import { archiveChat, archiveDue, bindChat, ensureChatWorktree, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, takesChatActions, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { chatHook } from "./chat-hooks.mjs";
 import { BIN, P } from "../session.mjs";
 import { spawn } from "node:child_process";
@@ -316,7 +316,7 @@ class Agent {
       if ((from ?? "owner") !== "owner") return err("refused", `${this.ref} is archived`);
       unarchiveChat(this.h);
       log(`${this.ref}: unarchived by the owner's words`);
-    }
+    } else if (listed && ensureChatWorktree(this.h)) log(`${this.ref}: its worktree is back, as gc removed it once its work landed`);
     if (listed && (from ?? "owner") === "owner") touchChat(this.h);
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
     // A supervisor's prompt hook tells the owner's lines from rollcall's by this note (hooks.mjs keyed).

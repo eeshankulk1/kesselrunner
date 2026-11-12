@@ -1,15 +1,16 @@
 // What ended work leaves behind on this Mac, outside any repo. gc removes what surely belongs to nothing any more:
 // Xcode's DerivedData for a project that is gone (a removed worktree's), the temp folders of sessions over for a day,
-// and test browsers whose session ended, with their profiles. On a low disk `rollcall clean` lists what is only
-// rebuildable (DerivedData still in reach of a checkout, a recent session's temp folder) and deletes it on the owner's
-// word alone. It never reaches into a checkout, and what an open task or a running session uses stays. Only the
+// the folders an App Store upload leaves in the temp directory once a day old, and test browsers whose session ended,
+// with their profiles. On a low disk, and when `rollcall clean` runs, what is only rebuildable goes without asking
+// (DerivedData still in reach of a checkout, Xcode's shared cache, a recent session's temp folder, package managers'
+// download caches); what is not rebuildable is listed and goes only on the owner's word. It never reaches into a checkout, and what an open task or a running session uses stays. Only the
 // machine's own store reaches the machine's folders: any other (a test's, a sandbox's) knows none of the sessions out
 // there, so every one would read as over.
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join, sep } from "node:path";
-import { sizesKb } from "./gc.mjs";
+import { dropWorktree, sizesKb } from "./gc.mjs";
 import { isAlive } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as store from "./store.mjs";
@@ -22,8 +23,12 @@ const BROWSER_MIN_AGE_S = 600;
 const TEST_BROWSER = /Chrome for Testing|chrome-headless-shell|Chromium\.app|\/ms-playwright\//;
 const TEST_PROFILE = /^(playwright[_-]|puppeteer_dev|.*-browser-tests-)/;
 // A profile a test tool made. One anywhere else may be a browser someone opened by hand.
+// What an App Store upload (xcodebuild -exportArchive, altool) leaves in the temp directory, a few hundred MB each.
+const UPLOAD = /^XcodeDistPipeline\./;
 const TEST_DATA_DIR = / --user-data-dir=\S*(\/tmp\/|\/var\/folders\/|\/ms-playwright\/|playwright|puppeteer|-browser-tests-)/;
 const BUILDING = /\b(xcodebuild|swift-build|swift-frontend|XCBBuildService)\b/;
+// A package install under way reads its cache: none is cleared while one runs.
+const INSTALLING = /\b(npm|pnpm|yarn|bun) (install|i|ci|add|update)\b|\bpip3? install\b|\buv (sync|add|pip|lock|run)\b|\bpod install\b/;
 
 const ls = (dir) => { try { return readdirSync(dir); } catch { return []; } };
 const mtime = (p) => { try { return statSync(p).mtimeMs; } catch { return 0; } };
@@ -33,6 +38,13 @@ const machine = (fake, path) => process.env[fake] || (ownStore() ? path : null);
 const derivedRoot = () => machine("ROLLCALL_DERIVED_DATA", join(homedir(), "Library", "Developer", "Xcode", "DerivedData"));
 const tempRoot = () => real(machine("ROLLCALL_CLAUDE_TMP", `/tmp/claude-${process.getuid?.() ?? 0}`));
 const profileRoot = () => real(machine("ROLLCALL_BROWSER_TMP", tmpdir()));
+/** Package managers' download caches: each fills again on the next install. ROLLCALL_PACKAGE_CACHES (":"-separated) stands in. */
+const packageCaches = () => {
+  if (process.env.ROLLCALL_PACKAGE_CACHES) return process.env.ROLLCALL_PACKAGE_CACHES.split(":").filter(Boolean);
+  if (!ownStore()) return [];
+  const h = homedir();
+  return [join(h, ".npm", "_cacache"), join(h, "Library", "Caches", "pnpm"), join(h, "Library", "Caches", "Yarn"), join(h, "Library", "Caches", "pip"), join(h, ".cache", "uv"), join(h, "Library", "Caches", "CocoaPods")];
+};
 /** Every process, or null when ps failed: then what runs is unknown, which is not the same as nothing running. */
 function psOutput() {
   if (process.env.ROLLCALL_PS_FILE) return readFileSync(process.env.ROLLCALL_PS_FILE, "utf8").trim() || null;
@@ -115,13 +127,17 @@ function deadProfiles(now, text) {
 
 const remove = (p) => { try { rmSync(p, { recursive: true, force: true }); return true; } catch { return false; } };
 
-/** Everything the sweep would take now: { derived, temp, profiles (paths), browsers (pids) }. */
+/** Upload folders over a day old: an upload takes minutes, so one that old is over. */
+const oldUploads = (now) => ls(profileRoot()).filter((n) => UPLOAD.test(n) && now - mtime(join(profileRoot(), n)) > DAY).map((n) => join(profileRoot(), n));
+
+/** Everything the sweep would take now: { derived, temp, uploads, profiles (paths), browsers (pids) }. */
 function sweepList(now) {
   const used = inUse();
   const ps = psOutput();
   return {
     derived: derivedFolders().filter(projectGone).map((d) => d.path),
     temp: endedTemp(used).filter((t) => now - t.touched > DAY).map((t) => t.path),
+    uploads: oldUploads(now),
     profiles: ps ? deadProfiles(now, ps) : [],
     browsers: ps ? orphanBrowsers(ps) : [],
   };
@@ -135,7 +151,7 @@ const gb = (kb) => (kb >= 1024 * 1024 ? `${(kb / 1024 / 1024).toFixed(1)} GB` : 
  */
 export function sweepLeftovers({ dryRun = false, now = Date.now() } = {}) {
   const l = sweepList(now);
-  const paths = [...l.derived, ...l.temp, ...l.profiles];
+  const paths = [...l.derived, ...l.temp, ...l.uploads, ...l.profiles];
   // Before the sizes, which can take a while: these pids are only as good as the ps they came from.
   if (!dryRun) for (const pid of l.browsers) { try { process.kill(pid, "SIGTERM"); } catch {} }
   const sizes = sizesKb(paths);
@@ -148,7 +164,7 @@ export function sweepLeftovers({ dryRun = false, now = Date.now() } = {}) {
     }
   }
   const says = [
-    [l.derived.length, "DerivedData folder"], [l.temp.length, "temp folder"], [l.profiles.length, "browser profile"], [l.browsers.length, "test browser"],
+    [l.derived.length, "DerivedData folder"], [l.temp.length, "temp folder"], [l.uploads.length, "upload folder"], [l.profiles.length, "browser profile"], [l.browsers.length, "test browser"],
   ].filter(([n]) => n).map(([n, what]) => `${n} ${what}${n === 1 ? "" : "s"}`);
   if (!says.length) return { kb: 0, line: null };
   return { kb, line: `${dryRun ? "would remove" : "removed"} leftovers of ended work: ${says.join(", ")}${kb ? ` (${gb(kb)})` : ""}` };
@@ -157,12 +173,13 @@ export function sweepLeftovers({ dryRun = false, now = Date.now() } = {}) {
 const statSafe = (p) => { try { return statSync(p); } catch { return null; } };
 
 /**
- * What can go if the owner says so: [{ path, kb, why }], biggest first. While no build runs (a failed ps may hide one):
- * build folders of projects that still exist (not those of open work or a running session, one built in the last hour,
- * or the lander's own) and Xcode's shared caches. Always: temp folders of sessions over for less than a day, quiet for
- * an hour, since a helper session rollcall has no record of may still be running.
+ * What only rebuilds itself and goes without asking, on a low disk and when `rollcall clean` runs: [{ path, kb, why }],
+ * biggest first. While no build runs (a failed ps may hide one): build folders of projects that still exist (not those
+ * of open work or a running session, one built in the last hour, or the lander's own) and Xcode's shared caches. While
+ * no package install runs: package managers' download caches. Always: temp folders of sessions over for less than a
+ * day, quiet for an hour, since a helper session rollcall has no record of may still be running.
  */
-export function deleteList(now = Date.now()) {
+export function rebuildableList(now = Date.now()) {
   const used = inUse();
   const mine = real(store.home());
   const ps = psOutput();
@@ -176,15 +193,35 @@ export function deleteList(now = Date.now()) {
     }
     for (const n of ls(derivedRoot()).filter((x) => x.endsWith(".noindex"))) rows.push({ path: join(derivedRoot(), n), why: "Xcode's shared build cache: the next build makes it again" });
   }
+  if (ps && !INSTALLING.test(ps)) for (const p of packageCaches().filter((x) => statSafe(x))) rows.push({ path: p, why: "a package manager's download cache: the next install fills it again" });
   for (const t of endedTemp(used).filter((x) => now - x.touched <= DAY && now - x.touched > HOUR)) rows.push({ path: t.path, why: "temp folder of an ended session" });
   const sizes = sizesKb(rows.map((r) => r.path));
   return rows.map((r) => ({ ...r, kb: sizes.get(r.path) ?? 0 })).sort((a, b) => b.kb - a.kb);
 }
 
+/** Clears what rebuildableList names. Returns { kb, items } of what went (with `dryRun`, what would). */
+export function clearRebuildable({ dryRun = false, now = Date.now() } = {}) {
+  const items = rebuildableList(now).filter((x) => dryRun || remove(x.path));
+  return { kb: items.reduce((s, x) => s + x.kb, 0), items };
+}
+
+/**
+ * What goes only on the owner's word: [{ path, kb, why, main }], biggest first. `worktrees`: worktrees whose work never
+ * landed and that no one touched for two weeks (gc.mjs unlandedWorktrees, for every repo). Removing one loses its
+ * uncommitted changes; its branch stays.
+ */
+export function deleteList(worktrees = [], now = Date.now()) {
+  const sizes = sizesKb(worktrees.map((w) => w.path));
+  return worktrees.map((w) => ({
+    path: w.path, main: w.main, kb: sizes.get(w.path) ?? 0,
+    why: `worktree${w.branch ? ` of ${w.branch}` : ""} whose work never landed, untouched ${Math.floor((now - w.touched) / DAY)} days: ${w.lost}; its branch stays`,
+  })).sort((a, b) => b.kb - a.kb);
+}
+
 const listText = (items) => {
   const total = items.reduce((s, x) => s + x.kb, 0);
   return [
-    `rollcall clean --yes deletes these ${items.length} folders (${gb(total)}). Each comes back by itself when needed, and nothing goes until you say so.`,
+    `rollcall clean --yes removes these ${items.length} worktrees (${gb(total)}). Their work never landed: what is not committed is lost, their branches stay. Nothing goes until you say so.`,
     "", ...items.map((x) => `${gb(x.kb).padStart(9)}  ${x.path}\n           ${x.why}`), "",
   ].join("\n");
 };
@@ -194,8 +231,8 @@ const listText = (items) => {
  * owner's last sight of the list before it when it names nothing that one did not (the watcher's run can end after the
  * owner looked). Returns { items, total (its size in words) }.
  */
-export function saveDeleteList({ shown = false, now = Date.now() } = {}) {
-  const items = deleteList(now);
+export function saveDeleteList({ shown = false, now = Date.now(), worktrees = [] } = {}) {
+  const items = deleteList(worktrees, now);
   const before = store.readCleanList();
   const seenBefore = !shown && now - before.shown < DAY && items.every((x) => before.items.some((b) => b.path === x.path));
   store.writeCleanList(items, listText(items), shown ? now : seenBefore ? before.shown : 0);
@@ -205,10 +242,10 @@ export function saveDeleteList({ shown = false, now = Date.now() } = {}) {
 /** Whether the owner saw the saved list in the last day. A list the watcher wrote and only counted to them is not seen. */
 export const deleteListSeen = (now = Date.now()) => now - store.readCleanList().shown < DAY;
 
-/** Deletes what the saved list names and is still free to go (the list may be old). Returns what went. */
-export function deleteListed(now = Date.now()) {
-  const safe = new Set(deleteList(now).map((x) => x.path));
-  return store.readCleanList().items.filter((x) => safe.has(x.path) && remove(x.path));
+/** Deletes what the saved list names and is still free to go (the list may be old; `worktrees` is now's). Returns what went. */
+export function deleteListed(worktrees = []) {
+  const safe = new Map(worktrees.map((w) => [w.path, w.main]));
+  return store.readCleanList().items.filter((x) => safe.has(x.path) && !dropWorktree(safe.get(x.path), x.path));
 }
 
 /** The size of `kb` in words. */

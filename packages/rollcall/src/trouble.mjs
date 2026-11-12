@@ -296,7 +296,7 @@ export function diskRunEnded({ freed, found }, now = Date.now()) {
   if (gb >= lowGb() + DISK_ROOM_GB) { closeBlocker("disk"); return; }
   store.updateTrouble((t) => { if (t.open.disk) t.open.disk.total = found; });
   const fresh = isNews(told, "disk", now);
-  if (fresh) notify(`rollcall: ${NAMES.disk}`, `The disk has ${Number.isFinite(gb) ? Math.round(gb * 10) / 10 : open.disk.gb ?? "?"} GB free.${freed ? ` rollcall already cleared ${freed} of leftovers.` : ""} ${found ? `It found ${found} more it can delete, listed in ${store.cleanListPath()}. Say "clean up" to a supervisor, or run rollcall clean to see it: nothing goes until you say yes.` : "It found nothing more it can delete by itself."} Work goes on, and what waits on disk space resumes once there is room.`);
+  if (fresh) notify(`rollcall: ${NAMES.disk}`, `The disk has ${Number.isFinite(gb) ? Math.round(gb * 10) / 10 : open.disk.gb ?? "?"} GB free.${freed ? ` rollcall already cleared ${freed} of leftovers.` : ""} ${found ? `Worktrees whose work never landed, untouched for two weeks, hold ${found} more, listed in ${store.cleanListPath()}. Say "clean up" to a supervisor, or run rollcall clean to see them: none goes until you say yes.` : "Nothing else can go without your say."} Work goes on, and what waits on disk space resumes once there is room.`);
   heard("disk", now, fresh);
 }
 
@@ -304,7 +304,7 @@ export function diskRunEnded({ freed, found }, now = Date.now()) {
 export function lines(now = Date.now()) {
   return Object.values(openBlockers()).map((b) => {
     if (isUsage(b.kind)) return b.until ? `${b.kind === "usage" ? "" : "Codex "}usage limit: workers resume after ${clock(b.until, now)}` : "usage limit: rollcall tries again shortly";
-    if (b.kind === "disk") return `disk: ${b.gb ?? "?"} GB free${b.total ? `, rollcall clean lists ${b.total} it can free` : ""}`;
+    if (b.kind === "disk") return `disk: ${b.gb ?? "?"} GB free${b.total ? `, rollcall clean lists ${b.total} for your yes` : ""}`;
     if (b.kind === "billing") return b.run ? "GitHub billing refuses jobs: rollcall retries by itself" : "GitHub billing refuses jobs: rollcall blockers clear billing once fixed";
     if (b.kind === "spotlight") return `Spotlight read-only, Cmd-Space misses apps: ${SPOTLIGHT_FIX}`;
     if (b.kind === "power") return `on battery${b.pct ? ` at ${b.pct}%` : ""}: plug in the Mac`;

@@ -530,6 +530,39 @@ export function takeGcReport(key) {
   try { const text = readFileSync(gcReportPath(key), "utf8"); rmSync(gcReportPath(key), { force: true }); return text.split("\n").filter(Boolean); } catch { return []; }
 }
 
+// What each gc did in a repo, for the owner to read when a worktree stays (`rollcall gc --log`): gc-kept.txt is the
+// last run's kept worktrees and why, gc.log what it removed and what failed (the newest 1000 lines).
+export const gcKeptPath = (key) => join(repoDir(key), "gc-kept.txt");
+export const gcLogPath = (key) => join(repoDir(key), "gc.log");
+const GC_LOG_KEEP = 1000;
+/**
+ * Records one gc of repo `key` (gcRepo's result). Returns the failures not yet told (a teardown or removal that failed
+ * for the same reason before is not news); the told list keeps only what still fails.
+ */
+export function recordGc(key, res, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  const named = (x) => `${x.name}${x.branch ? ` (${x.branch})` : ""}`;
+  try {
+    mkdirSync(repoDir(key), { recursive: true });
+    writeAtomic(gcKeptPath(key), [`gc at ${at} kept ${res.kept.length} worktree${res.kept.length === 1 ? "" : "s"}:`, ...res.kept.map((k) => `  ${named(k)}: ${oneLine(k.why)}`), ""].join("\n"));
+    const lines = [
+      ...res.removed.map((r) => `${at} removed ${named(r)}: ${oneLine(r.why)}`),
+      ...res.kept.filter((k) => k.failed).map((k) => `${at} failed ${named(k)}: ${oneLine(k.why)}`),
+      ...(res.stuck ?? []).map((x) => `${at} could not delete ${oneLine(x)}`),
+    ];
+    if (lines.length) {
+      appendFileSync(gcLogPath(key), `${lines.join("\n")}\n`);
+      const all = readFileSync(gcLogPath(key), "utf8").split("\n").filter(Boolean);
+      if (all.length > GC_LOG_KEEP * 1.5) writeAtomic(gcLogPath(key), `${all.slice(-GC_LOG_KEEP).join("\n")}\n`);
+    }
+  } catch {}
+  const failing = [...res.kept.filter((k) => k.failed).map((k) => `${k.name}: ${oneLine(k.why)}`), ...(res.stuck ?? []).map(oneLine)];
+  const toldPath = join(repoDir(key), "gc-told.json");
+  const told = new Set(readJson(toldPath) ?? []);
+  try { writeJson(toldPath, failing); } catch {}
+  return failing.filter((f) => !told.has(f));
+}
+
 /**
  * Runs `fn` under a per-session lock (mkdir is atomic) and returns its result,
  * or null when the lock stays busy. Retries back off exponentially (2, 4, 8 ...
