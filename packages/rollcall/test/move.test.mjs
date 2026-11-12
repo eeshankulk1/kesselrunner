@@ -270,6 +270,64 @@ test("move: a chat coming back replaces the home marked moved and reuses its old
   assert.equal(JSON.parse(readFileSync(join(a.home, ".claude", "projects", enc(wt), `${S}.jsonl`), "utf8")).cwd, wt);
 });
 
+test("move: each worktree gets its own ports at the far side; finish gives the source's block back", async (t) => {
+  const sb = sandbox(t);
+  // The repo's manifest uses {port}, as a dev server's does: a task's worktree gets a block of its own.
+  write(join(sb.main, ".claude", "test-manifest.json"), JSON.stringify({ devServer: { command: "npm run dev -- --port {port}", url: "http://localhost:{port+1}" } }));
+  git(sb.main, "add", ".");
+  git(sb.main, "commit", "-qm", "manifest");
+  git(sb.main, "push", "-q", "origin", "main");
+  const { a, wt, hd } = mac(sb, t);
+  const b = place(sb, "cloud");
+  const { portsFor } = await import("../src/runtime.mjs");
+  const { heldPorts, readBlocks } = await import("../src/checkout.mjs");
+  const src = await as(a, () => portsFor(wt, { allocate: true }));
+  assert.ok(src, "the source worktree holds a block");
+  // Its worker's launch files carry those numbers, as launchLines writes them.
+  const wd = join(hd, "workers", H);
+  write(join(wd, "host-env.sh"), [`export ROLLCALL_WORKTREE='${wt}'`, `export ROLLCALL_MAIN_CHECKOUT='${sb.main}'`, `export ROLLCALL_PORT='${src.base}'`, `export ROLLCALL_PORT_COUNT='${src.size}'`, ""].join("\n"));
+  write(join(wd, "launch.sh"), `export DEV_URL='http://localhost:${src.base + 1}'\n`);
+  // The far side already gave the source's block to a checkout of its own.
+  write(join(b.store, "_runtime", "ports.json"), JSON.stringify({ blocks: [{ base: src.base, size: src.size, path: sb.root, at: 1 }] }));
+
+  const packed = await as(a, () => move.pack({ home: H }, { host: noHost() }));
+  await as(b, () => move.unpack({ path: packed.path, from: "Mac" }, { host: noHost() }));
+  const nwt = join(b.home, "origin", ".claude", "worktrees", H);
+  const got = await as(b, () => heldPorts(nwt));
+  assert.ok(got, "the new worktree holds a block here");
+  assert.notEqual(got.base, src.base);
+  const nwd = join(b.store, "_supervisors", H, "workers", H);
+  const env = readFileSync(join(nwd, "host-env.sh"), "utf8");
+  assert.match(env, new RegExp(`^export ROLLCALL_PORT='${got.base}'$`, "m"));
+  assert.match(env, new RegExp(`^export ROLLCALL_PORT_COUNT='${got.size}'$`, "m"));
+  assert.match(env, new RegExp(`^export ROLLCALL_WORKTREE='${nwt}'$`, "m"));
+  assert.equal(readFileSync(join(nwd, "launch.sh"), "utf8"), `export DEV_URL='http://localhost:${got.base + 1}'\n`, "another launch file's ports swapped too");
+
+  // Finish gives the source's block back; undo would not.
+  assert.ok((await as(a, () => readBlocks())).some((x) => x.path === wt));
+  await as(a, () => move.finish({ home: H, to: "Cloud" }));
+  assert.equal((await as(a, () => readBlocks())).some((x) => x.path === wt), false);
+  // Discard at the far side gives back the block the unpack took.
+  await as(b, () => move.discard({ home: H }, { host: fakeHost() }));
+  assert.equal(await as(b, () => heldPorts(nwt)), null);
+});
+
+test("move: a Codex agent's rollout travels to the far side's Codex folder, its cwd rewritten", async (t) => {
+  const sb = sandbox(t);
+  const { a, wt, hd } = mac(sb, t);
+  const b = place(sb, "cloud");
+  const wd = join(hd, "workers", H);
+  write(join(wd, "agent.json"), JSON.stringify({ ...readJson(join(wd, "agent.json")), harness: "codex", thread: "th-1" }));
+  write(join(wd, "codex-launch.json"), JSON.stringify({ home: H, task: null, thread: "th-1", cwd: wt, bin: "/nowhere/codex" }));
+  const rel = join("2026", "11", "12", "rollout-x-th-1.jsonl");
+  write(join(a.home, ".codex", "sessions", rel), `${JSON.stringify({ cwd: wt })}\n`);
+  const packed = await as(a, () => move.pack({ home: H }, { host: noHost() }));
+  await as(b, () => move.unpack({ path: packed.path, from: "Mac" }, { host: noHost() }));
+  const nwt = join(b.home, "origin", ".claude", "worktrees", H);
+  assert.equal(readJson(join(b.home, ".codex", "sessions", rel))?.cwd, nwt, "the rollout sits under the far side's Codex folder, its cwd rewritten");
+  assert.equal(readJson(join(b.store, "_supervisors", H, "workers", H, "codex-launch.json")).cwd, nwt);
+});
+
 test("move: the CLI answers check as the API does", async (t) => {
   const sb = sandbox(t);
   const { a } = mac(sb, t);

@@ -10,10 +10,11 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { manifestOf } from "./checkout.mjs";
+import { heldPorts, inside, manifestOf, q } from "./checkout.mjs";
 import { transcriptFor } from "./conversation.mjs";
 import { bin as codexBin } from "./harness/codex.mjs";
 import { gitSync, isMainCheckout, locate, mainCheckout, remoteUrl, repoKey } from "./git.mjs";
+import { checkoutFacts, releasePorts } from "./runtime.mjs";
 import * as store from "./store.mjs";
 
 export const FORMAT = 1;
@@ -306,7 +307,7 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
     worktrees.forEach((w, i) => {
       const d = join(stage, "wt", String(i));
       mkdirSync(d, { recursive: true });
-      const meta = { i, refs: w.refs, path: w.top, main: w.main, mainCheckout: w.mainCheckout, repo: w.repo, key: w.key, origin: w.origin, branch: w.branch, tip: w.tip, bundle: false, diff: false, untracked: [], secrets: [], fingerprint: null };
+      const meta = { i, refs: w.refs, path: w.top, main: w.main, mainCheckout: w.mainCheckout, repo: w.repo, key: w.key, origin: w.origin, branch: w.branch, tip: w.tip, bundle: false, diff: false, untracked: [], secrets: [], fingerprint: null, ports: null };
       if (!w.main) {
         if (w.unpushed > 0) {
           const r = git(w.top, ["bundle", "create", join(d, "branch.bundle"), `refs/heads/${w.branch}`, "--not", "--remotes=origin"]);
@@ -321,6 +322,8 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
         meta.secrets = w.secrets;
         for (const rel of w.secrets) copyRel(w.top, join(d, "include"), rel);
         meta.fingerprint = fingerprint(w.top);
+        // Its block of ports here: the far side gives the worktree its own and swaps these numbers for those.
+        meta.ports = heldPorts(w.top);
       }
       wts.push(meta);
     });
@@ -347,7 +350,7 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
     writeJson(join(stage, "move.json"), move);
     const t = spawnSync("tar", ["-czf", path, "-C", stage, "."], { encoding: "utf8", maxBuffer: 1 << 26 });
     if (t.status !== 0) refuse("failed", `tar could not write the archive: ${(t.stderr || t.error?.message || "").trim()}`);
-    store.writeHomeFile(h, "move-out", { id, archive: path, running, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
+    store.writeHomeFile(h, "move-out", { id, archive: path, running, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, main: w.main, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
     const buf = readFileSync(path);
     return { path, bytes: buf.length, sha256: sha256(buf), running };
   } catch (e) {
@@ -468,7 +471,7 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
   const back = homeExists(h) && movedAway(h) ? store.readHomeFile(h, "moved") : null;
   if (homeExists(h) && !back) { rmSync(work, { recursive: true, force: true }); refuse("exists", `a live chat ${h} is here already`); }
 
-  const made = { home: null, oldHome: null, worktrees: [], branches: [], clones: [], sessions: [], replaced: [], reused: [] };
+  const made = { home: null, oldHome: null, worktrees: [], branches: [], clones: [], sessions: [], replaced: [], reused: [], ports: [] };
   const notes = [];
   try {
     // Plan each worktree first, so a clash leaves nothing made but the clones.
@@ -531,6 +534,18 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
       }
     }
 
+    // Each worktree's own block of ports here, as a new task's gets one (when the manifest uses {port}): the source's
+    // numbers may be taken on this machine. Old number -> new, for the launch files below.
+    const portMap = new Map();
+    for (const p of plans) {
+      if (p.how === "main") continue;
+      const had = heldPorts(p.top);
+      p.ports = checkoutFacts(p.top)?.ports ?? null;
+      if (p.ports && !had) made.ports.push(p.top);
+      const old = p.w.ports;
+      if (old && p.ports && old.base !== p.ports.base) for (let k = 0; k < Math.min(old.size, p.ports.size); k++) portMap.set(old.base + k, p.ports.base + k);
+    }
+
     // The home, every path rewritten from the source's to this machine's.
     const f = move.from;
     const pairs = [[f.store, store.home()], [f.homeDir, store.homeDir(h)], [f.claude, dirname(claudeProjects())], [f.codex, dirname(codexSessions())]];
@@ -552,6 +567,10 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
     for (const a of agentsOf(h)) {
       const wd = join(store.homeDir(h), "workers", a.wid);
       for (const n of ["claude-launch.json", "codex-launch.json", "host-env.sh"]) if (existsSync(join(wd, n))) rewriteFile(join(wd, n), rwLaunch);
+      for (const n of LAUNCH_FILES) if (portMap.size && existsSync(join(wd, n))) rewriteFile(join(wd, n), (s) => swapPorts(s, portMap));
+      const cwd = a.cwd ? rwLaunch(a.cwd) : null;
+      const own = cwd && plans.find((p) => p.ports && inside(cwd, p.top));
+      if (own) setPortLines(join(wd, "host-env.sh"), own.ports);
       fixLaunchBins(wd);
       const rec = readJson(join(wd, "agent.json"));
       if (rec) writeJson(join(wd, "agent.json"), { ...rec, state: rec.state === "stopped" ? "stopped" : "parked", parkedAt: Date.now(), pid: null, host: null, serverSock: null, terminal: null, at: Date.now() });
@@ -590,9 +609,9 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
     // The running host takes the home as it is on disk now (an agent it held before, from a home that moved away, too).
     await host("adopt", { refs }, { start: false });
     if (setup) {
-      const { checkoutFacts, startSetup } = await import("./runtime.mjs");
+      const { startSetup } = await import("./runtime.mjs");
       const { BIN } = await import("./session.mjs");
-      for (const p of plans) if (p.how !== "main") { try { checkoutFacts(p.top); startSetup(p.top, { bin: BIN }); } catch {} }
+      for (const p of plans) if (p.how !== "main") { try { startSetup(p.top, { bin: BIN }); } catch {} }
     }
     rmSync(x, { recursive: true, force: true });
     return { home: h, refs, notes };
@@ -601,6 +620,27 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
     rmSync(work, { recursive: true, force: true });
     throw e;
   }
+}
+
+const LAUNCH_FILES = ["claude-launch.json", "codex-launch.json", "host-env.sh", "launch.sh"];
+
+/** `s` with each whole number that `map` names swapped for its new one. */
+const swapPorts = (s, map) => s.replace(/(?<![0-9])[0-9]{2,5}(?![0-9])/g, (m) => String(map.get(Number(m)) ?? m));
+
+/** The port lines of a worker's host-env.sh (launchLines writes them) set to `ports`, added when it has none. */
+function setPortLines(file, ports) {
+  let s;
+  try { s = readFileSync(file, "utf8"); } catch { return; }
+  const want = { ROLLCALL_PORT: String(ports.base), ROLLCALL_PORT_COUNT: String(ports.size) };
+  const ls = s.replace(/\n$/, "").split("\n");
+  for (const [k, v] of Object.entries(want)) {
+    const line = `export ${k}=${q(v)}`;
+    const at = ls.findIndex((l) => l.startsWith(`export ${k}=`));
+    if (at >= 0) ls[at] = line;
+    else { const after = ls.findIndex((l) => l.startsWith("export ROLLCALL_WORKTREE=")); if (after < 0) return; ls.splice(after + 1, 0, line); }
+  }
+  const t = `${ls.join("\n")}\n`;
+  if (t !== s) writeFileSync(file, t);
 }
 
 /** A session file about to be replaced (a chat coming back finds its old copy): kept, so discard can put it back. */
@@ -629,6 +669,7 @@ function undoMade(h, made) {
   for (const s of made.sessions ?? []) { rmSync(s, { recursive: true, force: true }); removed.sessions.push(s); }
   for (const r of made.replaced ?? []) { if (existsSync(r.kept)) { mkdirSync(dirname(r.path), { recursive: true }); cpSync(r.kept, r.path, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true }); } }
   for (const w of made.worktrees ?? []) { if (gitOk(w.main, ["worktree", "remove", "--force", w.path]) || !existsSync(w.path)) removed.worktrees.push(w.path); }
+  for (const p of made.ports ?? []) releasePorts(p);
   for (const b of made.branches ?? []) { if (gitOk(b.main, ["branch", "-D", b.branch])) removed.branches.push(b.branch); }
   for (const c of made.clones ?? []) { rmSync(c, { recursive: true, force: true }); removed.clones.push(c); }
   const hd = store.homeDir(h);
@@ -642,7 +683,7 @@ function undoMade(h, made) {
 
 // ---------------------------------------------------------------- after
 
-/** `chat.move.finish`: marks the home moved away; its agents stay parked and its worktrees on disk. */
+/** `chat.move.finish`: marks the home moved away; its agents stay parked and its worktrees on disk, their ports given back. */
 export async function finish({ home: h, to }) {
   if (!homeExists(h)) refuse("not-found", `no chat ${h}`);
   const out = store.readHomeFile(h, "move-out");
@@ -654,6 +695,8 @@ export async function finish({ home: h, to }) {
   store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, heldPacked: out.heldPacked ?? 0, worktrees: out.worktrees ?? [] });
   if (store.readHomeFile(h, "chat")) { const { updateChat } = await import("./host/chat.mjs"); updateChat(h, (c) => { c.movedTo = movedTo; c.movedAt = movedAt; return true; }); }
   store.writeHomeFile(h, "move-out", null);
+  // The worktrees' blocks of ports go back to the pool: the chat runs there now (a chat coming back gets new ones).
+  for (const w of out.worktrees ?? []) if (!w.main && w.path) releasePorts(w.path);
   store.pokeWatcher(h);
   // Words held after the archive was written did not travel: the front end forwards them.
   return { home: h, movedTo, movedAt, held: heldOf(h).slice(out.heldPacked ?? 0) };
