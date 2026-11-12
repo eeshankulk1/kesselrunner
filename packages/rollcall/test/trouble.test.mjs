@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { deleteList, sweepLeftovers } from "../src/leftovers.mjs";
 import * as store from "../src/store.mjs";
-import { assess, clock, closeBlocker, lines, look, openBlocker, openBlockers, resetAt, waitLabel } from "../src/trouble.mjs";
+import { SPOTLIGHT_FIX, assess, clock, closeBlocker, lines, look, openBlocker, openBlockers, resetAt, waitLabel } from "../src/trouble.mjs";
 import { BIN, cleanEnv, sandbox, until, write } from "./helpers.mjs";
 
 const PDT = (d, h, m = 0) => Date.UTC(2026, 9, d, h + 7, m);
@@ -39,6 +39,11 @@ test("assess: what the machine's facts open and close", () => {
     [{ memoryPct: 8 }, {}, [{ kind: "memory", pct: 8 }], []],
     [{ memoryPct: 15 }, { memory: {} }, [], []],
     [{ memoryPct: 25 }, { memory: {} }, [], ["memory"]],
+    // Spotlight read-only is its own cause: the disk having room again does not close it, only mdutil saying so.
+    [{ spotlightReadOnly: true }, {}, [{ kind: "spotlight" }], []],
+    [{ spotlightReadOnly: true, diskGb: 40 }, { spotlight: {} }, [], []],
+    [{ spotlightReadOnly: null }, { spotlight: {} }, [], []],
+    [{ spotlightReadOnly: false }, { spotlight: {} }, [], ["spotlight"]],
   ];
   for (const [facts, open, want, gone] of rows) assert.deepEqual(assess(facts, open, NOW), { want, gone }, JSON.stringify([facts, open]));
   assert.deepEqual(assess({}, {}, NOW), { want: [], gone: [] }, "a machine that says nothing changes nothing");
@@ -111,6 +116,21 @@ test("a cause is one notice however many look, and one that comes back soon is n
   m.setFacts({ power: { on: "battery", pct: 9 } });
   next();
   assert.equal(m.notes().length, 2, "later, it is news again");
+});
+
+test("Spotlight gone read-only is one notice with the command that fixes it, and closes once mdutil says it is back", (t) => {
+  const m = machine(t);
+  m.setFacts({ spotlightReadOnly: true, diskGb: 40 });
+  look(later());
+  look(later());
+  assert.equal(m.notes().length, 1);
+  assert.equal(m.notes()[0].title, "rollcall: Spotlight");
+  assert.ok(m.notes()[0].text.includes(SPOTLIGHT_FIX), m.notes()[0].text);
+  assert.deepEqual(lines(at), [`Spotlight read-only, Cmd-Space misses apps: ${SPOTLIGHT_FIX}`]);
+  m.setFacts({ spotlightReadOnly: false, diskGb: 40 });
+  look(later());
+  assert.deepEqual(openBlockers(), {});
+  assert.equal(m.notes().length, 1, "back: nothing to say");
 });
 
 test("a usage limit's notice names the reset and how to clear it, once over both a worker's hook and a supervisor's", (t) => {

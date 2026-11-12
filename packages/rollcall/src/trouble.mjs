@@ -1,5 +1,5 @@
 // What stops work on this Mac or this account, as one record per cause (a blocker), however many workers it stops:
-// a usage limit, GitHub billing, a full disk, the Mac on battery, memory running out. Each home's watcher looks here,
+// a usage limit, GitHub billing, a full disk, the Mac on battery, memory running out, Spotlight's index stuck read-only. Each home's watcher looks here,
 // and whichever looks first in a minute reads the machine, so the owner hears of each cause once, not once per
 // worker. A worker waits on a blocker by name (`rollcall task wait-for`, or its hooks at a usage limit) and is
 // brought back when the blocker closes: by itself when rollcall can see the cause is gone (a reset time passed, the
@@ -39,7 +39,15 @@ const PROBE_SETTLE_MS = 60_000;
 
 /** The causes a worker can wait on by name (`usage` comes from its own hooks). */
 export const WAITABLE = ["disk", "power", "billing"];
-export const NAMES = { usage: "the usage limit", "usage-codex": "Codex's usage limit", billing: "GitHub billing", disk: "disk space", power: "power", memory: "memory" };
+export const NAMES = { usage: "the usage limit", "usage-codex": "Codex's usage limit", billing: "GitHub billing", disk: "disk space", power: "power", memory: "memory", spotlight: "Spotlight" };
+/** Every kind `rollcall blockers clear` takes. */
+export const KINDS = Object.keys(NAMES);
+
+/**
+ * What brings back a Spotlight index that went read-only. mds marks its index read-only when the disk runs low and
+ * keeps it so after space returns, while it runs: `mdutil -E /` alone leaves the old one, so mds restarts first.
+ */
+export const SPOTLIGHT_FIX = "sudo killall mds; sleep 5; sudo mdutil -i on / && sudo mdutil -E /System/Volumes/Data";
 
 const appleString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 /** `tag`: what a front end acts on beside the words, for a notice about one item (`{ kind, ref, held }`, away.mjs). */
@@ -74,10 +82,18 @@ function memoryPct() {
   return r.status === 0 && Number.isFinite(v) && v > 0 ? v : null;
 }
 
-/** { diskGb, power, memoryPct }; ROLLCALL_MACHINE_FACTS names a JSON file that stands in for them (the tests'). */
+/** Whether Spotlight's index is read-only on the startup disk (macOS), or null where mdutil cannot say. */
+function spotlightReadOnly() {
+  const r = spawnSync("mdutil", ["-s", "/", "/System/Volumes/Data"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
+  const out = r.stdout ?? "";
+  if (/Index is read-only/i.test(out)) return true;
+  return /Indexing (enabled|disabled)/i.test(out) ? false : null;
+}
+
+/** { diskGb, power, memoryPct, spotlightReadOnly }; ROLLCALL_MACHINE_FACTS names a JSON file that stands in for them (the tests'). */
 function machineFacts() {
   const fake = process.env.ROLLCALL_MACHINE_FACTS;
-  if (fake === undefined) return { diskGb: diskGb(), power: power(), memoryPct: memoryPct() };
+  if (fake === undefined) return { diskGb: diskGb(), power: power(), memoryPct: memoryPct(), spotlightReadOnly: spotlightReadOnly() };
   try { return JSON.parse(readFileSync(fake, "utf8")); } catch { return {}; }
 }
 
@@ -142,6 +158,9 @@ export function assess(f, open, now) {
     if (f.memoryPct <= MEMORY_LOW) want.push({ kind: "memory", pct: f.memoryPct });
     else if (open.memory && f.memoryPct >= MEMORY_OK) gone.push("memory");
   }
+  // Spotlight stays read-only after the disk has room again, so it is a cause of its own, closed only by mdutil's word.
+  if (f.spotlightReadOnly === true) { if (!open.spotlight) want.push({ kind: "spotlight" }); }
+  else if (f.spotlightReadOnly === false && open.spotlight) gone.push("spotlight");
   for (const k of USAGE_KINDS) if (open[k] && now >= (open[k].until ?? open[k].since + retryMs()) + graceMs()) gone.push(k);
   return { want, gone };
 }
@@ -234,6 +253,7 @@ function notice(b, now) {
   if (isUsage(b.kind)) return `${(b.text ?? (b.kind === "usage" ? "Claude's usage limit stopped your workers" : "Codex's usage limit stopped its workers")).replace(/\.?$/, ".")} ${b.until ? `rollcall resumes them after ${clock(b.until, now)}.` : `rollcall tries them again every ${Math.round(retryMs() / 60_000)} minutes.`} ${CLEAR(b.kind)}`;
   if (b.kind === "billing") return `GitHub would not start jobs over billing${b.text ? `: "${store.clip(b.text, 200)}"` : ""}. Fix it under Billing and plans on GitHub${b.run ? `: rollcall retries by itself, and what waits on it goes on. ${CLEAR("billing")}` : ", then run rollcall blockers clear billing."}`;
   if (b.kind === "memory") return `Memory is low (${b.pct}% free). rollcall closed the test browsers nothing uses; anything that ran out comes back by itself.`;
+  if (b.kind === "spotlight") return `Spotlight's index went read-only, which macOS does when the disk runs low and keeps after space returns, so Cmd-Space stops finding apps (Cockpit among them). Run this in Terminal, with your password: ${SPOTLIGHT_FIX}. Spotlight then rebuilds its index, and rollcall sees it is back.`;
   if (b.kind === "power") return `The Mac is on battery${b.pct ? ` at ${b.pct}%` : ""}${b.shipping ? " with a ship running: a sleep stalls it until it wakes" : ""}. Plug it in, and what waits on power goes on.`;
   return `${NAMES[b.kind]} stopped work.`;
 }
@@ -286,6 +306,7 @@ export function lines(now = Date.now()) {
     if (isUsage(b.kind)) return b.until ? `${b.kind === "usage" ? "" : "Codex "}usage limit: workers resume after ${clock(b.until, now)}` : "usage limit: rollcall tries again shortly";
     if (b.kind === "disk") return `disk: ${b.gb ?? "?"} GB free${b.total ? `, rollcall clean lists ${b.total} it can free` : ""}`;
     if (b.kind === "billing") return b.run ? "GitHub billing refuses jobs: rollcall retries by itself" : "GitHub billing refuses jobs: rollcall blockers clear billing once fixed";
+    if (b.kind === "spotlight") return `Spotlight read-only, Cmd-Space misses apps: ${SPOTLIGHT_FIX}`;
     if (b.kind === "power") return `on battery${b.pct ? ` at ${b.pct}%` : ""}: plug in the Mac`;
     return `memory low: ${b.pct}% free`;
   });

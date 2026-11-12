@@ -28,7 +28,7 @@ import * as store from "./store.mjs";
 import { allowAll, answerHeld, awayState, heldView, setAway } from "./away.mjs";
 import { ensureWatcher, holderOf, homeOf, idOf, label, pickName, releaseHome, takeHome, taskEnv, workerState } from "./supervisor.mjs";
 import { isOpen } from "./state.mjs";
-import { closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs";
+import { KINDS, closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs";
 import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskCommand, visibleTasks } from "./task.mjs";
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
@@ -751,7 +751,7 @@ function away(args) {
 function blockers(args) {
   if (args[0] === "clear") {
     const kind = args[1];
-    if (!kind) fail("usage: rollcall blockers clear <usage|billing|disk|power|memory>");
+    if (!kind) fail(`usage: rollcall blockers clear <${KINDS.join("|")}>`);
     say(closeBlocker(kind) ? `rollcall: ${kind} cleared; what waited on it goes on. If the cause is still there, the blocker opens again.` : `rollcall: nothing open for ${kind}`);
     return 0;
   }
