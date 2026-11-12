@@ -55,6 +55,8 @@ What the supervisor and its workers do on their own:
 | `/update-tests <what changed>` | Bring tests in line with implementation changes (the test-updater agent) |
 | `/frontend-test <what changed>` | Check UI changes in a real browser |
 | `/ios-sim <what changed>` | Check an iOS app in the simulator: the ios-driver agent taps through the changed flows and returns screenshots |
+| `/prod-read <question>` | Read the live system without changing it (service status, deploys, logs, variable names, read-only queries) through the prod-reader agent, from the project's manifest `production` block |
+| `/browser <task>` | Work in a browser that is not testing your own app (vendor setup, a dashboard, a form) through the browser-operator agent |
 | `/ship-ios-build` | iOS verify, then a TestFlight upload (a project's own ship skill takes precedence) |
 | `/recap <project> [window]` | What happened recently, from memory, worklog and git/PR history |
 | `/note <project> <text>` | Save a discovery, gotcha, decision or idea for future sessions |
@@ -118,7 +120,7 @@ Set these under `env` in `~/.claude/settings.json`, so the supervisor and its wo
 
 ## Running the helper agents on Codex
 
-The named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, deploy-watcher) normally run as Claude subagents. With a Codex plan, `kesselrunner delegate codex` runs them there instead: Claude Code keeps orchestrating, each worker runs as a non-interactive `codex exec` in the repo with the same instructions and returns the same report, and your Claude usage drops to the orchestration. ios-driver always stays on Claude: it needs the iOS simulator, which a Codex worker cannot reach. Needs a logged-in Codex CLI (the ChatGPT desktop app's bundled one is found; `npm i -g @openai/codex` also works). How it works and what Codex workers lack: [codex-parity.md](codex-parity.md).
+The named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, deploy-watcher, and the helpers code-scout, web-researcher, prod-reader, browser-operator) normally run as Claude subagents. With a Codex plan, `kesselrunner delegate codex` runs them there instead: Claude Code keeps orchestrating, each worker runs as a non-interactive `codex exec` in the repo with the same instructions and returns the same report, and your Claude usage drops to the orchestration. ios-driver always stays on Claude: it needs the iOS simulator, which a Codex worker cannot reach. Needs a logged-in Codex CLI (the ChatGPT desktop app's bundled one is found; `npm i -g @openai/codex` also works). One agent can move alone: `backend: codex` in its frontmatter runs it on Codex while the rest stay on Claude (`backend: claude` pins one to Claude). How it works and what Codex workers lack: [codex-parity.md](codex-parity.md).
 
 | Command | Does |
 |---|---|
@@ -175,8 +177,9 @@ CI (`.github/workflows/check.yml`) runs every suite below except the mods on eac
 | `bash test/sandbox.sh` | End-to-end install and sync in a throwaway HOME, with a fixture overlay rule and guard (needs network: installs docsic) |
 | `bash test/delegate.sh` | Offline check of the Codex delegation (fake Codex binary) |
 | `node --test test/rules.test.mjs` | `kesselrunner rules` in a throwaway HOME: on, off, the `CLAUDE.md` block before and after, an overlay rule winning over a core one, and what it refuses |
-| `node --test test/hooks.test.mjs` | The per-event hook entries: fixture guards in a throwaway overlay (order, override, the matcher built from their tools), rollcall answering for edits, deploy-watch for merges |
+| `node --test test/hooks.test.mjs` | The per-event hook entries: fixture guards in a throwaway overlay (order, override, the matcher built from their tools) and the core's `agent-model` guard, rollcall answering for edits, deploy-watch for merges |
 | `node --test test/supervisor.test.mjs` | The supervisor on a real tmux server (private socket) with a fake `claude`: the start, `@t3` and picks typed in, resume after a kill or a lost tmux server, `--fresh`, the worker's questions, the watcher, the status line and notifications, a supervisor handing over, and a scripted front-end client beside the Falcon (needs tmux; offline) |
 | `node --test test/ios-sim.test.mjs` | iosim's accessibility listing, element matching, simulator naming and install's checksum refusal (no simulator needed) |
+| `node --test test/prod-read.test.mjs` | `scripts/prod-read/read.mjs` with fake `railway` and `vercel` binaries: the commands each builds, variable names only, the redactor and output cap, usage errors |
 | `npm test --prefix packages/rollcall` | rollcall's suites on throwaway git repos, then its hook-latency bench |
 | `claude plugin validate . && claude plugin test mods/<name>` | The marketplace file and a mod's hooks module as the engine reads them, then the mod's tests (rollcall and `gh` faked; no session, no login) |
