@@ -146,6 +146,15 @@ function hostedAgent(x, what) {
   return rec;
 }
 
+/** One step of a chat move (move.mjs), its refusals as the API's. */
+async function moveStep(verb, payload) {
+  const move = await import("./move.mjs");
+  try { return await move[verb](payload); } catch (e) {
+    if (e instanceof move.MoveError) refuse(e.code, e.message, e.extra);
+    throw e;
+  }
+}
+
 // ---------------------------------------------------------------- the actions
 
 /**
@@ -375,6 +384,23 @@ export const ACTIONS = {
       return { results: searchChats(query, { limit: p.limit ?? 30 }) };
     },
   },
+
+  // Moving a chat between this machine and another (move.mjs): the source checks, packs, then finishes (or undoes a
+  // failed move); the target unpacks, resumes (or discards). Each answers once its step is done.
+  "chat.move.check": { cli: "rollcall chat move check", repeatable: true, run: (p) => moveStep("check", { home: homeOf(p) }) },
+  "chat.move.pack": { cli: "rollcall chat move pack", run: (p) => moveStep("pack", { home: homeOf(p) }) },
+  "chat.move.unpack": {
+    cli: "rollcall chat move unpack",
+    run(p) {
+      const path = str(p, "path", { max: 4096 });
+      if (!path.startsWith("/")) refuse("bad-payload", "path is an absolute path");
+      return moveStep("unpack", { path, from: str(p, "from", { required: false, max: 100 }), sha256: str(p, "sha256", { required: false, max: 64 }) });
+    },
+  },
+  "chat.move.finish": { cli: "rollcall chat move finish", run: (p) => moveStep("finish", { home: homeOf(p), to: str(p, "to", { required: false, max: 100 }) }) },
+  "chat.move.resume": { cli: "rollcall chat move resume", run: (p) => moveStep("resume", { home: homeOf(p), here: str(p, "here", { required: false, max: 100 }) }) },
+  "chat.move.undo": { cli: "rollcall chat move undo", run: (p) => moveStep("undo", { home: homeOf(p) }) },
+  "chat.move.discard": { cli: "rollcall chat move discard", run: (p) => moveStep("discard", { home: homeOf(p) }) },
 
   // Ends a hosted crew: its workers and its supervisor stop, their sessions saved.
   "supervisor.end": {

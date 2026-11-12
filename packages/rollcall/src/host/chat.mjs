@@ -494,7 +494,7 @@ function crewChat(h, a = agentRecord(h, null)) {
 const busyOf = (a) => (a?.requests > 0 ? "waiting" : a?.state === "running" || a?.state === "terminal" ? "working" : null);
 
 /** Every hosted home, as search sees them. */
-const hostedHomes = () => store.listHomes().filter((h) => runtimeOf(h) === "host");
+const hostedHomes = () => store.listHomes().filter((h) => runtimeOf(h) === "host" && !store.readHomeFile(h, "moved"));
 
 /** The plain text of a history item the search reads: the owner's words and the agent's replies, no tool output. */
 const searchable = (item) => (item && (item.kind === "user" || item.kind === "assistant") && typeof item.text === "string" ? item.text : null);
