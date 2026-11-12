@@ -8,30 +8,21 @@
 // goes into the task's worker as a notice, and to a session with no task through `rollcall ship wait`.
 //   q.entries[<pr>] (queue.mjs) with state "checking": { ..., ship: true, land, since, rerun: { head, at }, ownerOk }
 //   q.after[<pr>] = { pr, branch, sha, task, session, who, checkout, stage: deploys|release|done, step, at, pid, start, lines }
-import { existsSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { enqueue } from "./delivery.mjs";
 import { defaultBranch, dirtyPaths, fetchSync, gitSync, locate, mainCheckout, repoKey, resolveRef, safeName } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
+import { AGAIN, ENDS, SHIP_USAGE, shipNews } from "./ship-news.mjs";
 import { blockOnBilling, billingRefusal, clear, ensureTree, rerun, runIn, trouble } from "./lander.mjs";
-import { pidAlive, sameProcess, spawnDetached, startOf } from "./proc.mjs";
+import { pidAlive, sameProcess, startOf } from "./proc.mjs";
 import { changedFiles, checksOf, ensureLander, entryNews, finishEntry, gh, guard, isStatus, manifestAt, prLook, span } from "./queue.mjs";
-import { BIN, P, ago, fileList, msgLine, short, who } from "./session.mjs";
+import { P, ago, fileList, msgLine, short, who } from "./session.mjs";
 import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import { queueState, shipStage, taskAt } from "./task.mjs";
 import { prThreads, threadLine } from "./threads.mjs";
 
-export const USAGE = `  rollcall ship start [--land] [--owner-ok "<their words>"]
-                                         once the PR is open and pushed: rollcall watches its checks from here, with
-                                         no agent waiting. --land: once green with no open review thread, it joins
-                                         the merge queue, lands, and rollcall watches the deploys and runs the
-                                         manifest's release commands. A red check, a thread, a conflict or a failed
-                                         release step comes back to the task's worker (or ship wait) with what failed
-  rollcall ship wait [--timeout <min>]   block until this branch's ship needs you or is done, then print the line;
-                                         run it in the background in a session with no task
-  rollcall ship status [--json]          this branch's ship: its stage, how long, the last news`;
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 const POLL_MS = () => ms("ROLLCALL_QUEUE_POLL_MS", 20_000);
@@ -48,30 +39,8 @@ const NONE_MS = () => ms("ROLLCALL_SHIP_NONE_MS", 120_000);
 /** A release command runs at most this long. */
 const RELEASE_MS = 3 * 3600_000;
 
-/** What a ship's session does next after it was sent back: the fix, then the ship again. */
-export const AGAIN = "then rollcall ship start --land again (it watches the checks and joins the queue once they are green)";
 
 // ---------------------------------------------------------------- news
-
-/**
- * The kinds of news that end a ship's `ship wait`: each needs a model turn, or ends the ship. "landed" does not,
- * when an after-merge runner carries on from it.
- */
-const ENDS = new Set(["red", "review", "conflict", "failed", "left", "parked", "green", "after-failed", "release-step", "shipped"]);
-/** The kinds that need a model turn: they go into the task's worker as a notice. */
-const WAKES = new Set(["red", "review", "conflict", "failed", "left", "after-failed", "release-step"]);
-
-/**
- * News about ship entry `e` reaches whoever acts on it with no model turn spent on news: kinds that need one go into
- * the task's worker as a notice (a parked worker comes back for it), and the task's record and tab follow.
- */
-export function shipNews(e, kind, text) {
-  if (!e.task || !WAKES.has(kind)) return;
-  const [h, id] = e.task.split(":");
-  const t = store.readTask(h, id);
-  if (!isOpen(t)) return;
-  enqueue(t, "notice", `${P} ship: ${text}`);
-}
 
 /** Records an after-merge outcome: the queue's outcomes (ship wait reads them), an event, the task. */
 function afterOutcome(key, a, kind, text) {
@@ -236,19 +205,6 @@ export function ciLine(cwd, pr, text) {
 
 // ---------------------------------------------------------------- after the merge
 
-/** Starts the after-merge runner for landed ship entry `e` (merge commit `sha`). */
-export function startAfter(key, e, sha) {
-  store.updateQueue(key, (q) => {
-    q.after ??= {};
-    for (const [pr, a] of Object.entries(q.after)) if (a.stage === "done" && Date.now() - a.at > 7 * 86400_000) delete q.after[pr];
-    q.after[e.pr] = { pr: e.pr, branch: e.branch, sha: sha ?? null, task: e.task ?? null, session: e.session ?? null, who: e.who ?? null, checkout: e.checkout ?? null, stage: "deploys", step: null, at: Date.now(), pid: null, start: null };
-  });
-  if (process.env.ROLLCALL_SHIP_AFTER === "0") return;
-  const info = e.checkout && existsSync(e.checkout) ? locate(e.checkout) : null;
-  const main = info ? mainCheckout(info) : null;
-  if (main) spawnDetached(process.execPath, [BIN, "-C", main, "ship", "after", String(e.pr)], { cwd: main });
-}
-
 /** gh api in `cwd` as JSON, or null. */
 const api = (cwd, path) => { const r = gh(cwd, ["api", path]); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
 
@@ -402,8 +358,8 @@ export async function shipCommand(args, ctx) {
     case "wait": return await wait(rest, ctx);
     case "status": return status(rest, ctx);
     case "after": { const n = Number(rest[0]); if (!n) ctx.fail("ship after <pr>"); return await after(here(ctx), n); }
-    case undefined: case "-h": case "--help": case "help": ctx.say(USAGE); return 0;
-    default: ctx.fail(`ship: unknown command "${sub}"\n${USAGE}`);
+    case undefined: case "-h": case "--help": case "help": ctx.say(SHIP_USAGE); return 0;
+    default: ctx.fail(`ship: unknown command "${sub}"\n${SHIP_USAGE}`);
   }
   return 1;
 }

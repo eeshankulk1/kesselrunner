@@ -24,7 +24,7 @@ import { BIN, P, ago, fileList, isAlive, msgLine, short, who } from "./session.m
 import * as store from "./store.mjs";
 import { queueState, taskAt } from "./task.mjs";
 import { prThreads, threadLine } from "./threads.mjs";
-import { AGAIN, shipNews, startAfter } from "./ship.mjs";
+import { AGAIN, shipNews, startAfter } from "./ship-news.mjs";
 
 export const USAGE = `  rollcall queue add [--owner-ok "<their words>"]
                                          join the merge queue with this branch's PR, once it is open, pushed, green
