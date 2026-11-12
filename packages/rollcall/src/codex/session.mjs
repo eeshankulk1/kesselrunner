@@ -221,6 +221,7 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
   let turnTotals = null; // its totals when the running turn started
   let nextModel = cfg.model ?? null; // a model set from a front end, for the next turn rollcall starts
   let nextPolicy = null; // a chat's mode set from a front end: its approval policy and sandbox, for the next turn
+  let nextEffort = null; // an effort set from a front end, for the next turn rollcall starts
   let conn;
 
   // ---- the journal
@@ -485,9 +486,11 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
         try {
           if (turnId) await conn.request("turn/steer", { threadId: s.thread, expectedTurnId: turnId, input, clientUserMessageId: cid }, 5000);
           else {
-            await conn.request("turn/start", { threadId: s.thread, input, clientUserMessageId: cid, ...(nextModel ? { model: nextModel } : {}), ...(nextPolicy ?? {}), ...(effort ? { effort } : {}) }, 5000);
-            nextModel = null; // a turn's model and mode last for the turns after it
+            const e = nextEffort ?? effort;
+            await conn.request("turn/start", { threadId: s.thread, input, clientUserMessageId: cid, ...(nextModel ? { model: nextModel } : {}), ...(nextPolicy ?? {}), ...(e ? { effort: e } : {}) }, 5000);
+            nextModel = null; // a turn's model, mode and effort last for the turns after it
             nextPolicy = null;
+            nextEffort = null;
           }
           return { how, uuid: cid };
         } catch (e) { if (i) throw e; }
@@ -502,6 +505,8 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
     },
     /** From the next turn rollcall starts, and for every resume after. */
     setModel(model) { nextModel = model; rememberLaunch({ model }); return Promise.resolve({}); },
+    /** The reasoning effort, from the next turn rollcall starts, and for every resume after (null: the model's default). */
+    setEffort(effort) { nextEffort = effort ?? null; rememberLaunch({ effort: effort ?? null }); return Promise.resolve({}); },
     /**
      * A chat's mode (host/chat.mjs CODEX_MODES), from the next turn rollcall starts (a running turn keeps the one it
      * started with), and for every resume after.

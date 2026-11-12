@@ -49,6 +49,5 @@ export function workerAdapter(t) {
   return s && !s.endedAt ? adapter(sessionHarness(s)) : adapter(harnessOf(t));
 }
 
-/** The efforts both harnesses take, lowest first. A worker's effort means the same on either. */
-export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-export const effortOk = (e) => EFFORTS.includes(e);
+/** Claude Code's efforts, lowest first. Each harness checks against its own list (efforts.mjs effortsOf). */
+export { CLAUDE_EFFORTS as EFFORTS, effortOk, effortsOf } from "./efforts.mjs";

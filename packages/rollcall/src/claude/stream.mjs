@@ -294,6 +294,8 @@ export function startClaude({ cfg, resume, envFile = null, env = process.env, on
     interrupt: () => control({ subtype: "interrupt" }),
     setModel: (model) => control({ subtype: "set_model", model }),
     setMode: (mode) => control({ subtype: "set_permission_mode", mode }),
+    /** The session's effort (null: its default), as /effort sets it; Claude Code keeps `max` for this session only. */
+    setEffort: (effort) => control({ subtype: "apply_flag_settings", settings: { effortLevel: effort ?? null } }),
     /** Closes its input: Claude Code finishes what runs and exits. */
     close() { try { child.stdin.end(); } catch {} },
     kill(sig = "SIGTERM") { try { child.kill(sig); } catch {} },

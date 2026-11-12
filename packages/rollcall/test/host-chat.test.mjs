@@ -7,17 +7,19 @@
 // auto mode. A Codex model makes a Codex chat: Codex's own model list, its instructions, its modes (Auto as Codex's
 // auto review) changed mid-chat, task news and its own `rollcall task` commands, as a Claude chat has them.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { BIN, FIXTURES, denied, git, sandbox, until } from "./helpers.mjs";
 import { FAKE, FAKE_CODEX, lines, readJson, setup } from "./host-helpers.mjs";
 import { archiveDue, chatOptions, cleanTitle, draftTitle, renameBranch, slugOf } from "../src/host/chat.mjs";
 import { policyFor, sandboxPolicyOf } from "../src/harness/codex.mjs";
 
 const TITLER = join(FIXTURES, "fake-title.mjs");
+const START = fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
 chmodSync(TITLER, 0o755);
 
 /** A host sandbox whose chats run the stand-in Claude Code and title model. */
@@ -443,4 +445,223 @@ test("chat on Codex: its models, its instructions, Auto, a mode changed mid-chat
   assert.equal(snap.chat.mode, "read-only");
   // A Codex chat in a parked state takes a model of Codex's for its next start.
   assert.equal(x.api("worker.set", { task: h, model: "gpt-fake-pro" }).ok, true);
+});
+
+/** The `--effort` an argv names, or null. */
+const effortArg = (argv = []) => (argv.includes("--effort") ? argv[argv.indexOf("--effort") + 1] : null);
+
+test("chat effort: the host reads Claude Code's models; chat.new and worker.set take a level the model takes, live or for the next start; a model change clamps", async (t) => {
+  const x = chatSetup(t);
+  mkdirSync(x.claudeDir, { recursive: true });
+  writeFileSync(join(x.claudeDir, "settings.json"), JSON.stringify({ effortLevel: "medium" }));
+  await x.startHost();
+  const snapshot = () => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout);
+  const option = (id) => snapshot().chatOptions.models.find((m) => m.id === id);
+  const modelsFile = join(x.sb.home, "_machine", "claude-models.json");
+  // Before a session listed Claude Code's models, every model takes all five; the owner's settings name the default.
+  assert.equal(readJson(modelsFile), null);
+  assert.deepEqual(option("haiku").efforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(option("haiku").defaultEffort, "medium");
+  assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", effort: "huge" }).error.code, "bad-payload");
+
+  const { home: h, chat } = x.newChat({ effort: "xhigh" });
+  assert.equal(chat.effort, "xhigh");
+  const dir = join(x.home(h), "workers", h);
+  const launch = () => readJson(join(dir, "claude-launch.json"));
+  assert.equal(launch().effort, "xhigh");
+  assert.equal(x.chat(h).effort, "xhigh");
+  const run = await until(() => x.fake().find((l) => l.argv?.includes("-p")));
+  assert.equal(effortArg(run.argv), "xhigh", "Claude Code starts on it");
+  // The host read Claude Code's models from that session (initialize), and the options follow them.
+  const kept = await until(() => readJson(modelsFile));
+  assert.ok(x.inputs().some((m) => m.type === "control_request" && m.request?.subtype === "initialize"));
+  assert.deepEqual(kept.models.find((m) => m.id === "haiku"), { id: "haiku", resolved: "claude-haiku-4-5-20251001", label: "Haiku", efforts: [] });
+  assert.deepEqual(option("haiku").efforts, []);
+  assert.equal(option("haiku").defaultEffort, null);
+  assert.deepEqual(option("sonnet").efforts, ["low", "medium", "high", "max"]);
+  const none = x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "haiku", effort: "low" });
+  assert.equal(none.error.code, "bad-payload");
+  assert.match(none.error.message, /haiku takes no effort level/);
+  const lacks = x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "sonnet", effort: "xhigh" });
+  assert.equal(lacks.error.code, "bad-payload");
+  assert.match(lacks.error.message, /effort on sonnet is one of low, medium, high, max/);
+  await until(() => x.chatAgent(h)?.state === "idle");
+  const snapChat = () => snapshot().supervisors.find((s) => s.name === h).chat;
+  assert.equal(snapChat().effort, "xhigh");
+
+  // Live: Claude Code's flag settings, as /effort sets it; the agent, the launch and the chat keep it.
+  const set = x.api("worker.set", { task: h, effort: "high" });
+  assert.equal(set.ok, true, JSON.stringify(set));
+  assert.equal(set.result.set.effort, "high");
+  assert.ok(x.inputs().some((m) => m.type === "control_request" && m.request?.subtype === "apply_flag_settings" && m.request.settings?.effortLevel === "high"));
+  assert.equal(x.fake().filter((l) => "effort" in l).at(-1).effort, "high");
+  assert.equal(x.chatAgent(h).effort, "high");
+  assert.equal(launch().effort, "high");
+  assert.equal(x.chat(h).effort, "high");
+  assert.equal(snapChat().effort, "high");
+  assert.equal(x.api("worker.set", { task: h, effort: "minimal" }).error.code, "bad-payload", "a Codex level");
+
+  // A model change: the level stays when the new model takes it, else the highest it takes below; asked for, it must take it.
+  assert.equal(x.api("worker.set", { task: h, effort: "xhigh" }).ok, true);
+  const down = x.api("worker.set", { task: h, model: "sonnet" });
+  assert.equal(down.ok, true, JSON.stringify(down));
+  assert.deepEqual(down.result.set, { model: "sonnet", effort: "high" });
+  assert.equal(x.fake().filter((l) => "effort" in l).at(-1).effort, "high");
+  assert.deepEqual([launch().model, launch().effort], ["sonnet", "high"]);
+  assert.equal(x.chat(h).effort, "high");
+  const same = x.api("worker.set", { task: h, model: "opus" });
+  assert.deepEqual(same.result.set, { model: "opus" }, "opus takes high: no change");
+  assert.equal(x.api("worker.set", { task: h, model: "sonnet", effort: "xhigh" }).error.code, "bad-payload");
+  assert.equal(x.api("worker.set", { task: h, model: "haiku", effort: "low" }).error.code, "bad-payload");
+  assert.equal(x.chatAgent(h).model, "opus", "a refused pick changes nothing");
+  const toHaiku = x.api("worker.set", { task: h, model: "haiku" });
+  assert.deepEqual(toHaiku.result.set, { model: "haiku", effort: null }, "a model with no levels: none");
+  assert.equal(x.api("worker.set", { task: h, effort: "low" }).error.code, "bad-payload");
+  assert.equal(snapChat().effort, null);
+  assert.equal(x.api("worker.set", { task: h, model: "opus", effort: "medium" }).ok, true);
+
+  // Archived (no process): the launch and the chat take it, nothing goes to Claude Code, and the wake starts on it.
+  await until(() => x.chatAgent(h)?.state === "idle");
+  assert.equal(x.api("chat.archive", { home: h }).ok, true);
+  await until(() => x.chatAgent(h)?.state === "stopped");
+  const sent = x.fake().filter((l) => "effort" in l).length;
+  const parked = x.api("worker.set", { task: h, effort: "low" });
+  assert.equal(parked.ok, true, JSON.stringify(parked));
+  assert.equal(parked.result.set.effort, "low");
+  assert.equal(launch().effort, "low");
+  assert.equal(x.chat(h).effort, "low");
+  assert.equal(x.fake().filter((l) => "effort" in l).length, sent, "nothing sent");
+  assert.equal(snapChat().effort, "low");
+  assert.equal(x.api("worker.set", { task: h, model: "haiku", effort: "low" }).error.code, "bad-payload", "the host checks the model's list there too");
+  assert.equal(x.api("task.tell", { task: h, text: "back again" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: back again"));
+  const resumed = x.fake().filter((l) => l.argv?.includes("--resume")).at(-1)?.argv;
+  assert.equal(effortArg(resumed), "low", (resumed ?? []).join(" "));
+});
+
+test("chat effort: a chat with no pick shows its model's default; Claude Code refusing a level answers failed", async (t) => {
+  const x = chatSetup(t, { FAKE_CLAUDE_REFUSE: "apply_flag_settings" });
+  mkdirSync(x.claudeDir, { recursive: true });
+  writeFileSync(join(x.claudeDir, "settings.json"), JSON.stringify({ effortLevel: "xhigh", modelSettings: { "claude-opus-5-5": { effortLevel: "max" } } }));
+  await x.startHost();
+  const { home: h } = x.newChat();
+  assert.equal(readJson(join(x.home(h), "workers", h, "claude-launch.json")).effort, null, "no pick: Claude Code's own");
+  const run = await until(() => x.fake().find((l) => l.argv?.includes("-p")));
+  assert.equal(effortArg(run.argv), null);
+  await until(() => x.chatAgent(h)?.state === "idle");
+  const snapChat = () => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout).supervisors.find((s) => s.name === h).chat;
+  assert.equal(snapChat().effort, "max", "the settings' level for opus's resolved id");
+  const r = x.api("worker.set", { task: h, effort: "low" });
+  assert.equal(r.error?.code, "failed", JSON.stringify(r));
+  assert.match(r.error.message, /did not take effort low/);
+  assert.equal(x.chat(h).effort, null, "a refused level is not kept");
+  assert.equal(snapChat().effort, "max");
+});
+
+test("chat effort on Codex: its models' own levels, the chat's level at its start, a change from the next turn, a model change clamps", async (t) => {
+  const x = chatSetup(t, { ROLLCALL_CODEX_BIN: FAKE_CODEX, ROLLCALL_CODEX_MODELS: "1" });
+  await x.startHost();
+  const snapshot = () => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout);
+  const main = await until(() => snapshot().chatOptions.models.find((m) => m.id === "gpt-fake-main"));
+  assert.deepEqual([main.efforts, main.defaultEffort], [["minimal", "low", "medium", "high", "xhigh"], "medium"], "Codex's order, its default");
+  const pro = snapshot().chatOptions.models.find((m) => m.id === "gpt-fake-pro");
+  assert.deepEqual([pro.efforts, pro.defaultEffort], [[], null], "a model that lists none");
+  assert.deepEqual(readJson(join(x.sb.home, "_machine", "codex-models.json")).models[0].efforts, ["minimal", "low", "medium", "high", "xhigh"]);
+  assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "gpt-fake-main", effort: "max" }).error.code, "bad-payload", "Codex has no max");
+  assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "gpt-fake-pro", effort: "low" }).error.code, "bad-payload");
+
+  const { home: h } = x.newChat({ model: "gpt-fake-main", mode: "auto", effort: "high", text: "hello codex" });
+  const dir = join(x.home(h), "workers", h);
+  const launch = () => readJson(join(dir, "codex-launch.json"));
+  assert.equal(launch().effort, "high");
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: hello codex"));
+  const ins = () => x.codexFake().filter((l) => l.in).map((l) => l.in);
+  assert.equal(ins().find((m) => m.method === "thread/start").params.config.model_reasoning_effort, "high", "the thread starts on it");
+  const snapChat = () => snapshot().supervisors.find((s) => s.name === h).chat;
+  assert.equal(snapChat().effort, "high");
+  await until(() => x.chatAgent(h)?.state === "idle");
+
+  // A change: from the next turn rollcall starts, and every resume after.
+  assert.equal(x.api("worker.set", { task: h, effort: "max" }).error.code, "bad-payload");
+  const set = x.api("worker.set", { task: h, effort: "minimal" });
+  assert.equal(set.ok, true, JSON.stringify(set));
+  assert.equal(set.result.set.effort, "minimal");
+  assert.equal(launch().effort, "minimal");
+  assert.equal(x.chatAgent(h).effort, "minimal");
+  assert.equal(x.chat(h).effort, "minimal");
+  assert.equal(snapChat().effort, "minimal");
+  const turnFor = (text) => x.codexFake().filter((l) => l.in?.method === "turn/start").map((l) => l.in.params).find((p) => p.input?.[0]?.text === text);
+  assert.equal(x.api("task.tell", { task: h, text: "think less" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: think less"));
+  assert.equal(turnFor("think less").effort, "minimal");
+
+  // A model change clamps: an unlisted model takes the fallback (low, medium, high), so xhigh comes down to high.
+  await until(() => x.chatAgent(h)?.state === "idle");
+  assert.equal(x.api("worker.set", { task: h, effort: "xhigh" }).ok, true);
+  const down = x.api("worker.set", { task: h, model: "gpt-5.6-terra" });
+  assert.equal(down.ok, true, JSON.stringify(down));
+  assert.deepEqual(down.result.set, { model: "gpt-5.6-terra", effort: "high" });
+  assert.equal(x.api("worker.set", { task: h, model: "gpt-fake-pro", effort: "low" }).error.code, "bad-payload");
+  assert.equal(x.api("task.tell", { task: h, text: "on terra" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: on terra"));
+  assert.deepEqual([turnFor("on terra").model, turnFor("on terra").effort], ["gpt-5.6-terra", "high"]);
+  assert.deepEqual([launch().model, launch().effort], ["gpt-5.6-terra", "high"]);
+});
+
+test("worker effort: a hosted task's worker.effort is the host's, changed live; a stopped worker takes a level for its next start", async (t) => {
+  const x = chatSetup(t);
+  const ref = "alpha:t1";
+  const cfg = x.launch({ effort: "high" });
+  x.task({ sessions: [{ id: cfg.session, at: Date.now(), hosted: true }] });
+  await x.startHost();
+  const c = await x.client();
+  assert.equal((await c.call("start", { ref })).ok, true);
+  await c.call("say", { ref, text: "first" });
+  await until(() => x.agent()?.state === "idle");
+  const worker = () => JSON.parse(spawnSync(process.execPath, [BIN, "api", "snapshot"], { env: x.hostEnv, encoding: "utf8" }).stdout).tasks.find((v) => v.ref === ref).worker;
+  assert.equal(worker().effort, "high");
+  const set = x.api("worker.set", { task: ref, effort: "medium" });
+  assert.equal(set.ok, true, JSON.stringify(set));
+  assert.equal(set.result.set.effort, "medium");
+  assert.equal(x.fake().filter((l) => "effort" in l).at(-1).effort, "medium", "Claude Code got it");
+  assert.equal(worker().effort, "medium", "the snapshot shows the live change");
+  assert.equal(readJson(join(x.dir, "claude-launch.json")).effort, "medium");
+  // Stopped: the host takes the level for its next start; a mode lasts only for a running session.
+  await c.call("stop", { ref });
+  await until(() => x.agent()?.state === "stopped");
+  const sent = x.fake().filter((l) => "effort" in l).length;
+  const stopped = x.api("worker.set", { task: ref, effort: "low" });
+  assert.equal(stopped.ok, true, JSON.stringify(stopped));
+  assert.equal(readJson(join(x.dir, "claude-launch.json")).effort, "low");
+  assert.equal(x.fake().filter((l) => "effort" in l).length, sent, "nothing sent");
+  assert.equal(worker().effort, "low");
+  assert.equal(x.api("worker.set", { task: ref, mode: "auto" }).error?.code, "refused");
+});
+
+test("chat effort: a task the chat starts takes its level when it names none, clamped to its model; its own --effort wins", async (t) => {
+  const x = chatSetup(t);
+  await x.startHost();
+  const { home: h } = x.newChat({ effort: "xhigh" });
+  await until(() => readJson(join(x.sb.home, "_machine", "claude-models.json"))); // sonnet takes no xhigh
+  await until(() => x.chatAgent(h)?.state === "idle");
+  const made = (title, ...more) => {
+    const r = spawnSync(process.execPath, [BIN, "task", "new", title, "--home", h, "--repo", x.sb.main, "--json", ...more], { env: x.hostEnv, encoding: "utf8", cwd: x.sb.main });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout).id;
+  };
+  const ids = [made("plain part"), made("own part", "--effort", "low"), made("sonnet part", "--model", "sonnet")];
+  // Their workers start as the owner's word or the watcher would start them (side by side: each waits on its session).
+  const started = (id) => new Promise((done) => {
+    const p = spawn(process.execPath, [START, id, "--home", h], { env: x.hostEnv, cwd: x.sb.main, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.stderr.on("data", (d) => { out += d; });
+    p.on("exit", (code) => done({ code, out }));
+  });
+  for (const r of await Promise.all(ids.map(started))) assert.equal(r.code, 0, r.out);
+  const launched = (id) => readJson(join(x.home(h), "workers", id, "claude-launch.json"));
+  const [plain, own, sonnet] = ids.map(launched);
+  assert.equal(plain.effort, "xhigh", "the chat's level");
+  assert.equal(own.effort, "low", "its own wins");
+  assert.deepEqual([sonnet.model, sonnet.effort], ["sonnet", "high"], "clamped to what sonnet takes");
 });

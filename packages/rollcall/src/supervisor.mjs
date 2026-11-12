@@ -251,11 +251,18 @@ export function workerState(t, now = Date.now()) {
     session: s.id, harness: sessionHarness(s), legacy: false, parked: hosted ? hosted === "parked" : r.held === "parked" && !w?.alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
     stopped: hosted ? hosted === "stopped" : r.held === "stopped", ...(hosted ? { hosted: true, terminal: hosted === "terminal" } : {}),
     bg: idle ? r.turn.bg ?? null : null, last: idle ? r.turn.last ?? null : null,
-    // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones.
-    mode: r.launch?.mode ?? null, model: r.launch?.model ?? null, effort: r.launch?.effort ?? null,
+    // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones. A
+    // hosted worker's effort is the host's word (a front end's worker.set changes it live).
+    mode: r.launch?.mode ?? null, model: r.launch?.model ?? null, effort: liveEffort(t, hosted, r.launch?.effort ?? null),
     // When its Claude Code last started (a resume by Enter in a parked tab ends no turn, so `since` stays old).
     up: r.up, launchedAt: r.launch?.at ?? null, started: r.started,
   };
+}
+
+/** A worker's effort: a hosted one's as the host keeps it (its agent record, a front end's change included), else `launched`. */
+function liveEffort(t, hosted, launched) {
+  const a = hosted ? agentRecord(t.home, t.id) : null;
+  return a && "effort" in a ? a.effort : launched;
 }
 
 /** A hosted session's state: the host's word while it runs, else parked (its process went with it) or stopped. */
@@ -398,7 +405,7 @@ function stillWaits(t, ours) {
  * A worker starts on a model and effort named on its command line, never on whatever `/model` last saved to the
  * owner's settings (harness/claude.mjs). Each harness maps a task's model to one it takes (harness/*.mjs `models`).
  */
-export { EFFORTS, effortOk } from "./harness/index.mjs";
+export { EFFORTS, effortOk, effortsOf } from "./harness/index.mjs";
 export { modelOk, trusted } from "./harness/claude.mjs";
 
 /**
@@ -451,7 +458,7 @@ export function launch(t, { prompt, resume = false, session: pick = null, mode =
   // A v2 worker is a background session the daemon may still run: stopped first, so one conversation has one process.
   if (last && !last.tmux && !last.hosted && !last.endedAt) adapter(last).stopLegacy(last.id);
   model = modelOk(model) ? model : null;
-  effort = effortOk(effort) ? effort : null;
+  effort = effortOk(effort, harness) ? effort : null;
   const { script, session } = a.writeLaunch(t, { prompt, resume, session: pick, mode, name, model, effort, ...(hosted ? { hosted } : {}) });
   rmSync(dialogFlag(t.home, t.id), { force: true });
   launching(t, prompt, { fresh: session !== last?.id });

@@ -131,8 +131,10 @@ its plan's usage limit stops waiting. Earlier sessions keep their harness, so
 
 **Models and effort.** A Claude model name means nothing to Codex. A Codex
 worker uses the task's model only when it is a Codex id (`gpt-5.6-terra`),
-else `ROLLCALL_CODEX_MODEL`, else Codex's own default. Effort names (`low` to
-`max`) mean the same on both; `ROLLCALL_CODEX_EFFORT` is the Codex default.
+else `ROLLCALL_CODEX_MODEL`, else Codex's own default. Each harness takes its
+own effort levels: Claude Code `low` to `max`, Codex `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh` (no `max`), and `task new --effort` checks against
+the task's harness; `ROLLCALL_CODEX_EFFORT` is the Codex default.
 
 **How it runs.** A Codex worker is one process in the task's tmux window:
 `rollcall codex-worker <home> <task>` (`src/codex/worker.mjs`). It starts its

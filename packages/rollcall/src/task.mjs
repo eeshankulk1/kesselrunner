@@ -24,7 +24,7 @@ import { runtimeLines, runtimeOf, spotlightOf } from "./checkout.mjs";
 // The code that changes a checkout's runtime (runtime.mjs, archive.mjs, runtime-cli.mjs) loads only in the commands that
 // use it: every hook imports this module, and each module it loads is time on every tool call.
 const runtime = () => import("./runtime.mjs");
-import { EFFORTS, START, deliverWords, clearCap, closing, effortOk, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
+import { START, deliverWords, clearCap, closing, effortOk, effortsOf, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
 
 const TYPES = ["feat", "fix", "refactor", "test", "docs"];
 /** build: a change that ships; discuss: research and a recommendation the owner talks through (start.mjs briefs each its own way). */
@@ -260,7 +260,7 @@ async function create(args, ctx) {
   const harness = harnessArg === undefined ? defaultHarness() : harnessName(harnessArg);
   if (!harness) ctx.fail(`--harness is one of ${NAMES.join(", ")}`);
   if (model !== undefined && !HARNESSES[harness].models.ok(model)) ctx.fail(harness === "codex" ? `--model on Codex is a Codex model id, like gpt-5.6-terra` : `--model is a model alias or id, like opus, sonnet, opus[1m] or claude-opus-5-5`);
-  if (effort !== undefined && !effortOk(effort)) ctx.fail(`--effort is one of ${EFFORTS.join(", ")}`);
+  if (effort !== undefined && !effortOk(effort, harness)) ctx.fail(`--effort${harness === "codex" ? " on Codex" : ""} is one of ${effortsOf(harness).join(", ")}`);
   if (adopt !== undefined && noWorktree) ctx.fail("--worktree and --no-worktree: pick one");
   if (until !== undefined && until !== "landed") ctx.fail("--until takes one word: landed");
   if (until && !after.length) ctx.fail("--until landed goes with --after <task>");

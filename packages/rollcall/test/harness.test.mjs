@@ -45,7 +45,11 @@ test("models and modes map per harness: a Claude model means nothing on Codex, a
   assert.equal(codex.models.map("gpt-5.6-terra"), "gpt-5.6-terra");
   assert.equal(claude.models.map("gpt-5.6-terra"), null);
   assert.equal(claude.models.map("opus[1m]"), "opus[1m]");
-  assert.deepEqual(codex.modelFor({ model: "opus", effort: "max" }, { ROLLCALL_CODEX_MODEL: "gpt-5.6-luna" }), { model: "gpt-5.6-luna", effort: "max" });
+  assert.deepEqual(codex.modelFor({ model: "opus", effort: "xhigh" }, { ROLLCALL_CODEX_MODEL: "gpt-5.6-luna" }), { model: "gpt-5.6-luna", effort: "xhigh" });
+  // Codex's own levels: no max, but minimal and none.
+  assert.deepEqual(codex.modelFor({ effort: "max" }, {}), { model: null, effort: null });
+  assert.deepEqual(codex.modelFor({ effort: "minimal" }, {}), { model: null, effort: "minimal" });
+  assert.deepEqual(codex.modelFor({ effort: "max" }, { ROLLCALL_CODEX_EFFORT: "none" }), { model: null, effort: "none" });
   assert.deepEqual(codex.modelFor({ effort: "nope" }, {}), { model: null, effort: null });
   assert.deepEqual(codex.policyFor("auto"), { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandbox: "workspace-write" });
   assert.equal(codex.policyFor("bypassPermissions").sandbox, "danger-full-access");
@@ -279,4 +283,116 @@ test("a Codex worker in a linked worktree takes turn snapshots as a Claude worke
   assert.equal(got[0].kind, "baseline");
   assert.equal(got[1].session, session);
   assert.deepEqual(got[1].files.map((f) => `${f.status} ${f.path}`), ["A gen/client.js"]);
+});
+
+test("efforts: each harness its own levels, a level clamped to what a model takes, Claude's and Codex's lists and defaults", async () => {
+  const dir = freshHome();
+  const e = await mod("harness/efforts.mjs");
+  const store = await mod("store.mjs");
+  assert.equal(e.effortOk("max", "claude"), true);
+  assert.equal(e.effortOk("max", "codex"), false, "Codex has no max");
+  assert.equal(e.effortOk("minimal", "codex"), true);
+  assert.equal(e.effortOk("minimal", "claude"), false);
+  assert.equal(e.effortOk("none", "codex"), true);
+  assert.equal(e.effortOk(undefined), false);
+  // clampEffort: kept when taken, else the highest taken below, else the lowest; null when the model takes none.
+  assert.equal(e.clampEffort("xhigh", ["low", "medium", "high", "max"]), "high");
+  assert.equal(e.clampEffort("high", ["low", "high"]), "high");
+  assert.equal(e.clampEffort("low", ["medium", "high"]), "medium", "nothing below: the lowest");
+  assert.equal(e.clampEffort("max", []), null);
+  assert.equal(e.clampEffort(null, ["low"]), null);
+  assert.equal(e.clampEffort("xhigh", ["minimal", "low", "medium"], "codex"), "medium");
+  assert.deepEqual(e.codexListEfforts([{ reasoningEffort: "high" }, "low", { reasoningEffort: "bogus" }]), ["low", "high"]);
+  assert.equal(e.codexListEfforts(undefined), null);
+
+  // Claude: before a read every model takes all five; the default comes from the owner's settings, else null.
+  const cfg = join(dir, "claude");
+  mkdirSync(cfg, { recursive: true });
+  const settings = (s) => writeFileSync(join(cfg, "settings.json"), JSON.stringify(s));
+  const env = { CLAUDE_CONFIG_DIR: cfg };
+  assert.equal(e.claudeModelsStale(), true);
+  assert.deepEqual(e.effortsFor("claude", "haiku"), ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(e.defaultEffortFor("claude", "opus", env), null, "no settings: unknown");
+  settings({ effortLevel: "xhigh" });
+  assert.equal(e.defaultEffortFor("claude", "opus", env), "xhigh");
+  assert.equal(e.defaultEffortFor("claude", "opus", { ...env, CLAUDE_CODE_EFFORT_LEVEL: "low" }), "low", "the env wins");
+  settings({ effortLevel: "xhigh", modelSettings: { "claude-opus-5-5": { effortLevel: "medium" } } });
+  assert.equal(e.defaultEffortFor("claude", "opus", env), "medium", "the alias's resolved id, before a read too");
+  // Claude Code's list, read: per model, in Claude's order; a model with no levels takes none.
+  e.rememberClaudeModels([
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", supportedEffortLevels: ["max", "low", "medium", "high", "xhigh"] },
+    { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", supportedEffortLevels: ["low", "medium", "high", "max"] },
+    { value: "claude-haiku-4-5-20251001", displayName: "Haiku" },
+    { nope: true },
+  ]);
+  assert.deepEqual(store.readMachineFile("claude-models").models.map((m) => [m.id, m.resolved, m.efforts.length]), [["opus", "claude-opus-5-5", 5], ["sonnet", "claude-sonnet-5-5", 4], ["claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001", 0]]);
+  assert.equal(e.claudeModelsStale(), false);
+  assert.equal(e.claudeModelsStale(Date.now() + e.CLAUDE_MODELS_TTL + 1), true, "old after the TTL");
+  assert.deepEqual(e.effortsFor("claude", "opus"), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(e.effortsFor("claude", "claude-sonnet-5-5[1m]"), ["low", "medium", "high", "max"], "by resolved id, a context suffix left off");
+  assert.deepEqual(e.effortsFor("claude", "claude-haiku-4-5-20251001"), []);
+  assert.deepEqual(e.effortsFor("claude", "claude-unlisted-9"), ["low", "medium", "high", "xhigh", "max"], "a model it did not list takes all");
+  assert.equal(e.defaultEffortFor("claude", "claude-haiku-4-5-20251001", env), null, "no levels: no default");
+  settings({ effortLevel: "xhigh", modelSettings: { sonnet: { effortLevel: "low" } } });
+  assert.equal(e.defaultEffortFor("claude", "sonnet", env), "low", "the alias's entry when the resolved id has none");
+  settings({ effortLevel: "xhigh" });
+  assert.equal(e.defaultEffortFor("claude", "sonnet", env), "high", "clamped to what sonnet takes");
+  assert.equal(e.rememberClaudeModels([]), null);
+
+  // Codex: the fallback until its list is read, then each model's own list and default.
+  assert.deepEqual(e.effortsFor("codex", "gpt-x"), ["low", "medium", "high"]);
+  assert.equal(e.defaultEffortFor("codex", "gpt-x", {}), null);
+  store.updateMachineFile("codex-models", () => ({ value: { at: Date.now(), models: [
+    { id: "gpt-a", label: "A", harness: "codex", efforts: ["minimal", "low", "medium", "high", "xhigh"], defaultEffort: "medium" },
+    { id: "gpt-b", label: "B", harness: "codex", efforts: [], defaultEffort: null },
+  ] }, out: null }));
+  assert.deepEqual(e.effortsFor("codex", "gpt-a"), ["minimal", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(e.effortsFor("codex", null), ["minimal", "low", "medium", "high", "xhigh"], "no model: Codex's default, listed first");
+  assert.deepEqual(e.effortsFor("codex", "gpt-b"), []);
+  assert.equal(e.defaultEffortFor("codex", "gpt-a", {}), "medium");
+  assert.equal(e.defaultEffortFor("codex", "gpt-a", { ROLLCALL_CODEX_EFFORT: "none" }), "minimal", "ROLLCALL_CODEX_EFFORT, clamped");
+  assert.equal(e.defaultEffortFor("codex", "gpt-b", {}), null);
+});
+
+test("chatOptions: each model carries its efforts and default, from Claude Code's and Codex's lists or the fallbacks", async () => {
+  const dir = freshHome();
+  const { chatOptions } = await mod("host/chat.mjs");
+  const e = await mod("harness/efforts.mjs");
+  const store = await mod("store.mjs");
+  const keep = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CLAUDE_CODE_EFFORT_LEVEL: process.env.CLAUDE_CODE_EFFORT_LEVEL, ROLLCALL_CODEX_EFFORT: process.env.ROLLCALL_CODEX_EFFORT };
+  try {
+    process.env.CLAUDE_CONFIG_DIR = join(dir, "claude");
+    delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    delete process.env.ROLLCALL_CODEX_EFFORT;
+    mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"), JSON.stringify({ effortLevel: "xhigh", modelSettings: { "claude-opus-5-5": { effortLevel: "high" } } }));
+    const of = (o, id) => o.models.find((m) => m.id === id);
+    // Before any read: every Claude model takes all five; the settings say the default; Codex's fallback model.
+    let o = chatOptions({ codex: () => true });
+    for (const m of o.models.filter((m) => m.harness === "claude")) assert.deepEqual(m.efforts, ["low", "medium", "high", "xhigh", "max"], m.id);
+    assert.equal(of(o, "opus").defaultEffort, "high", "modelSettings by resolved id wins over effortLevel");
+    assert.equal(of(o, "sonnet").defaultEffort, "xhigh");
+    assert.deepEqual(of(o, "gpt-5.6-terra").efforts, ["low", "medium", "high"]);
+    assert.equal(of(o, "gpt-5.6-terra").defaultEffort, null);
+    // Read: haiku takes none; sonnet no xhigh, so its default clamps.
+    e.rememberClaudeModels([
+      { value: "opus", resolvedModel: "claude-opus-5-5", supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
+      { value: "sonnet", resolvedModel: "claude-sonnet-5-5", supportedEffortLevels: ["low", "medium", "high", "max"] },
+      { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001" },
+    ]);
+    store.updateMachineFile("codex-models", () => ({ value: { at: Date.now(), models: [
+      { id: "gpt-a", label: "A", harness: "codex", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
+      { id: "gpt-b", label: "B", harness: "codex", efforts: [], defaultEffort: null },
+    ] }, out: null }));
+    o = chatOptions({ codex: () => true });
+    assert.deepEqual(of(o, "haiku"), { id: "haiku", label: "Haiku", harness: "claude", efforts: [], defaultEffort: null });
+    assert.deepEqual(of(o, "sonnet").efforts, ["low", "medium", "high", "max"]);
+    assert.equal(of(o, "sonnet").defaultEffort, "high");
+    assert.equal(of(o, "opus").defaultEffort, "high");
+    assert.deepEqual(of(o, "fable").efforts, ["low", "medium", "high", "xhigh", "max"], "a model Claude Code did not list takes all");
+    assert.deepEqual(of(o, "gpt-a"), { id: "gpt-a", label: "A", harness: "codex", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" });
+    assert.deepEqual([of(o, "gpt-b").efforts, of(o, "gpt-b").defaultEffort], [[], null]);
+  } finally {
+    for (const [k, v] of Object.entries(keep)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });

@@ -60,6 +60,8 @@ you ──▶ the Falcon (supervisor) ──┬──▶ worker: worktree + tmux
 - **[rollcall](packages/rollcall/README.md).** Keeps every session aware of the others, holds the task records, and runs the merge queue: a script that lands green PRs in the order they became ready, as they are when they merge cleanly and otherwise in trains tested as the tree that lands.
 - **[docsic](https://github.com/eeshankulk1/docsic).** Project memory. Where each project stands and what past sessions learned reach every new session without you asking.
 
+[rollcall](packages/rollcall/README.md) also runs an agent host for cockpit, the Mac and iOS apps: chats and crews on Claude Code or Codex, each with a model, permission mode and effort level you can change mid-chat, and away mode, which holds a worker's permission prompts for you instead of blocking it.
+
 Your own instructions, settings, skills and guards live in an [overlay](docs/overlay.md), a folder of yours that sync layers on top and never touches.
 The same setup also runs in OpenAI Codex, and the helper agents can run on a Codex plan ([details](docs/codex-parity.md)).
 

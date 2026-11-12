@@ -17,7 +17,7 @@ import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { wantsBrowser } from "../supervisor.mjs";
 import { preamble } from "./claude.mjs";
-import { effortOk } from "./index.mjs";
+import { effortOk } from "./efforts.mjs";
 
 export const name = "codex";
 export const title = "Codex";
@@ -95,7 +95,7 @@ export function writableRoots(t, env = process.env) {
 export function modelFor({ model = null, effort = null } = {}, env = process.env) {
   return {
     model: models.map(model) ?? models.map(env.ROLLCALL_CODEX_MODEL) ?? null,
-    effort: effortOk(effort) ? effort : effortOk(env.ROLLCALL_CODEX_EFFORT) ? env.ROLLCALL_CODEX_EFFORT : null,
+    effort: effortOk(effort, "codex") ? effort : effortOk(env.ROLLCALL_CODEX_EFFORT, "codex") ? env.ROLLCALL_CODEX_EFFORT : null,
   };
 }
 
