@@ -733,7 +733,7 @@ const AFTER_MERGE = "its work merged: run its after-merge steps, save your repor
 function afterMergeStep(t, now) {
   const w = workerState(t, now);
   if (!w || w.alive || w.stopped) return null; // a worker stopped on purpose is not called back (mergeHold lands it)
-  if (freshDue(t, w, now)) { unpark(t, `${P} Task ${t.id}'s ${AFTER_MERGE}.`, w); return null; }
+  if (freshDue(t, w, now)) { unpark(t, `${P} Task ${t.id}: ${AFTER_MERGE}.`, w); return null; }
   return { args: ["--resume", AFTER_MERGE], line: `${label(t)}: its work merged; its worker came back for what follows.` };
 }
 

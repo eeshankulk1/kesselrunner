@@ -57,6 +57,7 @@ What the supervisor and its workers do on their own:
 | `/ios-sim <what changed>` | Check an iOS app in the simulator: the ios-driver agent taps through the changed flows and returns screenshots |
 | `/ship-ios-build` | iOS verify, then a TestFlight upload (a project's own ship skill takes precedence) |
 | `/recap <project> [window]` | What happened recently, from memory, worklog and git/PR history |
+| `/handoff` or `/handoff resume [repo, branch or PR]` | Write the prompt the next session starts from (your decisions and where the work stands, no directions), or pick up where the last session stopped |
 | `/note <project> <text>` | Save a discovery, gotcha, decision or idea for future sessions |
 
 ## rollcall

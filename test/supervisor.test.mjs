@@ -1704,6 +1704,116 @@ test("an idle worker whose task waits on the owner parks: its tab says so, Enter
   await until(() => /^\[rollcall\] You were parked \(stopped while idle, to free memory\), and task t1 is being worked again/.test(w.claude.prompts().at(-1) ?? ""), { timeout: 5000 });
 });
 
+/** Task t1's PR #9 in its repo's merge queue, as the ship script holds it ("checking"), or out of it (null). */
+function shipHolding(w, state = "checking") {
+  const file = join(w.sb.home, w.task().repo.key, "queue", "state.json");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ entries: state ? { 9: { pr: 9, task: "t1", state } } : {} }));
+}
+
+test("once its PR is open and the ship script has it, an idle worker with a where-I-am note stops at once, and a fresh worker takes the next words", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const { w, worker, env } = await queuedWorld(t);
+  const sid = w.task().sessions[0].id;
+  const pane = () => w.tmux("capture-pane", "-p", "-t", "=sv-alpha:=t1");
+  shipHolding(w);
+  stopHook(w, "t1", sid, { background_tasks: [], last_assistant_message: "PR open." });
+  look(w, env);
+  assert.equal(w.task().worker.alive, true, "no where-I-am note: it stays");
+  assert.equal(w.sup.cli(["task", "where", "t1", "Header done, PR #9 open. Footer polish was left for later."], worker).code, 0);
+  look(w, { ...env, ROLLCALL_FRESH_PR: "0" });
+  assert.equal(w.task().worker.alive, true, "ROLLCALL_FRESH_PR=0 turns it off");
+  shipHolding(w, "parked");
+  look(w, env);
+  assert.equal(w.task().worker.alive, true, "a PR the queue parked waits on its worker");
+  shipHolding(w);
+  look(w, env);
+  await until(() => w.task().worker.parked, { timeout: 5000 });
+  assert.equal(w.task().fresh.session, sid);
+  await until(() => /its PR is open and the ship script has it/.test(pane()), { timeout: 5000 });
+
+  // The owner's words go to a fresh worker, with the note, the PR and the way back to the old conversation.
+  const runs = w.claude.runs().length;
+  assert.match(routed(w.sup.prompt("@yoda make the footer match")), /a fresh worker starts with your words in its brief/);
+  look(w, env);
+  await until(() => w.claude.runs().length === runs + 1, { timeout: 5000 });
+  const run = w.claude.runs().at(-1);
+  assert.equal(run.argv.includes("--resume"), false);
+  const brief = run.argv.at(-1);
+  assert.match(brief, /You replace an earlier worker on this task \(its PR is open and rollcall's ship script has it\)/);
+  assert.match(brief, /Its where-I-am note, written [^\n]+ when it last stopped:\n\nHeader done, PR #9 open\./);
+  assert.match(brief, /\nmake the footer match\n/, "the owner's words are in the brief");
+  assert.match(brief, /the owner's words \(the last above\): act on them/);
+  assert.match(brief, /The task's latest PR: https:\/\/github\.com\/o\/r\/pull\/9/);
+  assert.match(brief, new RegExp(`--resume "<why>" --session ${sid}`));
+  await until(() => w.task().sessions.length === 2 && !w.task().fresh, { timeout: 5000 });
+  assert.equal(w.task().notes.at(-1).text, "fresh worker: its PR is open and rollcall's ship script has it");
+  assert.equal(outbox(w).includes("words"), false, "the words went in the brief, not typed again");
+});
+
+test("words for a worker parked over an hour at a big context go to a fresh worker when it left a where-I-am note in its last turn; otherwise it resumes", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  const sid = w.task().sessions[0].id;
+  const worker = { env: { ROLLCALL_TASK: "alpha:t1" } };
+  const big = (tokens) => writeFileSync(join(w.sb.home, "_supervisors/alpha/context-t1.json"), JSON.stringify({ pct: 40, at: Date.now(), session: sid, tokens, size: 1_000_000 }));
+  const parkIt = async (note) => {
+    await until(() => w.task().worker?.alive && !w.task().worker.busy, { timeout: 5000 });
+    assert.equal(w.sup.cli(["task", "set", "t1", "--state", "needs-you", "--question", "Which style?"], worker).code, 0);
+    if (note) assert.equal(w.sup.cli(["task", "where", "t1", note], worker).code, 0);
+    stopHook(w, "t1", sid, { background_tasks: [], last_assistant_message: "Which style?" });
+    look(w, PARK);
+    await until(() => w.task().worker.parked, { timeout: 5000 });
+  };
+  w.sup.env = { ...w.sup.env, ROLLCALL_FRESH_IDLE_MS: "1" };
+  // A small context: it resumes.
+  await parkIt("Asked about the header style.");
+  big(150_000);
+  w.sup.prompt("@yoda the bold one");
+  await until(() => w.claude.prompts().at(-1) === "the bold one", { timeout: 5000 });
+  assert.deepEqual(w.claude.runs().at(-1).argv.slice(0, 2), ["--resume", sid]);
+
+  // A big context, but its note is from before its last turn: it resumes.
+  await until(() => w.task().worker?.alive, { timeout: 5000 });
+  stopHook(w, "t1", sid, { background_tasks: [], last_assistant_message: "Bold it is." });
+  await parkIt(null);
+  big(250_000);
+  w.sup.prompt("@yoda and the footer");
+  await until(() => w.claude.prompts().at(-1) === "and the footer", { timeout: 5000 });
+  assert.deepEqual(w.claude.runs().at(-1).argv.slice(0, 2), ["--resume", sid]);
+
+  // A big context and a note from its last turn: a fresh worker.
+  await until(() => w.task().worker?.alive, { timeout: 5000 });
+  await parkIt("Bold header and footer done; asked whether to ship.");
+  big(250_000);
+  const runs = w.claude.runs().length;
+  assert.match(routed(w.sup.prompt("@yoda ship it")), /a fresh worker starts/);
+  assert.match(w.task().fresh.why, /^idle \d+ minutes at 250k tokens of context$/);
+  look(w);
+  await until(() => w.claude.runs().length === runs + 1, { timeout: 5000 });
+  assert.match(w.claude.runs().at(-1).argv.at(-1), /Its where-I-am note, written [^\n]+ when it last stopped:\n\nBold header and footer done; asked whether to ship\./);
+  await until(() => !w.task().fresh, { timeout: 5000 });
+});
+
+test("ROLLCALL_FRESH_IDLE=0 keeps the old worker: words for it resume it however long it was idle", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  const sid = w.task().sessions[0].id;
+  const worker = { env: { ROLLCALL_TASK: "alpha:t1" } };
+  await until(() => w.task().worker?.alive && !w.task().worker.busy, { timeout: 5000 });
+  assert.equal(w.sup.cli(["task", "set", "t1", "--state", "needs-you", "--question", "Which style?"], worker).code, 0);
+  assert.equal(w.sup.cli(["task", "where", "t1", "Asked about the header style."], worker).code, 0);
+  stopHook(w, "t1", sid, { background_tasks: [], last_assistant_message: "Which style?" });
+  look(w, PARK);
+  await until(() => w.task().worker.parked, { timeout: 5000 });
+  writeFileSync(join(w.sb.home, "_supervisors/alpha/context-t1.json"), JSON.stringify({ pct: 40, at: Date.now(), session: sid, tokens: 300_000, size: 1_000_000 }));
+  w.sup.env = { ...w.sup.env, ROLLCALL_FRESH_IDLE_MS: "1", ROLLCALL_FRESH_IDLE: "0" };
+  w.sup.prompt("@yoda the bold one");
+  await until(() => w.claude.prompts().at(-1) === "the bold one", { timeout: 5000 });
+  assert.deepEqual(w.claude.runs().at(-1).argv.slice(0, 2), ["--resume", sid]);
+});
+
 test("the home's work goes on while news waits on the supervisor: an idle worker parks on time", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
   const w = world(t);
   assert.equal(w.start(["t1"]).code, 0);
@@ -2198,7 +2308,7 @@ test("the brief: owner files outside the worktree, the header's budget, the owne
   assert.ok(brief.includes(`goes in ${files}, never in the worktree`));
   assert.match(brief, /\(Ship, Scope, Design\), 7 characters at most: the picker puts this task's name in front of it/);
   assert.match(brief, /^\[\d{4}-\d\d-\d\d \d\d:\d\d [A-Z]{2,5}[+\-\d:]*\]\nmake the header professional$/m);
-  assert.match(brief, /finished: first save your report with `.*task output t1 --file <file>`.*Then end your turn: once the PR is open, rollcall's ship script has the rest .* marks the task landed when it is done/);
+  assert.match(brief, /finished: first save your report with `.*task output t1 --file <file>`.*Then write your where-I-am note and end your turn: once the PR is open, rollcall's ship script has the rest .* marks the task landed when it is done/);
   assert.match(brief, /a `\[rollcall\] ship:` notice into this window only when something needs you .*after release steps you ran yourself, `.*task set t1 --state landed`/, "the worker lands it only after steps it ran itself");
   assert.doesNotMatch(brief, /--pr <url>|When an answer arrives/, "rollcall sets these itself, so the brief leaves them out");
   assert.match(brief, /question with no options to pick from.*`.*task set t1 --state needs-you --question "<the question, one sentence>"`/, "a whole command line, nothing to probe for");

@@ -26,7 +26,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `.claude-plugin/marketplace.json` | Makes this repo the `kesselrunner` plugin marketplace: the mods in `mods/` by relative path, third-party mods pinned to a reviewed commit |
 | `mods/` | `rollcall-band`, `pr-band`, `clickable`: one folder per mod (manifest, hooks module, state contract, tests) |
 | `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher |
-| `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/note`, `/frontend-test`, `/ios-sim`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
+| `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/handoff`, `/note`, `/frontend-test`, `/ios-sim`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
 | `docs/` | These docs, plus the project docs standard, templates, the test-manifest schema, plans and the worklog |
 | `bin/kesselrunner.mjs` | The install, sync, doctor, delegate and rules CLI (`bin/dotclaude.mjs` is the old name) |
 | `lib/reconcile.mjs` | Install and sync: links, the `CLAUDE.md` block, settings merge, docsic, migrations, the malformed-settings guard |
