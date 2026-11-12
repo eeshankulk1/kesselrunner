@@ -781,6 +781,7 @@ function runStep(h, t, e, step) {
     store.ackWakes(h, [e.name]);
     // Exit 4: it waits on Claude Code's trust prompt, which the owner answers in its window.
     if (code === 0) told(h, t, step.line);
+    else if (code === 5 && step.fresh) { /* the old worker came back first; start.mjs gave it what waited */ }
     else if (code === 4) told(h, t, `${label(t)}: its worker waits on Claude Code's trust prompt for this repo. Answer it in ${nameOf(t.id)}'s tab.`, { sound: true });
     else {
       // A fresh start that failed falls back to the old worker, with what waited for the fresh one.

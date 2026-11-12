@@ -647,7 +647,8 @@ function goFresh(t, w, why, prompt, kind) {
     if (!x) return false;
     const f = x.fresh?.session === w.session ? x.fresh : { at: now, session: w.session, why, trigger: "idle" };
     const pending = [...(f.pending ?? [])];
-    if (prompt && !pending.some((p) => p.text === prompt)) pending.push({ at: now, kind, text: store.clip(prompt, 4000) });
+    const text = prompt && store.clip(prompt, 4000);
+    if (text && !pending.some((p) => p.text === text)) pending.push({ at: now, kind, text });
     x.fresh = { ...f, pending, queued: true };
     store.writeTask(x);
     return !f.queued;

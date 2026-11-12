@@ -1153,7 +1153,7 @@ async function restore(args, ctx) {
   if (!t.sessions.length || !isOpen(t)) return 0;
   const nudge = `[rollcall] Task ${t.id} was archived and is restored: the worktree is back at ${t.worktree} with your uncommitted work (anything that was staged is now unstaged), its setup runs again (\`${cli()} task setup ${t.id}\`), and its run actions are stopped.${r.notes.length ? ` ${r.notes.join(". ")}.` : ""} Carry on where you left off.`;
   const l = unpark(t, nudge);
-  ctx.say(l.ok ? `  its worker resumed in its window` : `  its worker did not resume: ${l.err} (${START} ${t.id} --resume "restored")`);
+  ctx.say(l.ok ? (l.fresh ? `  a fresh worker takes over from its record` : `  its worker resumed in its window`) : `  its worker did not resume: ${l.err} (${START} ${t.id} --resume "restored")`);
   return 0;
 }
 

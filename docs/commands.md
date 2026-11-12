@@ -39,6 +39,7 @@ What the supervisor and its workers do on their own:
 - Task chips sit in the status line (inside the Falcon the tab bar shows the tasks, and chips stay only for open tasks without a tab).
 - A worker that runs long hands off to a fresh one: the worker judges it past 35% of its context, and rollcall makes it at 70%. The supervisor hands over to a fresh one past 35% of its own.
 - A stopped worker resumes with its context. An idle worker whose task waits on a PR or on you parks after 15 minutes to free memory; your words, Enter in its tab or the supervisor's message bring it back.
+- A worker saves a where-I-am note each time it stops for you and when its PR opens. Once the ship script holds its PR, the worker parks at once, and what wakes it later (your words, news) starts a fresh worker from that note instead of resuming the long conversation. The same happens to a worker parked over an hour whose context passed 200k tokens. Enter in a parked tab still resumes the old conversation, and a fresh start that fails falls back to it.
 - A falcon supervisor parks after a quiet hour with no terminal on it; Enter in its tab, `falcon continue` or its tasks' news bring it back, as a fresh session once its conversation grew big.
 - Workers start the browser MCP servers only in repos with something a browser can test.
 - The status line shows how much of each plan's limits is used (Claude, and Codex once read). When one plan nears its limit and the other has room, the supervisor asks whether to move the tasks waiting on the full one; nothing moves unless you say so.
@@ -67,6 +68,7 @@ The commands a person types. The full list, and what each session sees, is in [r
 | Command | Does |
 |---|---|
 | `rollcall status [--json] [--all]` | The other live sessions in this repo: branch, checkout, claim, edited files |
+| `rollcall task where here ["<text>" \| --file <f>]` | A worker's where-I-am note (what is done, half-done, the files that matter, its next step, your last ask); `task show` prints it and a fresh worker's brief carries it |
 | `rollcall task list` / `rollcall task show <id>` | A supervisor's open tasks, or one task whole: your words, notes, worker sessions, last report. The list starts with a `usage:` line once rollcall has read a plan's limits |
 | `rollcall task new "<title>" --harness codex` | Make a task whose workers run on Codex (the supervisor runs this when you say "on codex"); without `--harness`, `ROLLCALL_WORKER_HARNESS`, else Claude Code |
 | `rollcall task move <id> --harness codex\|claude` | Run a task on the other agent CLI from now on: a running worker is replaced by a fresh one there that carries on from the task's record, and a task held by its plan's usage limit stops waiting |

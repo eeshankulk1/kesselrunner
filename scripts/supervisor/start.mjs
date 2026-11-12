@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const ROLLCALL = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "rollcall", "bin", "rollcall.mjs");
 const src = (m) => import(join(dirname(ROLLCALL), "..", "src", m));
-const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
+const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, freshUndo, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
 const { hostedHome } = await src("host/client.mjs");
 const [{ clampEffort, effortsFor }, { models: codexModels }] = await Promise.all([src("harness/efforts.mjs"), src("harness/codex.mjs")]);
 
@@ -127,6 +127,13 @@ if (resume !== undefined) {
   process.exit(await settled(task));
 }
 
+// A fresh start the watcher queued, and the old worker came back first (Enter in its tab): it keeps the task, and
+// what waited for the fresh worker goes to it. Not a failure.
+if (w?.alive && fresh !== undefined && task.fresh?.queued && task.fresh.session === w.session) {
+  freshUndo(task);
+  process.stdout.write(`${task.id}: its worker came back first, so no fresh worker started\n`);
+  process.exit(5); // not a failure; the watcher tells no "a fresh worker took over"
+}
 if (w?.alive && fresh === undefined) die(`${task.id} already has a running worker (${w.session.slice(0, 8)}): message it (rollcall task tell ${task.id} "<text>"), or pass --fresh "<why>" to replace it`);
 const brief = composeBrief(task, { fresh, rc: rollcallCommand() });
 if (fresh !== undefined) rollcall(["task", "note", task.id, "--home", task.home, `fresh worker: ${fresh || "replaced the last one"}`]);
