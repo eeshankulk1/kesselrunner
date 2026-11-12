@@ -925,7 +925,7 @@ async function handle(req, c) {
       }
       // A chat moved here or away (move.mjs): the agents of `refs` are read again from disk, as a restart would.
       case "adopt": return await adopt(Array.isArray(req.refs) ? req.refs.map(String) : []);
-      // A system line in an agent's history (a move's "Moved to Cloud from MacBook Pro").
+      // A system line in an agent's history (a move's "Moved to Cloud from This Mac").
       case "system": {
         const a = need();
         if (typeof req.text !== "string" || !req.text.trim()) return err("bad-payload", "text is required");

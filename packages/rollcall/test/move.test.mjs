@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { git, sandbox, until, write } from "./helpers.mjs";
 import { setup } from "./host-helpers.mjs";
@@ -268,6 +269,57 @@ test("move: clash refuses and leaves nothing; discard removes only what unpack m
   assert.equal(existsSync(tr), false);
   assert.equal(existsSync(join(b.store, "_supervisors", H)), false);
   assert.ok(host.calls.some((c) => c.op === "adopt"));
+});
+
+test("move: archives are owner-only and go on finish; an archive that reaches outside its folders is refused", async (t) => {
+  const sb = sandbox(t);
+  const { a } = mac(sb, t);
+  const b = place(sb, "cloud");
+  const packed = await as(a, () => move.pack({ home: H }, { host: noHost() }));
+  assert.equal(statSync(packed.path).mode & 0o777, 0o600, "the archive carries secret files");
+  assert.equal(statSync(join(a.store, "_moves")).mode & 0o777, 0o700);
+
+  // A crafted copy: unpacked by hand, changed, packed again.
+  const craft = (name, change) => {
+    const d = join(sb.root, `craft-${name}`);
+    mkdirSync(d, { recursive: true });
+    assert.equal(spawnSync("tar", ["-xzf", packed.path, "-C", d]).status, 0);
+    change(d);
+    const out = join(sb.root, `${name}.tar.gz`);
+    assert.equal(spawnSync("tar", ["-czf", out, "-C", d, "."]).status, 0);
+    return out;
+  };
+  const victim = join(b.home, "keep-me");
+  write(join(victim, "x.txt"), "precious\n");
+  const editMove = (fn) => (d) => { const m = readJson(join(d, "move.json")); fn(m); writeFileSync(join(d, "move.json"), JSON.stringify(m)); };
+  const cases = {
+    session: editMove((m) => { m.sessions[0].id = "../../../keep-me"; }),
+    untracked: editMove((m) => { m.worktrees[0].untracked.push("../../keep-me/x.txt"); }),
+    repo: editMove((m) => { m.worktrees[0].repo = "../keep-me"; }),
+    branch: editMove((m) => { m.worktrees[0].branch = "--upload-pack=touch"; }),
+    origin: editMove((m) => { m.worktrees[0].origin = "ext::sh -c touch% /tmp/pwned"; }),
+  };
+  for (const [name, change] of Object.entries(cases)) {
+    await assert.rejects(as(b, () => move.unpack({ path: craft(name, change), from: "Mac" }, { host: noHost() })), (e) => e.code === "bad-payload", name);
+  }
+  // A member under a symlink member (tar would not write one itself: the second file's name is swapped in).
+  const d = join(sb.root, "craft-symlink");
+  mkdirSync(join(d, "home"), { recursive: true });
+  symlinkSync(victim, join(d, "home", "out"));
+  write(join(d, "x.txt"), "overwritten\n");
+  const bsd = /bsdtar/.test(spawnSync("tar", ["--version"], { encoding: "utf8" }).stdout);
+  const swap = bsd ? ["-s", ",^x.txt$,home/out/x.txt,"] : ["--transform", "s,^x.txt$,home/out/x.txt,"];
+  const linked = join(sb.root, "symlink.tar.gz");
+  assert.equal(spawnSync("tar", ["-czf", linked, "-C", d, ...swap, "home/out", "x.txt"]).status, 0);
+  assert.match(spawnSync("tar", ["-tzf", linked], { encoding: "utf8" }).stdout, /home\/out\/x\.txt/);
+  await assert.rejects(as(b, () => move.unpack({ path: linked, from: "Mac" }, { host: noHost() })), (e) => e.code === "bad-payload" && /symlink/.test(e.message));
+  assert.equal(readFileSync(join(victim, "x.txt"), "utf8"), "precious\n", "nothing outside was touched");
+  assert.equal(existsSync(join(b.store, "_supervisors", H)), false);
+
+  // The real one goes through; finish deletes the source's archive.
+  await as(b, () => move.unpack({ path: packed.path, from: "Mac" }, { host: noHost() }));
+  await as(a, () => move.finish({ home: H, to: "Cloud" }));
+  assert.equal(existsSync(packed.path), false);
 });
 
 test("move: a chat coming back replaces the home marked moved and reuses its old worktree", async (t) => {

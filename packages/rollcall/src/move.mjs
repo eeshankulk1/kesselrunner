@@ -8,7 +8,7 @@
 // to GitHub, and no verb stashes, resets or deletes the source's files. Same code on macOS and Linux: system git and tar.
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { heldPorts, inside, manifestOf, q } from "./checkout.mjs";
@@ -35,6 +35,13 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 const lines = (s) => String(s ?? "").split("\n").filter(Boolean);
 
 export const movesDir = () => join(store.home(), "_moves");
+/** `_moves/`, made owner-only: archives carry the worktrees' secret files (`.worktreeinclude`). */
+function ownMovesDir() {
+  const d = movesDir();
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  chmodSync(d, 0o700);
+  return d;
+}
 const claudeProjects = () => join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
 const codexSessions = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
 /** The folder name Claude Code keeps a session's transcript in, for the session's cwd. */
@@ -236,9 +243,17 @@ const idleOnly = (idle, running) => (idle ?? []).filter((r) => !(running ?? []).
 function copyRel(from, to, rel) {
   // Names come from the archive: none may climb out of the folder it lands in.
   if (typeof rel !== "string" || !rel || rel.startsWith("/") || rel.split("/").includes("..")) throw new Error(`a path in the archive is not safe: ${rel}`);
-  const dst = join(to, rel.replace(/\/$/, ""));
+  const parts = rel.replace(/\/$/, "").split("/").filter(Boolean);
+  // Nor go through a symlink already at the destination (a tracked `link -> /etc` and an untracked `link/x`).
+  for (let k = 1; k < parts.length; k++) {
+    let st = null;
+    try { st = lstatSync(join(to, ...parts.slice(0, k))); } catch {}
+    if (st?.isSymbolicLink()) throw new Error(`a path in the archive goes through a symlink: ${rel}`);
+  }
+  const dst = join(to, ...parts);
+  try { if (lstatSync(dst).isSymbolicLink()) rmSync(dst); } catch {}
   mkdirSync(dirname(dst), { recursive: true });
-  cpSync(join(from, rel.replace(/\/$/, "")), dst, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, force: true });
+  cpSync(join(from, ...parts), dst, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, force: true });
 }
 
 /** The session files of an agent: Claude transcripts (and their subagent folders), Codex rollouts. */
@@ -293,6 +308,7 @@ function pruneMoves(now = Date.now()) {
 export async function pack({ home: h }, { host = defaultHost } = {}) {
   const c = check({ home: h });
   if (c.problems.length) refuse(c.problems[0].code, c.problems.map((p) => p.message).join("; "), { problems: c.problems });
+  ownMovesDir();
   pruneMoves();
   const agents = agentsOf(h);
   // A pack tried before and never undone parked its running and idle agents: they still count as they were.
@@ -317,12 +333,13 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
 
   const stage = join(movesDir(), `${id}.stage`);
   rmSync(stage, { recursive: true, force: true });
-  mkdirSync(stage, { recursive: true });
+  mkdirSync(stage, { recursive: true, mode: 0o700 });
   try {
     // The home, minus what only a live process here means. Words held since the pause travel with it (move-held.json).
     const hd = store.homeDir(h);
-    const heldNow = heldOf(h).length;
     cpSync(hd, join(stage, "home"), { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, filter: (src) => src === hd || !liveFile(relative(hd, src)) });
+    // Counted from the copy, so a word held between the count and the copy is not both packed and forwarded.
+    const heldNow = (readJson(join(stage, "home", "move-held.json"))?.words ?? []).length;
     // Each worktree's state.
     const { worktrees } = worktreesOf(agents);
     const wts = [];
@@ -370,6 +387,7 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
       running, idle, worktrees: wts, sessions,
     };
     writeJson(join(stage, "move.json"), move);
+    writeFileSync(path, "", { mode: 0o600 });
     const t = spawnSync("tar", ["-czf", path, "-C", stage, "."], { encoding: "utf8", maxBuffer: 1 << 26 });
     if (t.status !== 0) refuse("failed", `tar could not write the archive: ${(t.stderr || t.error?.message || "").trim()}`);
     store.writeHomeFile(h, "move-out", { id, archive: path, running, idle, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, main: w.main, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
@@ -408,7 +426,7 @@ function checkoutFor(w, made) {
     const gh = /github\.com[:/]/.test(w.origin) && spawnSync("gh", ["--version"], { stdio: "ignore" }).status === 0;
     const r = gh
       ? spawnSync("gh", ["repo", "clone", w.origin, dir, "--", "--quiet"], { encoding: "utf8", env: GIT_ENV(), timeout: 600_000 })
-      : spawnSync("git", ["clone", "--quiet", w.origin, dir], { encoding: "utf8", env: GIT_ENV(), timeout: 600_000 });
+      : spawnSync("git", ["clone", "--quiet", "--", w.origin, dir], { encoding: "utf8", env: GIT_ENV(), timeout: 600_000 });
     if (r.status !== 0) { rmSync(dir, { recursive: true, force: true }); refuse("failed", `could not clone ${w.origin}: ${why(r)}`); }
     made.clones.push(dir);
     return dir;
@@ -472,6 +490,47 @@ function applyDiff(top, file) {
   return [...bad].map((p) => ({ path: p, why: "its changes did not apply over the branch here" }));
 }
 
+/** The first archive member that could land outside the unpack folder (absolute, `..`, a hard link, or under a symlink), or null. */
+function unsafeMember(path) {
+  const names = spawnSync("tar", ["-tzf", path], { encoding: "utf8", maxBuffer: 1 << 28 });
+  const long = spawnSync("tar", ["-tzvf", path], { encoding: "utf8", maxBuffer: 1 << 28 });
+  if (names.status !== 0 || long.status !== 0) return `tar could not list it: ${(names.stderr || long.stderr || "").trim()}`;
+  const ns = names.stdout.split("\n").filter(Boolean);
+  const ls = long.stdout.split("\n").filter(Boolean);
+  if (ns.length !== ls.length) return "its listing does not add up";
+  const clean = (n) => n.replace(/^(\.\/)+/, "").replace(/\/$/, "");
+  const links = [];
+  for (let k = 0; k < ns.length; k++) {
+    const n = ns[k];
+    if (n.startsWith("/") || n.split("/").includes("..")) return n;
+    if (ls[k][0] === "h") return `${n} (a hard link)`;
+    if (ls[k][0] === "l") links.push(clean(n));
+  }
+  for (const n of ns.map(clean)) if (links.some((l) => n.startsWith(`${l}/`))) return `${n} (under a symlink)`;
+  return null;
+}
+
+const NAME = /^(?!\.{1,2}$)[A-Za-z0-9._-]+$/;
+const safeRel = (r) => typeof r === "string" && !!r && !r.startsWith("/") && !r.split("/").includes("..");
+/** What in an archive's move.json could reach outside its folders or pass as a git option, or null. */
+function badField(move) {
+  if (!Array.isArray(move.worktrees) || !Array.isArray(move.sessions) || !Array.isArray(move.agents)) return "a list is missing";
+  for (const w of move.worktrees) {
+    if (!Number.isInteger(w?.i) || w.i < 0) return `worktree number ${w?.i}`;
+    if (!NAME.test(String(w.repo ?? ""))) return `repo ${w.repo}`;
+    if (typeof w.origin !== "string" || !w.origin || w.origin.startsWith("-") || /^(ext|fd)::/.test(w.origin)) return `origin ${w.origin}`;
+    if (w.main) continue;
+    if (!/^[0-9a-f]{40,64}$/.test(String(w.tip ?? ""))) return `tip ${w.tip}`;
+    if (typeof w.branch !== "string" || w.branch.startsWith("-") || spawnSync("git", ["check-ref-format", "--branch", w.branch], { stdio: "ignore" }).status !== 0) return `branch ${w.branch}`;
+    if (!NAME.test(basename(String(w.path ?? "")))) return `worktree path ${w.path}`;
+    for (const r of [...(w.untracked ?? []), ...(w.secrets ?? [])]) if (!safeRel(r)) return `file ${r}`;
+  }
+  for (const s of move.sessions) {
+    if (s?.harness === "claude" ? !NAME.test(String(s.id ?? "")) : !safeRel(s?.rel)) return `session ${s?.id ?? s?.rel}`;
+  }
+  return null;
+}
+
 /**
  * `chat.move.unpack`: recreates the chat from an archive, every agent parked. { home, refs, notes }. Refuses `exists`
  * (a live home of that name) and `clash` (the branch here moved on, or a worktree of it has changes of its own).
@@ -480,15 +539,20 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
   if (!path || !path.startsWith("/") || !existsSync(path)) refuse("bad-payload", `no archive at ${path}`);
   if (want && sha256(readFileSync(path)) !== want) refuse("bad-payload", "the archive's sha256 does not match: it changed on the way");
   const fromName = String(from ?? "").trim() || "another machine";
-  mkdirSync(movesDir(), { recursive: true });
+  ownMovesDir();
+  pruneMoves();
   const id = `in-${Date.now().toString(36)}-${randomBytes(2).toString("hex")}`;
   const work = join(movesDir(), id);
   const x = join(work, "x");
-  mkdirSync(x, { recursive: true });
-  const t = spawnSync("tar", ["-xzf", path, "-C", x], { encoding: "utf8" });
+  mkdirSync(x, { recursive: true, mode: 0o700 });
+  const unsafe = unsafeMember(path);
+  if (unsafe) { rmSync(work, { recursive: true, force: true }); refuse("bad-payload", `the archive is not safe to open: ${unsafe}`); }
+  const t = spawnSync("tar", ["-xzf", path, "--no-same-owner", "--no-same-permissions", "-C", x], { encoding: "utf8" });
   if (t.status !== 0) { rmSync(work, { recursive: true, force: true }); refuse("bad-payload", `tar could not read the archive: ${(t.stderr || "").trim()}`); }
   const move = readJson(join(x, "move.json"));
   if (!move || move.format !== FORMAT || !store.HOME_NAME.test(move.home ?? "")) { rmSync(work, { recursive: true, force: true }); refuse("bad-payload", "not a chat move archive (or one from a newer rollcall)"); }
+  const bad = badField(move);
+  if (bad) { rmSync(work, { recursive: true, force: true }); refuse("bad-payload", `the archive's move.json is not safe: ${bad}`); }
   const h = move.home;
   const back = homeExists(h) && movedAway(h) ? store.readHomeFile(h, "moved") : null;
   if (homeExists(h) && !back) { rmSync(work, { recursive: true, force: true }); refuse("exists", `a live chat ${h} is here already`); }
@@ -636,6 +700,8 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
       for (const p of plans) if (p.how !== "main") { try { startSetup(p.top, { bin: BIN }); } catch {} }
     }
     rmSync(x, { recursive: true, force: true });
+    // The archive is spent: one received into `_moves/` goes (it carries the secret files).
+    if (inside(path, movesDir())) rmSync(path, { force: true });
     return { home: h, refs, notes };
   } catch (e) {
     undoMade(h, made);
@@ -717,6 +783,8 @@ export async function finish({ home: h, to }) {
   store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, idle: out.idle ?? [], heldPacked: out.heldPacked ?? 0, worktrees: out.worktrees ?? [] });
   if (store.readHomeFile(h, "chat")) { const { updateChat } = await import("./host/chat.mjs"); updateChat(h, (c) => { c.movedTo = movedTo; c.movedAt = movedAt; return true; }); }
   store.writeHomeFile(h, "move-out", null);
+  // The archive reached the far side: it goes (it carries the secret files). An undo after this needs none.
+  if (out.archive) rmSync(out.archive, { force: true });
   // The worktrees' blocks of ports go back to the pool: the chat runs there now (a chat coming back gets new ones).
   for (const w of out.worktrees ?? []) if (!w.main && w.path) releasePorts(w.path);
   store.pokeWatcher(h);
