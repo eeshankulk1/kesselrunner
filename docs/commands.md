@@ -49,7 +49,7 @@ What the supervisor and its workers do on their own:
 | Command | Does |
 |---|---|
 | `/supervisor [name]` | Make this session a supervisor (what `falcon` runs for you) |
-| `/pr-create <summary>` | Ship: a quality pass sized to the diff (fast tests, review, a UI check when warranted, the docs gate), worklog, commit, push, PR, then a watch on the PR's CI. "Ship it" goes on through the merge queue and the release steps |
+| `/pr-create <summary>` | Ship: a quality pass sized to the diff (fast tests, review, a UI check when warranted, the docs gate), worklog, commit, push, PR, then the open PR. It hands the PR to rollcall's ship script (`rollcall ship start`), which watches CI, and on "ship it" (`--land`) joins the merge queue, lands, watches the deploys and runs the release commands, waking a model only when something fails |
 | `/ci-setup [audit]` | Move deterministic suites into GitHub Actions on a budget and mark them CI-owned in the test manifest |
 | `/update-docs <what changed>` or `/update-docs sync` | Update docs for a change, or check every doc against recent commits |
 | `/update-tests <what changed>` | Bring tests in line with implementation changes (the test-updater agent) |
@@ -81,8 +81,9 @@ The commands a person types. The full list, and what each session sees, is in [r
 | `rollcall task archive <id> [--yes]` | Free a task's worktree folder and ports without losing work. Without `--yes` it prints what goes (folder, size freed, uncommitted files, run actions, ports) and changes nothing. With `--yes` it stops the worker and run actions, saves uncommitted work (untracked too, not gitignored) to `refs/rollcall/archive/<home>/<id>` (never pushed), runs teardown and removes the worktree; the record and conversation stay. Yours or the supervisor's, never a worker's |
 | `rollcall task restore <id>` | The worktree back at its old path on its branch, the saved work applied as uncommitted changes (staged comes back unstaged), a note if origin's branch moved (it never rebases), the ref dropped, setup run again, the worker resumed |
 | `rollcall queue status` | Who is landing now, and who touches your files |
+| `rollcall ship status` | This branch's ship: checks running, in line, or after the merge, and its last news. `rollcall ship start [--land]` and `ship wait` are the agent's side (see the rollcall README) |
 | `rollcall task comment <id> <file>:<line> "<text>"` | A line comment on a running task's worktree. `rollcall task comments <id>` lists them, `... comments <id> send` delivers all pending ones to the worker as one message |
-| `rollcall pr threads [<pr>]` | The PR's open review threads. Answer with `rollcall pr reply <thread-id> "<text>" [--resolve]`, resolve with `rollcall pr resolve <thread-id>...`. `rollcall queue add` refuses a PR with open threads unless you pass `--owner-ok "<your words>"` |
+| `rollcall pr threads [<pr>]` | The PR's open review threads. Answer with `rollcall pr reply <thread-id> "<text>" [--resolve]`, resolve with `rollcall pr resolve <thread-id>...`. `rollcall queue add` and `rollcall ship start` refuse a PR with open threads unless you pass `--owner-ok "<your words>"` |
 | `rollcall turns [<task>]` | A task worktree's per-turn snapshots, shell changes included. `turns diff <n>` and `turns since <n>` show changes; `turns restore <n>` puts the files back to turn n (the state it replaces is saved first) |
 | `rollcall allow-main [--off]` | Let agents edit this repo's main checkout, shared by every session (for example a notes repo that commits straight to main) |
 | `rollcall allow-shared` | Let a session edit, and run checkout-changing git in, a checkout another session is using, on purpose |

@@ -409,6 +409,9 @@ async function wait(args) {
     }
     const cur = store.readRecord(repo.key, target.id);
     if (!cur || cur.endedAt || (cur.pid && !pidAlive(cur.pid, cur.pidStart))) {
+      // Its SessionEnd may have written its done between the events read above and this record read.
+      const late = store.readEventsSince(repo.key, cursor).events.find((e) => e.type === "done" && e.session === target.id);
+      if (late) { say(doneLine(late)); return release(0, late); }
       say(`${P} ${who(target)} ended without running rollcall done (its process is gone).`);
       return release(2);
     }

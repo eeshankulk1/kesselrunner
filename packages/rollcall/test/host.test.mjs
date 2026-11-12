@@ -100,6 +100,8 @@ test("host: a request answered from two clients: the first wins, the other hears
   assert.match(req.id, /^rq-/);
   assert.equal(req.kind, "permission");
   assert.equal(req.tool, "Bash");
+  // The push event can reach a client before the host rewrites its compat record.
+  await until(() => x.compat()?.prompt?.id === req.id).catch(() => {});
   assert.equal(x.compat().prompt?.id, req.id, "the compat record shows the open request as its prompt");
   const [r1, r2] = await Promise.all([a.call("answer", { request: req.id, allow: true, by: "mac" }), b.call("answer", { request: req.id, allow: false, by: "phone" })]);
   assert.equal(r1.ok, true);
@@ -317,6 +319,7 @@ test("host: a hosted crew's task worker starts in the host, and the seam drives 
   await until(() => x.agent()?.state === "stopped");
   task = store.readTask("alpha", "t1");
   assert.equal(workerState(task).stopped, true);
+  await until(() => x.compat() === null).catch(() => {});
   assert.equal(x.compat(), null, "a stopped agent has no record: nothing reaches it");
 });
 
