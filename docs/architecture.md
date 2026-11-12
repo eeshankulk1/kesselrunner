@@ -25,7 +25,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `settings.core.json` | Core settings: hooks, plugins, marketplaces, the status line (`rollcall statusline`). `{{KESSELRUNNER}}` and `{{DOCSIC}}` are filled in at sync (see [overlay.md](overlay.md#paths-inside-your-files)) |
 | `.claude-plugin/marketplace.json` | Makes this repo the `kesselrunner` plugin marketplace: the mods in `mods/` by relative path, third-party mods pinned to a reviewed commit |
 | `mods/` | `rollcall-band`, `pr-band`, `clickable`: one folder per mod (manifest, hooks module, state contract, tests) |
-| `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher |
+| `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher. The three that work from a complete brief (frontend-tester, ios-driver, deploy-watcher) set `omitClaudeMd: true` and start without the CLAUDE.md files; their own file and the brief carry what they need |
 | `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/note`, `/frontend-test`, `/ios-sim`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
 | `docs/` | These docs, plus the project docs standard, templates, the test-manifest schema, plans and the worklog |
 | `bin/kesselrunner.mjs` | The install, sync, doctor, delegate and rules CLI (`bin/dotclaude.mjs` is the old name) |
