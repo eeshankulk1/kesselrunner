@@ -12,6 +12,7 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { manifestOf } from "./checkout.mjs";
 import { transcriptFor } from "./conversation.mjs";
+import { bin as codexBin } from "./harness/codex.mjs";
 import { gitSync, isMainCheckout, locate, mainCheckout, remoteUrl, repoKey } from "./git.mjs";
 import * as store from "./store.mjs";
 
@@ -220,6 +221,8 @@ async function pause(agents, host) {
 
 /** Copies `rel` from `from` into `to` (files, folders, links as they are). */
 function copyRel(from, to, rel) {
+  // Names come from the archive: none may climb out of the folder it lands in.
+  if (typeof rel !== "string" || !rel || rel.startsWith("/") || rel.split("/").includes("..")) throw new Error(`a path in the archive is not safe: ${rel}`);
   const dst = join(to, rel.replace(/\/$/, ""));
   mkdirSync(dirname(dst), { recursive: true });
   cpSync(join(from, rel.replace(/\/$/, "")), dst, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, force: true });
@@ -557,8 +560,8 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
     // Each session's files, filed under the folder Claude Code derives from the new cwd.
     for (const s of move.sessions) {
       if (s.harness === "claude") {
-        const dir = s.cwd ? encodeCwd(rw(s.cwd)) : s.dir;
-        const src = join(x, "sessions", "claude", s.dir);
+        const dir = encodeCwd(s.cwd ? rw(s.cwd) : s.dir);
+        const src = join(x, "sessions", "claude", encodeCwd(s.dir));
         for (const name of [`${s.id}.jsonl`, s.id]) {
           if (!existsSync(join(src, name))) continue;
           const dst = join(claudeProjects(), dir, name);
@@ -616,7 +619,7 @@ function fixLaunchBins(wd) {
   if (c?.bin && c.bin.startsWith("/") && !existsSync(c.bin)) writeJson(cl, { ...c, bin: process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude" });
   const xl = join(wd, "codex-launch.json");
   const x = readJson(xl);
-  if (x?.bin && x.bin.startsWith("/") && !existsSync(x.bin)) writeJson(xl, { ...x, bin: process.env.ROLLCALL_CODEX_BIN || "codex" });
+  if (x?.bin && x.bin.startsWith("/") && !existsSync(x.bin)) writeJson(xl, { ...x, bin: codexBin() });
 }
 
 /** Removes what an unpack made, newest first, and puts back what it replaced. */

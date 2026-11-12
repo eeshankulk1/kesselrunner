@@ -181,6 +181,8 @@ Newline-delimited JSON both ways. A call is `{ "id": <any>, "op": "...", ... }`;
 | `terminal` | `ref` | `argv`, `cwd`, `unset`, `agent`; the escape hatch begins (held by its connection) |
 | `terminal-done` | `ref` | `closed`, `added`, `agent` |
 | `terminal-end` | `ref` | `closing`, `agent`: the terminal closes once its turn ends |
+| `adopt` | `refs` | `adopted`, `skipped`: each agent of `refs` read again from disk (a chat a move unpacked, replaced or removed; one with a process is skipped). A home that appears while the host runs is also found on its first `state` or `say` |
+| `system` | `ref`, `text` | `ok`: a `system` item in the agent's history (a move's "Moved to Cloud from MacBook Pro") |
 | `shutdown` | | `ok`, then the host exits |
 
 Events on a subscribed connection: `{ "type": "event", "v": 1, "seq", "at", "ref", "ev", ... }` with `ev`:
