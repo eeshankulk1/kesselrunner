@@ -195,7 +195,8 @@ function queuesView() {
  * work, the decisions waiting on the owner and the front ends open now. `home` keeps it to one supervisor.
  */
 export function snapshot({ home = null, now = Date.now() } = {}) {
-  const homes = store.listHomes().filter((h) => !home || h === home);
+  // A chat that moved to another machine (move.mjs moved.json) shows there, not here.
+  const homes = store.listHomes().filter((h) => (!home || h === home) && !store.readHomeFile(h, "moved"));
   const views = homes.flatMap((h) => visibleTasks(h, { now })).map((t) => ({ t, v: view(t, now) }));
   return {
     interface: INTERFACE, rollcall: VERSION, at: now,
