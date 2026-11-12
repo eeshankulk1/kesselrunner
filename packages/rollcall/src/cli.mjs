@@ -83,6 +83,14 @@ ${RUNTIME_USAGE}
   rollcall api version | snapshot | stream | do <action> <json> | attach <home>[:<task>]
                                          the front-end interface, for apps over rollcall (JSON; see API.md)
   rollcall usage [--json] [--refresh]    each plan's room: Claude's five-hour and weekly limits, Codex's limits
+  rollcall usage report [<range>] [--save <name>] [--json]
+                                         where Claude Code spend went: by model, lane, agent, project; context,
+                                         idle gaps, handoffs, ships, quality signals (range: --from <YYYY-MM-DD>
+                                         --to <YYYY-MM-DD>, or --days <n>; default the last 30 days;
+                                         --transcripts <dir> reads another projects folder)
+  rollcall usage compare <name> [<range>] [--json]
+                                         a range against a saved baseline; usage baselines lists them,
+                                         usage forget <name> deletes one
   rollcall hook <event>                  hook entry point (stdin: the hook payload)
 
   -C <dir> runs any command as if started in <dir>.
@@ -152,10 +160,63 @@ export async function main(argv) {
  * weekly windows, from the last status line that had them, and Codex's limits (--refresh reads them now).
  */
 async function usage(args) {
+  if (["report", "compare", "baselines", "forget"].includes(args[0])) return usageReport(args[0], args.slice(1));
   const u = await import("./usage.mjs");
   if (args.includes("--refresh")) { const r = u.refreshCodex(Date.now(), { force: true }); if (r) await r; }
   if (args.includes("--json")) { say(JSON.stringify(u.usageOf(), null, 2)); return 0; }
   say(u.usageLine() || "no usage known yet: Claude's shows once a Claude Code session on a Pro or Max plan has answered; Codex's with --refresh");
+  return 0;
+}
+
+/**
+ * `rollcall usage report|compare|baselines|forget`: the usage report (usage-report.mjs) over Claude Code's
+ * transcripts. `report` prints a range (`--save <name>` keeps it as a baseline, under rollcall's home); `compare`
+ * prints a range against a saved baseline, the numbers that moved. Aggregates only, never message text.
+ */
+async function usageReport(sub, args) {
+  const r = await import("./usage-report.mjs");
+  const opts = {}, flags = new Set();
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (["--from", "--to", "--days", "--save", "--transcripts"].includes(a)) {
+      if (args[i + 1] == null) return usageError(`usage ${sub}: ${a} needs a value`);
+      opts[a.slice(2)] = args[++i];
+    } else if (a === "--json") flags.add(a);
+    else if (a.startsWith("-")) return usageError(`usage ${sub}: unknown option "${a}"`);
+    else rest.push(a);
+  }
+  try { for (const nm of [opts.save, sub === "compare" || sub === "forget" ? rest[0] : undefined]) if (nm != null) r.safe(nm); } catch (e) { return usageError(`usage ${sub}: ${e.message}`); }
+  if (sub === "baselines") {
+    const list = r.listBaselines();
+    if (flags.has("--json")) { say(JSON.stringify(list, null, 2)); return 0; }
+    say(list.length ? list.map((b) => `${b.name}  ${b.range?.from} to ${b.range?.to}  (saved ${b.saved?.slice(0, 10)})`).join("\n") : "no baselines saved yet: rollcall usage report --save <name>");
+    return 0;
+  }
+  if (sub === "forget") {
+    if (rest.length !== 1) return usageError("usage: rollcall usage forget <name>");
+    if (!r.loadBaseline(rest[0])) { process.stderr.write(`rollcall: no baseline "${rest[0]}"\n`); return 1; }
+    r.deleteBaseline(rest[0]);
+    say(`forgot baseline "${rest[0]}"`);
+    return 0;
+  }
+  if (sub === "report" && rest.length) return usageError(`usage report: unknown argument "${rest[0]}"`);
+  if (sub === "compare" && rest.length !== 1) return usageError("usage: rollcall usage compare <name> [--from <date>] [--to <date> | --days <n>] [--json]");
+  let base = null;
+  if (sub === "compare") {
+    base = r.loadBaseline(rest[0]);
+    if (!base) { process.stderr.write(`rollcall: no baseline "${rest[0]}" (rollcall usage baselines lists them)\n`); return 1; }
+  }
+  let rep;
+  try { rep = await r.report({ from: opts.from, to: opts.to, days: opts.days, root: opts.transcripts }); } catch (e) { return usageError(`usage ${sub}: ${e.message}`); }
+  if (opts.save) {
+    try { r.saveBaseline(opts.save, rep); } catch (e) { return usageError(`usage ${sub}: ${e.message}`); }
+  }
+  if (sub === "compare") {
+    const rows = r.compare(base.report, rep);
+    say(flags.has("--json") ? JSON.stringify({ baseline: base.name, base: base.report.range, now: rep.range, rows }, null, 2) : r.formatCompare(base.name, base.report, rep, rows));
+  } else say(flags.has("--json") ? JSON.stringify(rep, null, 2) : r.format(rep));
+  if (opts.save) process.stderr.write(`saved as baseline "${opts.save}"\n`);
   return 0;
 }
 
