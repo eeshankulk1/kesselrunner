@@ -16,7 +16,7 @@ import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
 import { TASK_ENV, capFlag, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
 import * as tmux from "../tmux.mjs";
-import { effortOk } from "./index.mjs";
+import { effortOk } from "./efforts.mjs";
 
 export const name = "claude";
 export const title = "Claude Code";

@@ -19,6 +19,7 @@ import { startClaude } from "../claude/stream.mjs";
 import { killServer } from "../codex/session.mjs";
 import { launchFile as codexLaunchFile, policyFor } from "../harness/codex.mjs";
 import { trustWorktree } from "../harness/claude.mjs";
+import { clampEffort, claudeModelsStale, effortOk, effortsFor, effortsOf, rememberClaudeModels } from "../harness/efforts.mjs";
 import { loadFinder, relaysOf } from "./relays.mjs";
 import { startCodexAgent, terminalTurns } from "./codex.mjs";
 import { SESSION_ENV, codeStamp, hostDir, infoFile, lockFile, logFile, socketPath, withoutSessionEnv } from "./client.mjs";
@@ -121,7 +122,7 @@ class Agent {
     const s = this.rec.state ?? "stopped";
     return {
       ref: this.ref, home: this.h, task: this.id, supervisor: !this.id, harness: this.rec.harness, state: s, send: SEND[s], session: this.rec.session,
-      since: this.rec.since, turnAt: this.rec.turnAt, parkedAt: this.rec.parkedAt, model: this.rec.model, mode: this.rec.mode,
+      since: this.rec.since, turnAt: this.rec.turnAt, parkedAt: this.rec.parkedAt, model: this.rec.model, mode: this.rec.mode, effort: this.rec.effort ?? null,
       pid: this.proc?.pid ?? null, requests: [...this.hist.open.values()], queued: this.queued.map(({ uuid, text, at, from }) => ({ uuid, text, at, from })),
       terminal: this.terminal ? { at: this.terminal.at, closing: this.terminal.closing ?? null } : null,
     };
@@ -242,6 +243,7 @@ class Agent {
     this.rec.session = cfg.session;
     this.rec.model = cfg.model ?? null;
     this.rec.mode = cfg.mode ?? null;
+    this.rec.effort = cfg.effort ?? null;
     this.hist.append({ ev: "session", session: cfg.session, harness, how: resume ? "resume" : "new" });
     broadcast(this.ref, "session", { session: cfg.session, how: resume ? "resume" : "new" });
     let first = "";
@@ -269,7 +271,10 @@ class Agent {
       }
       this.rec.thread = proc.thread;
       if (first.trim()) await proc.baseline; // so a quick first turn's files are that turn's, not turn 0's
-    } else proc = startClaude({ cfg, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
+    } else {
+      proc = startClaude({ cfg, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
+      readClaudeModels(proc);
+    }
     this.proc = proc;
     log(`${this.ref}: started ${resume ? "resumed" : "new"} ${harness} session ${cfg.session} (pid ${this.proc.pid})`);
     this.rec.held = null; // they go to the process just below: a later restart must not send them again
@@ -359,13 +364,27 @@ class Agent {
     return { ok: true, interrupted: true };
   }
 
-  async set({ model = null, mode = null } = {}) {
+  async set({ model = null, mode = null, effort = null } = {}) {
     // A chat on Codex takes Codex's modes (host/chat.mjs CODEX_MODES) from its next turn; a Codex task's worker keeps its own.
     const codex = this.chat ? readChat(this.h)?.harness === "codex" : this.rec.harness === "codex" || (!this.rec.state && newerLaunch(this.h, this.id) === "codex");
+    const harness = codex ? "codex" : "claude";
     if (mode && codex && !this.chat) return err("bad-payload", "a Codex worker keeps the permission mode it started with");
     const modes = codex ? new Set(modesOf("codex").map((m) => m.id)) : SET_MODES;
     if (mode && !modes.has(mode)) return err("bad-payload", `mode is one of ${[...modes].join(", ")}`);
-    if (!model && !mode) return err("bad-payload", "set takes a model or a mode");
+    if (!model && !mode && !effort) return err("bad-payload", "set takes a model, a mode or an effort");
+    if (effort && !effortOk(effort, harness)) return err("bad-payload", `effort is one of ${effortsOf(harness).join(", ")}`);
+    if (mode && !this.proc && !this.chat) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
+    const file = launchOf(this.h, this.id, harness);
+    const cfg0 = readJson(file);
+    // The effort: the one asked for, which the model (the new one, else the current one) must take; with a model
+    // change and none asked for, the current level when the new model takes it, else the highest it takes below.
+    const target = model ?? this.rec.model ?? cfg0?.model ?? (this.chat ? readChat(this.h)?.model : null) ?? null;
+    const efforts = effortsFor(harness, target);
+    if (effort && !efforts.includes(effort)) return err("bad-payload", efforts.length ? `effort on ${target ?? "this model"} is one of ${efforts.join(", ")}` : `${target} takes no effort level`);
+    const now = this.rec.effort ?? cfg0?.effort ?? (this.chat ? readChat(this.h)?.effort : null) ?? null;
+    let nextEffort;
+    if (effort) nextEffort = effort;
+    else if (model && now && !efforts.includes(now)) nextEffort = clampEffort(now, efforts, harness);
     const done = {};
     if (model) {
       if (this.proc) { const r = await this.proc.setModel(model).catch((e) => ({ error: e.message })); if (r?.error) return err("failed", r.error); }
@@ -375,8 +394,19 @@ class Agent {
       this.rec.model = model;
       done.model = model;
     }
+    if (nextEffort !== undefined) {
+      // Live in a running session: Claude Code's flag settings (as /effort sets it), Codex from its next turn.
+      if (this.proc?.setEffort) {
+        const r = await this.proc.setEffort(nextEffort).catch((e) => ({ error: e.message }));
+        if (r?.error) return err("failed", `${NAME[harness]} did not take effort ${nextEffort ?? "default"}: ${r.error}`);
+      }
+      // Every start after, from the launch (a running Codex session writes its own).
+      const cfg = readJson(file);
+      if (cfg && !(this.proc && codex)) writeJson(file, { ...cfg, effort: nextEffort });
+      this.rec.effort = nextEffort;
+      done.effort = nextEffort;
+    }
     if (mode) {
-      if (!this.proc && !this.chat) return err("refused", `${this.ref} is not running: a mode lasts for a running session`);
       if (this.proc) {
         const r = await this.proc.setMode(mode).catch((e) => ({ error: e.message }));
         if (r?.error) return err("failed", r.error);
@@ -384,14 +414,13 @@ class Agent {
       // The owner's pick lasts across park and wake (its chip shows it), as a model carries into a resume: a chat's
       // across archive too, and a task's worker's when the host wakes it after a park. A worker the host resumed in
       // its first mode kept asking for permissions the owner had switched off.
-      const harness = codex ? "codex" : "claude";
-      const cfg = readJson(launchOf(this.h, this.id, harness));
-      if (cfg) writeJson(launchOf(this.h, this.id, harness), { ...cfg, mode, ...(codex ? policyFor(mode) : {}) });
+      const cfg = readJson(file);
+      if (cfg) writeJson(file, { ...cfg, mode, ...(codex ? policyFor(mode) : {}) });
       this.rec.mode = mode;
       done.mode = mode;
     }
     // The chat's record too: a launch written again from it (a worktree remade on unarchive) starts with the pick.
-    if (this.chat) updateChat(this.h, (c) => { if (model) c.model = model; if (mode) c.mode = mode; });
+    if (this.chat) updateChat(this.h, (c) => { if (model) c.model = model; if (mode) c.mode = mode; if (nextEffort !== undefined) c.effort = nextEffort; });
     // A Codex chat's tasks start in the Claude mode its pick matches: the session's record says it (bindChat).
     if (this.chat && codex && mode && this.rec.session) bindChat(this.h, this.rec.session);
     this.persist();
@@ -505,7 +534,7 @@ class Agent {
     }
     if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(started ? null : cfg.session, started ? cfg.session : null);
     let args;
-    if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : [])];
+    if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : []), ...(cfg.effort ? ["-c", `model_reasoning_effort="${cfg.effort}"`] : [])];
     else {
       // A session that never ran starts with its name and first prompt.
       let first = "";
@@ -753,6 +782,21 @@ async function supervisorTask(h, also = null) {
   const last = lastSession(h);
   const ids = [...new Set([last?.id, also].filter(Boolean))];
   return { id: h, home: h, worktree: last?.cwd ?? readJson(launchFile(h, null))?.cwd ?? null, sessions: ids.map((id) => ({ id, harness: "claude" })) };
+}
+
+/**
+ * Claude Code's model list (which effort levels each model takes), read from session `proc` with an `initialize`
+ * control request when the kept one is missing or old (harness/efforts.mjs). One read at a time; a failed one waits
+ * for the next session.
+ */
+let readingModels = false;
+function readClaudeModels(proc) {
+  if (readingModels || !claudeModelsStale()) return;
+  readingModels = true;
+  Promise.resolve(proc.control?.({ subtype: "initialize" }, 20_000))
+    .then((r) => { if (r?.models) rememberClaudeModels(r.models); else if (r?.error) log(`Claude Code's models were not read: ${r.error}`); })
+    .catch((e) => log(`Claude Code's models were not read: ${e.message}`))
+    .finally(() => { readingModels = false; });
 }
 
 /** The agent for `ref`, made on first use (nothing starts). */

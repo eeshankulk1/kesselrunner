@@ -900,6 +900,13 @@ test("task new --worktree takes over an existing worktree on its branch; --model
   assert.match(sup.cli(["task", "new", "main", "--worktree", sb.main]).stderr, /--worktree takes a worktree of origin \(not its main checkout\)/);
   assert.match(sup.cli(["task", "new", "x", "--repo", sb.main, "--model", "opus; rm -rf ~"]).stderr, /--model is a model alias or id/);
   assert.match(sup.cli(["task", "new", "x", "--repo", sb.main, "--effort", "huge"]).stderr, /--effort is one of low, medium, high, xhigh, max/);
+  // Each harness checks its own levels: Codex has no max, but takes minimal.
+  assert.match(sup.cli(["task", "new", "x", "--repo", sb.main, "--harness", "codex", "--effort", "max"]).stderr, /--effort on Codex is one of none, minimal, low, medium, high, xhigh/);
+  assert.match(sup.cli(["task", "new", "x", "--repo", sb.main, "--effort", "minimal"]).stderr, /--effort is one of low, medium, high, xhigh, max/);
+  const codex = sup.cli(["task", "new", "on codex", "--repo", sb.main, "--harness", "codex", "--effort", "minimal"]);
+  assert.equal(codex.code, 0, codex.stderr);
+  const t2 = json(sup.cli(["task", "show", "t2", "--json"]));
+  assert.deepEqual([t2.harness, t2.effort], ["codex", "minimal"]);
 });
 
 test("a finished task's record goes after two days; what it left for the owner stays for good, its report with it", (t) => {

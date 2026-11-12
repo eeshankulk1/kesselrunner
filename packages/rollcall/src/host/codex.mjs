@@ -95,6 +95,7 @@ export async function startCodexAgent({ h, id, cfg, envFile = null, env = proces
     answer: (rid, p, input, a) => core.answer({ ...a, prompt: `codex-${rid}` }).allowed === true,
     interrupt: () => core.interrupt(),
     setModel: (model) => core.setModel(model),
+    setEffort: (effort) => core.setEffort(effort),
     // A chat's mode, from its next turn (host/server.mjs refuses it for a task's worker).
     setMode: (mode) => (id ? Promise.resolve({ error: "a Codex worker keeps the permission mode it started with" }) : core.setMode(mode)),
     /** Ends the session (its SessionEnd hook) and the server. */

@@ -28,6 +28,7 @@ const ROLLCALL = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "pack
 const src = (m) => import(join(dirname(ROLLCALL), "..", "src", m));
 const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
 const { hostedHome } = await src("host/client.mjs");
+const [{ clampEffort, effortsFor }, { models: codexModels }] = await Promise.all([src("harness/efforts.mjs"), src("harness/codex.mjs")]);
 
 const run = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, ...opts });
 const rollcall = (argv) => run(process.execPath, [ROLLCALL, ...argv]);
@@ -43,14 +44,25 @@ function rollcallCommand() {
 /**
  * The model and effort a worker runs on: its task's own (`task new --model/--effort`), else the harness's
  * (kesselrunner's core settings, then the owner's overlay, as `kesselrunner sync` merges them), never what `/model`
- * last saved to the owner's settings. Null leaves the choice to Claude Code.
+ * last saved to the owner's settings. Null leaves the choice to Claude Code. A cockpit chat's task that names no effort
+ * takes the chat's (the owner's pick on its chip) when it runs on the chat's harness, clamped to what its model takes.
  */
 function workerModel(t) {
   const read = (p) => { try { return JSON.parse(readFileSync(p, "utf8")) ?? {}; } catch { return {}; } };
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
   const overlay = (read(join(claudeDir, ".kesselrunner", "state.json")).overlay) ?? read(join(claudeDir, ".dotclaude", "state.json")).overlay; // .dotclaude: the state dir before the rename
   const s = { ...read(join(dirname(ROLLCALL), "..", "..", "..", "settings.core.json")), ...(overlay ? read(join(overlay, "settings.json")) : {}) };
-  return { model: t.model ?? s.model ?? null, effort: t.effort ?? s.effortLevel ?? null };
+  const model = t.model ?? s.model ?? null;
+  return { model, effort: t.effort ?? chatEffort(t, model) ?? s.effortLevel ?? null };
+}
+
+/** The effort task `t` takes from the chat that started it, or null (no chat, no pick, another harness). */
+function chatEffort(t, model) {
+  if (!chat?.effort) return null;
+  const harness = harnessOf(t);
+  if ((chat.harness ?? "claude") !== harness) return null;
+  const on = harness === "codex" ? (codexModels.ok(t.model) ? t.model : process.env.ROLLCALL_CODEX_MODEL || null) : model;
+  return clampEffort(chat.effort, effortsFor(harness, on), harness);
 }
 
 function readJson(r, what) {

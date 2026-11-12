@@ -26,6 +26,7 @@ import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
 import { KINDS, closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
+import { effortOk, effortsFor, effortsOf } from "./harness/efforts.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
 const START_FILE = process.env.ROLLCALL_START_FILE || fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
@@ -262,14 +263,16 @@ export const ACTIONS = {
     },
   },
 
-  // The model or permission mode of a hosted agent, changed in its running session (as /model or Shift-Tab would).
+  // The model, permission mode or effort of a hosted agent, changed in its running session (as /model, Shift-Tab or
+  // /effort would), or for its next start when it runs no process.
   "worker.set": {
-    cli: "/model or Shift-Tab in the worker's window",
+    cli: "/model, Shift-Tab or /effort in the worker's window",
     run(p) {
       const x = targetOf(p);
       const model = str(p, "model", { required: false, max: 100 });
       const mode = str(p, "mode", { required: false, max: 40 });
-      if (!model && !mode) refuse("bad-payload", "model or mode is required");
+      const effort = str(p, "effort", { required: false, max: 20 });
+      if (!model && !mode && !effort) refuse("bad-payload", "model, mode or effort is required");
       // A chat on Codex takes Codex's models and modes (host/chat.mjs); a Codex task's worker keeps its mode.
       const codexChat = !x.t && isChat(x.h) && readChat(x.h)?.harness === "codex";
       const codex = codexChat || (!!x.t && harnessOf(x.t) === "codex");
@@ -278,15 +281,19 @@ export const ACTIONS = {
       if (!codex && model && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
       const modes = codexChat ? modesOf("codex").map((m) => m.id) : [...SET_MODES];
       if (mode && !modes.includes(mode)) refuse("bad-payload", `mode is one of ${modes.join(", ")}`);
-      // A chat with no process (parked, archived) takes the pick for its next start (host/server.mjs set).
-      if (!x.t && isChat(x.h) && !live.record(x.h, x.id)) {
-        const r = callSync("set", { ref: x.h, model, mode });
-        if (!r.ok) refuse(r.error?.code === "bad-payload" ? "bad-payload" : "failed", r.error?.message ?? "the agent host refused");
+      // Each harness checks its own levels here; the host checks the model's own list (host/server.mjs set).
+      const harness = codex ? "codex" : "claude";
+      if (effort && !effortOk(effort, harness)) refuse("bad-payload", `effort${codex ? " on Codex" : ""} is one of ${effortsOf(harness).join(", ")}`);
+      const codeOf = (c) => (c === "bad-payload" || c === "refused" ? c : "failed");
+      // A chat, or a hosted task's worker, with no process (stopped, archived) takes the pick for its next start.
+      if (hostedHome(x.h) && (x.t ? x.t.sessions?.length > 0 : isChat(x.h)) && !live.record(x.h, x.id)) {
+        const r = callSync("set", { ref: x.t ? refOf(x.t) : x.h, model, mode, effort });
+        if (!r.ok) refuse(codeOf(r.error?.code), r.error?.message ?? "the agent host refused");
         return { set: r.set ?? {}, view: viewAfter(x) };
       }
-      hostedAgent(x, "change its model or mode");
-      const r = live.send(x.h, x.id, { op: "set", model, mode });
-      if (!r.ok) refuse("failed", r.err ?? "the agent refused");
+      hostedAgent(x, "change its model, mode or effort");
+      const r = live.send(x.h, x.id, { op: "set", model, mode, effort });
+      if (!r.ok) refuse(codeOf(r.code), r.err ?? "the agent refused");
       return { set: r.set ?? {}, view: viewAfter(x) };
     },
   },
@@ -325,9 +332,15 @@ export const ACTIONS = {
       const mode = str(p, "mode", { required: false, max: 40 }) ?? "default";
       const modes = modesOf(harness);
       if (!modes.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${modes.map((m) => m.id).join(", ")}`);
+      // An effort the picked model takes (chatOptions' `efforts` for it), else the session's own default.
+      const effort = str(p, "effort", { required: false, max: 20 });
+      if (effort !== null) {
+        const efforts = effortsFor(harness, model);
+        if (!efforts.includes(effort)) refuse("bad-payload", efforts.length ? `effort on ${model} is one of ${efforts.join(", ")}` : `${model} takes no effort level`);
+      }
       const title = str(p, "title", { required: false, max: 200 });
       if (title !== null && !title.trim()) refuse("bad-payload", "title is empty");
-      const r = await newChat({ folder: cwd, text, attachments, model, mode, title: title?.trim() ?? null });
+      const r = await newChat({ folder: cwd, text, attachments, model, mode, effort, title: title?.trim() ?? null });
       if (!r.ok) refuse(r.code, r.err, r.home ? { home: r.home } : undefined);
       return { home: r.home, ref: r.home, chat: r.chat, session: r.session };
     },

@@ -14,6 +14,7 @@ import { basename, dirname, join } from "node:path";
 import { launchFile, readJson, writeJson } from "../claude/live.mjs";
 import { once } from "../codex/rpc.mjs";
 import { bin as codexBin, launchFile as codexLaunchFile, models as codexNames, modelFor, policyFor, writableRoots } from "../harness/codex.mjs";
+import { codexListEfforts, defaultEffortFor, effortOk, effortsFor } from "../harness/efforts.mjs";
 import { defaultBranch, gitSync, locate, mainCheckout, repoKey } from "../git.mjs";
 import { BIN } from "../session.mjs";
 import { isOpen } from "../state.mjs";
@@ -90,14 +91,19 @@ export async function refreshCodexModels({ force = false, env = process.env, now
   const b = codexBin(env);
   if (!b) return null;
   const last = store.readMachineFile("codex-models");
-  if (!force && last?.at && now - last.at < MODELS_TTL) return last.models;
+  // A list read before it carried each model's efforts is read again at once.
+  if (!force && last?.at && now - last.at < MODELS_TTL && last.models?.every((m) => Array.isArray(m.efforts))) return last.models;
   try {
     const r = await once(b, "model/list", { limit: 100 }, { env, timeoutMs: 20_000 });
     const seen = new Set();
     const models = (r?.data ?? [])
       .filter((m) => m && !m.hidden && typeof (m.model ?? m.id) === "string")
       .sort((a, b) => Number(!!b.isDefault) - Number(!!a.isDefault))
-      .map((m) => ({ id: m.model ?? m.id, label: m.displayName || m.model || m.id, harness: "codex" }))
+      .map((m) => ({
+        id: m.model ?? m.id, label: m.displayName || m.model || m.id, harness: "codex",
+        // The reasoning efforts it takes (Codex's order) and the one it runs on when none is picked.
+        efforts: codexListEfforts(m.supportedReasoningEfforts) ?? [], defaultEffort: effortOk(m.defaultReasoningEffort, "codex") ? m.defaultReasoningEffort : null,
+      }))
       .filter((m) => !seen.has(m.id) && seen.add(m.id));
     if (!models.length) return null;
     store.updateMachineFile("codex-models", () => ({ value: { at: now, models }, out: null }));
@@ -105,10 +111,14 @@ export async function refreshCodexModels({ force = false, env = process.env, now
   } catch { return null; }
 }
 
-/** `codex()`: whether the codex CLI is installed: its models are offered only then. */
+/**
+ * `codex()`: whether the codex CLI is installed: its models are offered only then. Each model carries `efforts` (the
+ * levels it takes, lowest first; `[]`: none) and `defaultEffort` (what a chat on it runs on with none picked, or null).
+ */
 export function chatOptions({ codex = () => false } = {}) {
+  const withEfforts = (m) => ({ id: m.id, label: m.label, harness: m.harness, efforts: effortsFor(m.harness, m.id), defaultEffort: defaultEffortFor(m.harness, m.id) });
   return {
-    models: [...CLAUDE_MODELS, ...(codex() ? codexModels() : [])],
+    models: [...CLAUDE_MODELS, ...(codex() ? codexModels() : [])].map(withEfforts),
     defaultModel: "opus",
     modes: { claude: CLAUDE_MODES, codex: CODEX_MODES },
     // The owner runs every session in Auto: a new chat, and the tasks it starts, run without asking for each command.
@@ -297,7 +307,7 @@ export function writeChatLaunch(h, c, { session = null, resume = false } = {}) {
     ...(prev ?? {}),
     home: h, task: null, session, resume, settings: null, cwd: c.worktree ?? c.folder,
     bin: process.env.KESSELRUNNER_CLAUDE_BIN || process.env.DOTCLAUDE_CLAUDE_BIN || "claude",
-    prompt: null, mode: c.mode && c.mode !== "default" ? c.mode : null, model: c.model ?? null, effort: null, addDir: [], name: c.title,
+    prompt: null, mode: c.mode && c.mode !== "default" ? c.mode : null, model: c.model ?? null, effort: effortOk(c.effort, "claude") ? c.effort : null, addDir: [], name: c.title,
     appendPrompt: writeContract(h, c), view: "chat",
   });
 }
@@ -310,7 +320,7 @@ export function writeCodexChatLaunch(h, c, { session = null } = {}) {
   const f = codexLaunchFile(h, null);
   const prev = readJson(f);
   const cwd = c.worktree ?? c.folder;
-  const on = modelFor({ model: c.model });
+  const on = modelFor({ model: c.model, effort: c.effort ?? null });
   writeJson(f, {
     home: h, task: null, session: session ?? prev?.session ?? randomUUID(), thread: session && session !== prev?.session ? null : prev?.thread ?? null,
     name: c.title, cwd, prompt: null, model: isCodexModel(c.model) ? c.model : on.model, effort: on.effort, mode: c.mode ?? "default", ...policyFor(c.mode),
@@ -342,7 +352,7 @@ export function bindChat(h, session) {
  * launch with the chat contract appended, and its session started in the host on the owner's own words. Returns once
  * the agent is started, never waiting on the first turn: { ok, home, chat, session } or { ok: false, code, err }.
  */
-export async function newChat({ folder, text, attachments = [], model = "opus", mode = "default", title = null, now = Date.now() }) {
+export async function newChat({ folder, text, attachments = [], model = "opus", mode = "default", effort = null, title = null, now = Date.now() }) {
   const harness = isCodexModel(model) ? "codex" : "claude";
   const h = reserveChatHome();
   if (!h) return { ok: false, code: "failed", err: "could not find a free chat name" };
@@ -350,7 +360,7 @@ export async function newChat({ folder, text, attachments = [], model = "opus", 
   const w = makeWorktree(h, folder);
   const c = {
     title: title ?? draftTitle(text), titleBy: title ? "owner" : "draft", folder, repo: w.repo, worktree: w.worktree, branch: w.branch,
-    harness, model, mode, createdAt: now, lastUsedAt: now, archivedAt: null, archivedBy: null, note: w.note,
+    harness, model, mode, effort: effort ?? null, createdAt: now, lastUsedAt: now, archivedAt: null, archivedBy: null, note: w.note,
   };
   writeChat(h, c);
   const session = randomUUID();
@@ -467,7 +477,7 @@ export function chatView(h) {
   return {
     title: c.title, titleBy: c.titleBy, folder: c.folder, folderName: basename(c.folder ?? "") || null, repo: c.repo ?? null,
     worktree: c.worktree ?? null, branch: c.branch ?? null, harness: a?.harness ?? c.harness ?? "claude", model: a?.model ?? c.model ?? null,
-    mode: a?.mode ?? c.mode ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null, archivedAt: c.archivedAt ?? null,
+    mode: a?.mode ?? c.mode ?? null, effort: effortOf(c, a), createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null, archivedAt: c.archivedAt ?? null,
     archivedBy: c.archivedBy ?? null, note: c.note ?? null, busy: busyOf(a),
   };
 }
@@ -488,6 +498,15 @@ function crewChat(h, a = agentRecord(h, null)) {
     worktree: null, branch: null, harness: a?.harness ?? "claude", model: null, mode: null, // its agent's own, in chatView
     createdAt: made, lastUsedAt: used ?? made, archivedAt: null, archivedBy: null, note: null,
   };
+}
+
+/**
+ * The level chat `c` runs on now: its agent's (a live change included), else the owner's pick, else what a session on
+ * its model runs on with none picked; null when unknown.
+ */
+function effortOf(c, a) {
+  const harness = a?.harness ?? c.harness ?? "claude";
+  return a?.effort ?? c.effort ?? defaultEffortFor(harness, a?.model ?? c.model ?? null);
 }
 
 /** What the chat's agent does now, from its record (agent.json): "waiting" (a request open), "working" (a turn runs, or open in a terminal: archive refuses both), or null. */

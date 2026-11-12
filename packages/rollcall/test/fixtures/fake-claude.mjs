@@ -10,8 +10,10 @@
 //   ASKTAGGED  asks AskUserQuestion with the questions in $FAKE_CLAUDE_QUESTIONS (JSON)
 //   ASK        asks AskUserQuestion with one "Ship it?" question
 //   SLOW       streams for about 2 s, 20 x $FAKE_CLAUDE_SLOW_MS (an interrupt ends it with an error result)
-// Control requests: interrupt, set_model and set_permission_mode answer success. stdin's end: exit 0 once the
-// turn running is done.
+// Control requests: interrupt, set_model, set_permission_mode and apply_flag_settings (as /effort sends it) answer
+// success; initialize answers with Claude Code's model list (`models`: value, resolvedModel, displayName,
+// supportsEffort, supportedEffortLevels), MODELS below or the JSON array in $FAKE_CLAUDE_MODELS. $FAKE_CLAUDE_REFUSE
+// (subtypes, comma-separated) answers those with an error instead. stdin's end: exit 0 once the turn running is done.
 //
 // Without `-p` it is the real CLI in the terminal: prints a line and waits until SIGTERM (exit 143, as the real
 // one), or until its parent is gone.
@@ -19,13 +21,23 @@
 // $FAKE_CLAUDE_TRANSCRIPT=1: stream mode writes each turn to the session's transcript as Claude Code does: the user
 // line under the uuid it was sent with, the reply, and a stop_hook_summary line whose uuid is not the result's.
 //
-// $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv, task }, { in } (every stdin line), { replayed }, { sigterm }.
+// $FAKE_CLAUDE_LOG gets one JSON line per fact: { argv, task }, { in } (every stdin line), { replayed }, { sigterm },
+// { effort } (the level an apply_flag_settings set: null for the default).
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
+/** Claude Code's model list as `initialize` answers it (2.1.3xx): opus takes every level, sonnet no xhigh, haiku none. */
+const ALL = ["low", "medium", "high", "xhigh", "max"];
+const MODELS = [
+  { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", supportsEffort: true, supportedEffortLevels: ALL },
+  { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", supportsEffort: true, supportedEffortLevels: ALL },
+  { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "max"] },
+  { value: "claude-opus-4-6", resolvedModel: "claude-opus-4-6", displayName: "Opus 4.6", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "max"] },
+  { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", supportsEffort: false },
+];
 const log = (x) => { if (process.env.FAKE_CLAUDE_LOG) { try { appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ pid: process.pid, ...x })}\n`); } catch {} } };
 const argAfter = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -166,8 +178,13 @@ function stream() {
     }
     if (m.type === "control_request") {
       const sub = m.request?.subtype;
-      if (sub === "interrupt") interrupted = true;
-      if (["interrupt", "set_model", "set_permission_mode"].includes(sub)) out({ type: "control_response", response: { subtype: "success", request_id: m.request_id, response: {} } });
+      const refused = (process.env.FAKE_CLAUDE_REFUSE ?? "").split(",").includes(sub);
+      if (sub === "interrupt" && !refused) interrupted = true;
+      if (sub === "apply_flag_settings" && !refused) log({ effort: m.request.settings?.effortLevel ?? null });
+      const ok = (response) => out({ type: "control_response", response: { subtype: "success", request_id: m.request_id, response } });
+      if (refused) out({ type: "control_response", response: { subtype: "error", request_id: m.request_id, error: `fake claude: refused ${sub}` } });
+      else if (sub === "initialize") ok({ commands: [], models: process.env.FAKE_CLAUDE_MODELS ? JSON.parse(process.env.FAKE_CLAUDE_MODELS) : MODELS });
+      else if (["interrupt", "set_model", "set_permission_mode", "apply_flag_settings"].includes(sub)) ok({});
       else out({ type: "control_response", response: { subtype: "error", request_id: m.request_id, error: `fake claude: no ${sub}` } });
     }
   });
