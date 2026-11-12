@@ -72,7 +72,7 @@ Before that first prompt, `task new` has already made the worktree ready, so the
 Feedback reaches a running worker, or the PR, without prose. All three pieces live in `packages/rollcall/` and work from the terminal; details and syntax are in [rollcall's README](../packages/rollcall/README.md#review-loop).
 
 - **Line comments.** `rollcall task comment` stores a comment on a file and line of a task's worktree; `task comments <id> send` delivers all pending ones as one item through the worker's outbox, and the worker resolves or replies to each. The supervisor adds and sends them for the owner (`skills/supervisor/SKILL.md`).
-- **PR review threads.** `rollcall pr threads|reply|resolve` list and answer threads through `gh api graphql`. `queue add` refuses a PR with open threads (unless the owner says otherwise), and the lander pulls a PR back when a thread appears before the merge. `/pr-create` Steps 5 and 6 run this loop.
+- **PR review threads.** `rollcall pr threads|reply|resolve` list and answer threads through `gh api graphql`. `queue add` and `ship start` refuse a PR with open threads (unless the owner says otherwise), and the lander pulls a PR back when a thread appears before the merge. `/pr-create` runs this loop before the PR opens, and the ship script reports a thread that appears after (a `review` notice).
 - **Turn snapshots.** Every turn in a linked worktree, a Claude Code worker's or a Codex worker's, is saved to a private repo under the rollcall home, outside the project's refs. `rollcall turns` lists, diffs and restores them, including changes made by shell commands.
 
 ## Mods

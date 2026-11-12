@@ -51,7 +51,7 @@ export function gh(cwd, args, { timeout = 60_000, maxBuffer = 16 * 1024 * 1024 }
   const r = spawnSync(process.env.ROLLCALL_GH || "gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer });
   return { ok: r.status === 0, out: r.stdout ?? "", err: (r.stderr ?? "").trim() || (r.error ? String(r.error.message) : "") };
 }
-const ghJson = (cwd, args) => { const r = gh(cwd, args); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
+export const ghJson = (cwd, args) => { const r = gh(cwd, args); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
 
 const PR_FIELDS = "number,state,isDraft,headRefName,headRefOid,baseRefName,url,title,body,statusCheckRollup,mergeStateStatus";
 /** A commit status (an attest's, a deploy's) rather than a workflow's check run. */
@@ -216,7 +216,7 @@ export const rejoin = (e) => (e.ship ? AGAIN : "wait for green checks, then roll
 /** What follows a landing: a ship's after-merge runner (ship.mjs) carries on, else the shipper's release steps. */
 export const landedNext = (e) => (e.ship && e.land
   ? "rollcall now watches what the merge started and runs the release commands: nothing to do unless it says so."
-  : "Next: the release steps (/pr-create Step 7), then the report.");
+  : "Next: the manifest's release.afterMerge steps, then the report.");
 
 /**
  * Ends an entry's turn: `kind` is landed, conflict, failed, parked or left, and for a ship (ship.mjs) also red (its
@@ -334,7 +334,7 @@ function add(args, ctx) {
   if (pr.headRefOid !== head) ctx.fail(`#${pr.number}'s head is ${short(pr.headRefOid)}, not HEAD (${short(head)}): GitHub has not seen your last push yet; try again in a moment`);
   if (pr.baseRefName !== b) ctx.fail(`#${pr.number} targets ${pr.baseRefName}, not ${b}: the queue lands on ${b}. Once ${pr.baseRefName} has landed, retarget it (gh pr edit ${pr.number} --base ${b}), then queue add`);
   const c = checksOf(pr.statusCheckRollup);
-  if (c.failed.length) ctx.fail(`#${pr.number} has red checks: ${c.failed.map((x) => x.name).join(", ")}. The queue takes green PRs: fix them first (/pr-create Step 5)`);
+  if (c.failed.length) ctx.fail(`#${pr.number} has red checks: ${c.failed.map((x) => x.name).join(", ")}. The queue takes green PRs: fix them first, or let rollcall ship start --land watch them`);
   if (c.pending.length) ctx.fail(`#${pr.number}'s checks are still running (${fileList(c.pending, 4)}): wait for them (gh pr checks ${pr.number} --watch), then queue add`);
   // Review threads: an open one lands only on the owner's word, given for exactly the threads open now.
   const th = prThreads(top, pr.number);

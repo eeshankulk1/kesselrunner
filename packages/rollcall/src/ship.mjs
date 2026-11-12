@@ -16,7 +16,7 @@ import { matchScope } from "./glob.mjs";
 import { AGAIN, ENDS, SHIP_USAGE, shipNews } from "./ship-news.mjs";
 import { blockOnBilling, billingRefusal, clear, ensureTree, rerun, runIn, trouble } from "./lander.mjs";
 import { pidAlive, sameProcess, startOf } from "./proc.mjs";
-import { changedFiles, checksOf, ensureLander, entryNews, finishEntry, gh, guard, isStatus, manifestAt, prLook, span } from "./queue.mjs";
+import { changedFiles, checksOf, ensureLander, entryNews, finishEntry, gh, ghJson, guard, isStatus, manifestAt, prLook, span } from "./queue.mjs";
 import { P, ago, fileList, msgLine, short, who } from "./session.mjs";
 import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
@@ -206,7 +206,7 @@ export function ciLine(cwd, pr, text) {
 // ---------------------------------------------------------------- after the merge
 
 /** gh api in `cwd` as JSON, or null. */
-const api = (cwd, path) => { const r = gh(cwd, ["api", path]); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
+const api = (cwd, path) => ghJson(cwd, ["api", path]);
 
 /**
  * What the merge started on GitHub, as it stands: { items: [{ name, kind, state: pending|ok|failed, link, env }] },
@@ -220,7 +220,8 @@ function merged(cwd, sha) {
   if (!runs || !status || !deploys) return null;
   const items = [];
   for (const r of runs.check_runs ?? []) {
-    const ok = ["success", "neutral", "skipped"].includes(r.conclusion);
+    // A cancelled run on main is mostly one a later push superseded (cancel-in-progress): that push's run tests it.
+    const ok = ["success", "neutral", "skipped", "cancelled"].includes(r.conclusion);
     items.push({ name: r.name, kind: "check", state: r.status !== "completed" ? "pending" : ok ? "ok" : "failed", link: r.details_url ?? r.html_url ?? null });
   }
   for (const s of status.statuses ?? []) items.push({ name: s.context, kind: "status", state: s.state === "success" ? "ok" : s.state === "pending" ? "pending" : "failed", link: s.target_url ?? null });
@@ -307,7 +308,7 @@ export async function after(h, prn) {
       afterOutcome(key, a, "release-step", `#${prn} landed as ${short(a.sha)}; ${deployLine}.${done.length ? ` Release steps done: ${done.join(", ")}.` : ""} Next, from merged main, in order: ${rest.join(", then ")}. Then save your report and set the task landed.`);
       return 0;
     }
-    await waitTurn(c, prn);
+    await takeTurn(c, prn);
     stage("release", name);
     shipStage(a.task, "release");
     const dir = ensureTree(c, a.sha, "release");
@@ -330,11 +331,16 @@ export async function after(h, prn) {
   return 0;
 }
 
-/** Waits while another landed PR's release commands run in this repo's release checkout: one at a time. */
-async function waitTurn(c, prn) {
+/** Waits for this repo's release checkout, then takes it (stage "release", in one step): one PR's commands at a time. */
+async function takeTurn(c, prn) {
   for (;;) {
-    const busy = Object.values(store.readQueue(c.key).after ?? {}).find((x) => x.pr !== prn && x.stage === "release" && x.pid && sameProcess(x.pid, x.start));
-    if (!busy) return;
+    const got = store.updateQueue(c.key, (q) => {
+      const busy = Object.values(q.after ?? {}).some((x) => x.pr !== prn && x.stage === "release" && x.pid && sameProcess(x.pid, x.start));
+      if (busy) return false;
+      if (q.after?.[prn]) q.after[prn].stage = "release";
+      return true;
+    })?.out;
+    if (got) return;
     await sleep(Math.min(AFTER_POLL_MS(), 10_000));
   }
 }
