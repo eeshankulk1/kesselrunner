@@ -569,7 +569,7 @@ export function readQueue(key) {
   const q = readJson(queueState(key)) ?? {};
   return {
     seq: q.seq ?? 0, entries: q.entries ?? {}, bounced: q.bounced ?? {}, joined: q.joined ?? {}, train: q.train ?? null,
-    outcomes: q.outcomes ?? [], times: q.times ?? {},
+    outcomes: q.outcomes ?? [], times: q.times ?? {}, after: q.after ?? {},
   };
 }
 

@@ -587,7 +587,8 @@ function deltas(key, rec) {
       const hits = touched.filter((f) => matchScope(e.scope, f));
       if (hits.length) lines.push(`${P} ${e.who} claimed ${claimLabel(e.intent, e.scope)}, which covers files you edited: ${fileList(hits)}`);
     } else if (e.type === "queue" && e.to === rec.id && e.kind !== "added") {
-      lines.push(`${P} merge queue: ${e.text} ${SHIPPER_HAS_IT}`);
+      // A ship's news (ship.mjs) has no shipper waiting on it: the line is the session's own to act on.
+      lines.push(e.ship ? `${P} ship: ${e.text}` : `${P} merge queue: ${e.text} ${SHIPPER_HAS_IT}`);
     }
   }
   return lines;

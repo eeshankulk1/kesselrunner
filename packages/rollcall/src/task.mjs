@@ -13,6 +13,7 @@ import { asksText, promptAuthor } from "./asked.mjs";
 import { addComment, commentsCommand, commentsLine, readComments } from "./comments.mjs";
 import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoKey } from "./git.mjs";
 import { BIN, P, ago, cli, short } from "./session.mjs";
+import { sameProcess } from "./proc.mjs";
 import { callSync } from "./host/client.mjs";
 import { isChat } from "./host/chat.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
@@ -1044,6 +1045,22 @@ function stage(args, ctx) {
   return 0;
 }
 
+/** The ship script's own stage on task `ref` ("<home>:<id>"), as `task stage` sets it: "done" ends the stages. */
+export function shipStage(ref, name, now = Date.now()) {
+  if (!ref) return;
+  const [h, id] = ref.split(":");
+  let was = null, key = null;
+  store.withTasksLock(h, () => {
+    const t = store.readTask(h, id);
+    if (!isOpen(t) || t.stage?.name === name) return;
+    was = t.stage;
+    key = t.repo?.key;
+    t.stage = name === "done" ? null : { name, at: now };
+    store.writeTask(t);
+  });
+  if (was && key) store.addStageTime(key, was.name, now - was.at);
+}
+
 // ---------------------------------------------------------------- its worktree's runtime
 
 /** The task's worktree, for a command that acts in it; fails for one with none (or archived). */
@@ -1210,6 +1227,19 @@ const mergeKey = (t, head) => head ?? t.pr ?? "its work";
 const COMES_BACK = "its worker comes back for its after-merge steps";
 
 /**
+ * Whether task `t`'s PR has the ship script's after-merge runner (ship.mjs) still going: then rollcall, not its
+ * worker, finishes the ship. A runner the lander just started has a minute to claim its record.
+ */
+export function afterRunning(t, now = Date.now()) {
+  const n = Number(/\/pull\/(\d+)/.exec(t.pr ?? "")?.[1]);
+  const info = n && t.repo?.main ? locate(t.repo.main) : null;
+  if (!info) return false;
+  const a = store.readQueue(repoKey(info).key).after?.[n];
+  if (!a || a.stage === "done") return false;
+  return a.pid ? sameProcess(a.pid, a.start) : now - a.at < 60_000;
+}
+
+/**
  * Why an open task whose work rollcall saw on the default branch (`head`, the commit that landed) stays open,
  * or null when rollcall may mark it landed. A worker that still runs reports landed itself, once its after-merge
  * steps are done (a deploy watch, a TestFlight upload); so does one that handed off, through its successor, and
@@ -1221,6 +1251,7 @@ export function mergeHold(t, head, w = workerState(t), now = Date.now()) {
   const seen = t.merged?.key === mergeKey(t, head) ? t.merged : null;
   if (t.state === "needs-you") return "it waits on the owner";
   if (seen && (t.stateAt ?? 0) > seen.at) return `it was set ${t.state} after its merge`;
+  if (afterRunning(t)) return "rollcall's ship script watches what the merge started and runs its release steps, then lands it";
   if (w?.alive) return "its worker runs, and reports landed once its after-merge steps are done";
   if (t.handoff && t.handoff.session === t.sessions.at(-1)?.id) return "its worker handed off, and a fresh one carries on";
   if (!w || w.legacy || w.stopped) return null;

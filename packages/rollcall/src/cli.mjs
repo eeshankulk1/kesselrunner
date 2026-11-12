@@ -17,6 +17,7 @@ import { reminders, watchHome } from "./watch.mjs";
 import { backText, comeBack, unparkHome, writeWindow } from "./window.mjs";
 import { USAGE as QUEUE_USAGE, queueCommand } from "./queue.mjs";
 import { USAGE as PR_USAGE, prCommand } from "./threads.mjs";
+import { USAGE as SHIP_USAGE, shipCommand } from "./ship.mjs";
 import { USAGE as RESULTS_USAGE, results } from "./results.mjs";
 import { USAGE as TURNS_USAGE, pruneSnapshots, turnsCommand } from "./snapshot.mjs";
 import { USAGE as RUNTIME_USAGE, runtimeCommand } from "./runtime-cli.mjs";
@@ -45,6 +46,7 @@ const USAGE = `rollcall - awareness for parallel agent sessions on one machine
   rollcall wait <session|claim> [--timeout <minutes>]
                                          block until that session runs done (run it in the background)
 ${QUEUE_USAGE}
+${SHIP_USAGE}
 ${PR_USAGE}
 ${RESULTS_USAGE}
   rollcall allow-shared [--off]          let this session edit a checkout another session is using
@@ -108,6 +110,7 @@ export async function main(argv) {
       case "send": return send(rest);
       case "wait": return await wait(rest);
       case "queue": return await queueCommand(rest, { say, fail, flag, whoAmI });
+      case "ship": return await shipCommand(rest, { say, fail, flag, whoAmI });
       case "pr": return prCommand(rest, { say, fail, flag, whoAmI });
       case "land": return landGone(rest);
       case "results": return await results(rest, { say });
