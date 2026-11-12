@@ -202,6 +202,38 @@ test("move: resume wakes the running agents told they moved; undo resumes at the
   assert.equal(existsSync(join(a.store, "_supervisors", H, "move-out.json")), false);
 });
 
+test("move: an idle agent (its background commands stopped by the pause) is woken and told; a parked one is not", async (t) => {
+  const sb = sandbox(t);
+  const { a, wt } = mac(sb, t);
+  const b = place(sb, "cloud");
+  const host = fakeHost({ [H]: "idle" });
+  const packed = await as(a, () => move.pack({ home: H }, { host }));
+  assert.deepEqual([packed.running, packed.idle], [[], [H]]);
+  assert.deepEqual(host.calls.filter((c) => c.op !== "state").map((c) => c.op), ["park"], "parked, not interrupted");
+  await as(b, () => move.unpack({ path: packed.path, from: "MacBook Pro" }, { host: noHost() }));
+  const there = fakeHost();
+  const r = await as(b, () => move.resume({ home: H, here: "Cloud" }, { host: there }));
+  assert.deepEqual(r.woke, [H]);
+  const nwt = join(b.home, "origin", ".claude", "worktrees", H);
+  assert.equal(there.calls[1].text, `This chat moved from MacBook Pro to Cloud. Your files are now at ${nwt}. Commands you left running in the background were stopped by the move: start again any you still need; otherwise there is nothing to do.`);
+  const back = fakeHost();
+  const u = await as(a, () => move.undo({ home: H }, { host: back }));
+  assert.deepEqual(u.woke, [H]);
+  assert.equal(back.calls[0].text, `This chat was paused for a move that did not go ahead. Your files are where they were, at ${wt}. Commands you left running in the background were stopped; start again any you still need.`);
+
+  // Parked at pack time: it stays parked at the far side.
+  const sb2 = sandbox(t);
+  const m2 = mac(sb2, t);
+  const c = place(sb2, "cloud");
+  const p2 = await as(m2.a, () => move.pack({ home: H }, { host: fakeHost({ [H]: "parked" }) }));
+  assert.deepEqual([p2.running, p2.idle], [[], []]);
+  await as(c, () => move.unpack({ path: p2.path, from: "MacBook Pro" }, { host: noHost() }));
+  const quiet = fakeHost();
+  const r2 = await as(c, () => move.resume({ home: H, here: "Cloud" }, { host: quiet }));
+  assert.deepEqual(r2.woke, []);
+  assert.deepEqual(quiet.calls.map((x) => x.op), ["system"], "only the moved line in its history");
+});
+
 test("move: clash refuses and leaves nothing; discard removes only what unpack made", async (t) => {
   const sb = sandbox(t);
   const { a } = mac(sb, t);

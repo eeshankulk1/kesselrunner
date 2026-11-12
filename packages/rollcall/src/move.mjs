@@ -3,7 +3,8 @@
 // its agents and packs one archive: the home folder, each worktree's unsaved state (a git bundle of the commits origin
 // lacks, the tracked changes as a binary diff, the untracked files, the gitignored files `.worktreeinclude` names) and
 // each agent's own Claude or Codex session files. The target unpacks it into worktrees of its own checkout of the same
-// origin, rewrites every path, and leaves the agents parked; resume wakes the ones that were running. Nothing is pushed
+// origin, rewrites every path, and leaves the agents parked; resume wakes the ones that were running or idle (an idle
+// one may have left a command running in the background, which the pause stopped). Nothing is pushed
 // to GitHub, and no verb stashes, resets or deletes the source's files. Same code on macOS and Linux: system git and tar.
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -197,17 +198,23 @@ async function waitState(host, ref, ok, ms = 20_000) {
 }
 
 /**
- * Pauses the home's agents: each running one is interrupted, then each live one parked, through the host. Returns the
- * refs that were running. With no host running, a record that says running or idle has no process (the host that ran
- * it is gone): it counts as it says, and there is nothing to pause.
+ * Pauses the home's agents: each running one is interrupted, then each live one parked, through the host. Returns
+ * { running, idle, states }: the refs that were running, the refs that were idle (their process up, no turn: a command
+ * they left running in the background stops with the park), and each agent's state before the pause. With no host
+ * running, a record that says running or idle has no process (the host that ran it is gone): it counts as it says, and
+ * there is nothing to pause.
  */
 async function pause(agents, host) {
   const running = [];
+  const idle = [];
+  const states = {};
   for (const a of agents) {
     const s = await host("state", { ref: a.ref }, { start: false });
     const state = s?.ok ? s.agent?.state : a.state;
+    states[a.ref] = state ?? null;
     if (state === "terminal") refuse("busy-terminal", `${a.ref} is open in a terminal: close it first`);
     if (state === "running") running.push(a.ref);
+    if (state === "idle") idle.push(a.ref);
     if (!s?.ok || (state !== "running" && state !== "idle")) continue;
     if (state === "running") {
       await host("interrupt", { ref: a.ref }, { start: false });
@@ -215,10 +222,15 @@ async function pause(agents, host) {
     }
     await host("park", { ref: a.ref }, { start: false });
     const end = await waitState(host, a.ref, (x) => x === "parked" || x === "stopped" || x === null);
-    if (end === "running" || end === "idle") refuse("busy", `${a.ref} did not pause (it may be waiting on a question): answer it, then move again`, { running });
+    if (end === "running" || end === "idle") refuse("busy", `${a.ref} did not pause (it may be waiting on a question): answer it, then move again`, { running, idle });
   }
-  return running;
+  return { running, idle, states };
 }
+
+/** The refs of `a` and `b` together, each once, in order. */
+const union = (a, b) => [...new Set([...(a ?? []), ...(b ?? [])])];
+/** The idle refs that are not also running (a running agent's own line covers it). */
+const idleOnly = (idle, running) => (idle ?? []).filter((r) => !(running ?? []).includes(r));
 
 /** Copies `rel` from `from` into `to` (files, folders, links as they are). */
 function copyRel(from, to, rel) {
@@ -275,23 +287,33 @@ function pruneMoves(now = Date.now()) {
 }
 
 /**
- * `chat.move.pack`: pauses every agent of the home and writes one archive under `_moves/`. { path, bytes, sha256, running }.
- * The source's files are only read.
+ * `chat.move.pack`: pauses every agent of the home and writes one archive under `_moves/`. { path, bytes, sha256,
+ * running, idle }: the refs that were running and those that were idle at pack time. The source's files are only read.
  */
 export async function pack({ home: h }, { host = defaultHost } = {}) {
   const c = check({ home: h });
   if (c.problems.length) refuse(c.problems[0].code, c.problems.map((p) => p.message).join("; "), { problems: c.problems });
   pruneMoves();
   const agents = agentsOf(h);
-  // A pack tried before and never undone parked its running agents: they still count as running.
+  // A pack tried before and never undone parked its running and idle agents: they still count as they were.
   const before = store.readHomeFile(h, "move-out");
   const id = `${h}-${Date.now().toString(36)}-${randomBytes(2).toString("hex")}`;
   const path = join(movesDir(), `${id}.tar.gz`);
-  store.writeHomeFile(h, "move-out", { id, archive: path, running: before?.running ?? [], at: Date.now(), state: "pausing" });
-  let running;
-  try { running = [...new Set([...(before?.running ?? []), ...(await pause(agents, host))])]; }
-  catch (e) { store.writeHomeFile(h, "move-out", { id, archive: null, running: [...new Set([...(before?.running ?? []), ...(e.extra?.running ?? [])])], at: Date.now(), state: "failed" }); throw e; }
-  store.writeHomeFile(h, "move-out", { id, archive: path, running, at: Date.now(), state: "packing" });
+  store.writeHomeFile(h, "move-out", { id, archive: path, running: before?.running ?? [], idle: before?.idle ?? [], at: Date.now(), state: "pausing" });
+  let running, idle, states;
+  try {
+    const p = await pause(agents, host);
+    running = union(before?.running, p.running);
+    idle = idleOnly(union(before?.idle, p.idle), running);
+    states = p.states;
+  } catch (e) {
+    const r = union(before?.running, e.extra?.running);
+    store.writeHomeFile(h, "move-out", { id, archive: null, running: r, idle: idleOnly(union(before?.idle, e.extra?.idle), r), at: Date.now(), state: "failed" });
+    throw e;
+  }
+  for (const ref of running) states[ref] = "running";
+  for (const ref of idle) states[ref] = "idle";
+  store.writeHomeFile(h, "move-out", { id, archive: path, running, idle, at: Date.now(), state: "packing" });
 
   const stage = join(movesDir(), `${id}.stage`);
   rmSync(stage, { recursive: true, force: true });
@@ -344,15 +366,15 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
     }
     const move = {
       format: FORMAT, id, home: h, at: Date.now(), from: { host: hostname(), store: store.home(), homeDir: hd, home: homedir(), claude: dirname(claudeProjects()), codex: dirname(codexSessions()) },
-      agents: agents.map((a) => ({ ref: a.ref, task: a.task, harness: a.harness, state: a.state, cwd: a.cwd, session: a.launch?.session ?? a.rec?.session ?? null, thread: a.launch?.thread ?? a.rec?.thread ?? null })),
-      running, worktrees: wts, sessions,
+      agents: agents.map((a) => ({ ref: a.ref, task: a.task, harness: a.harness, state: states[a.ref] ?? a.state, cwd: a.cwd, session: a.launch?.session ?? a.rec?.session ?? null, thread: a.launch?.thread ?? a.rec?.thread ?? null })),
+      running, idle, worktrees: wts, sessions,
     };
     writeJson(join(stage, "move.json"), move);
     const t = spawnSync("tar", ["-czf", path, "-C", stage, "."], { encoding: "utf8", maxBuffer: 1 << 26 });
     if (t.status !== 0) refuse("failed", `tar could not write the archive: ${(t.stderr || t.error?.message || "").trim()}`);
-    store.writeHomeFile(h, "move-out", { id, archive: path, running, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, main: w.main, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
+    store.writeHomeFile(h, "move-out", { id, archive: path, running, idle, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, main: w.main, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
     const buf = readFileSync(path);
-    return { path, bytes: buf.length, sha256: sha256(buf), running };
+    return { path, bytes: buf.length, sha256: sha256(buf), running, idle };
   } catch (e) {
     rmSync(path, { force: true });
     throw e;
@@ -605,7 +627,7 @@ export async function unpack({ path, from, sha256: want = null }, { host = defau
       if (session) { const { bindChat } = await import("./host/chat.mjs"); bindChat(h, session); }
     }
     const agentsHere = Object.fromEntries(move.agents.map((a) => [a.ref, a.cwd ? rw(a.cwd) : null]));
-    store.writeHomeFile(h, "moved-in", { id: move.id, from: fromName, at: Date.now(), archive: path, running: move.running, agents: agentsHere, made });
+    store.writeHomeFile(h, "moved-in", { id: move.id, from: fromName, at: Date.now(), archive: path, running: move.running, idle: move.idle ?? [], agents: agentsHere, made });
     // The running host takes the home as it is on disk now (an agent it held before, from a home that moved away, too).
     await host("adopt", { refs }, { start: false });
     if (setup) {
@@ -692,7 +714,7 @@ export async function finish({ home: h, to }) {
   if (!out || out.state !== "packed") refuse("not-found", `${h} has no packed move to finish`);
   const movedTo = String(to ?? "").trim() || "another machine";
   const movedAt = Date.now();
-  store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, heldPacked: out.heldPacked ?? 0, worktrees: out.worktrees ?? [] });
+  store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, idle: out.idle ?? [], heldPacked: out.heldPacked ?? 0, worktrees: out.worktrees ?? [] });
   if (store.readHomeFile(h, "chat")) { const { updateChat } = await import("./host/chat.mjs"); updateChat(h, (c) => { c.movedTo = movedTo; c.movedAt = movedAt; return true; }); }
   store.writeHomeFile(h, "move-out", null);
   // The worktrees' blocks of ports go back to the pool: the chat runs there now (a chat coming back gets new ones).
@@ -731,19 +753,29 @@ async function wake(refs, text, host) {
 
 const placeName = (here) => String(here ?? "").trim() || process.env.ROLLCALL_PLACE_NAME || hostname();
 
-/** `chat.move.resume`: on the target, wakes the agents that were running at pack time, told they moved. */
+/** What an agent idle at pack time hears after the move: a command it left in the background stopped with the pause. */
+const STOPPED = "Commands you left running in the background were stopped by the move: start again any you still need; otherwise there is nothing to do.";
+
+/**
+ * `chat.move.resume`: on the target, wakes the agents that were running or idle at pack time, told they moved: a running
+ * one carries on, an idle one hears its background commands stopped. Parked and stopped ones stay parked.
+ */
 export async function resume({ home: h, here = null }, { host = defaultHost } = {}) {
   const m = store.readHomeFile(h, "moved-in");
   if (!m) refuse("not-found", `nothing moved into ${h} here`);
   const place = placeName(here);
   await host("system", { ref: h, text: `Moved to ${place} from ${m.from}` }, { start: true });
-  const r = await wake(m.running ?? [], (ref) => `This chat moved from ${m.from} to ${place}. Your files are now at ${m.agents?.[ref] ?? "the same place in this machine's checkout"}. Carry on where you left off.`, host);
+  const running = m.running ?? [];
+  const r = await wake(union(running, m.idle), (ref) => `This chat moved from ${m.from} to ${place}. Your files are now at ${m.agents?.[ref] ?? "the same place in this machine's checkout"}. ${running.includes(ref) ? "Carry on where you left off." : STOPPED}`, host);
   const held = await deliverHeld(h, host);
   store.writeHomeFile(h, "moved-in", { ...m, resumedAt: Date.now() });
   return { home: h, ...r, held };
 }
 
-/** `chat.move.undo`: on the source after a failed move: the home is live here again, its running agents carry on. */
+/**
+ * `chat.move.undo`: on the source after a failed move: the home is live here again, its running agents carry on and
+ * its idle ones hear their background commands stopped.
+ */
 export async function undo({ home: h }, { host = defaultHost } = {}) {
   if (!homeExists(h)) refuse("not-found", `no chat ${h}`);
   const out = store.readHomeFile(h, "move-out") ?? store.readHomeFile(h, "moved");
@@ -754,7 +786,8 @@ export async function undo({ home: h }, { host = defaultHost } = {}) {
   let deleted = false;
   if (out.archive && existsSync(out.archive)) { rmSync(out.archive, { force: true }); deleted = true; }
   const cwd = Object.fromEntries(agentsOf(h).map((a) => [a.ref, a.cwd]));
-  const r = await wake(out.running ?? [], (ref) => `This chat was paused for a move that did not go ahead. Your files are where they were${cwd[ref] ? `, at ${cwd[ref]}` : ""}. Carry on where you left off.`, host);
+  const running = out.running ?? [];
+  const r = await wake(union(running, out.idle), (ref) => `This chat was paused for a move that did not go ahead. Your files are where they were${cwd[ref] ? `, at ${cwd[ref]}` : ""}. ${running.includes(ref) ? "Carry on where you left off." : "Commands you left running in the background were stopped; start again any you still need."}`, host);
   const held = await deliverHeld(h, host);
   store.pokeWatcher(h);
   return { home: h, ...r, held, archiveDeleted: deleted };
