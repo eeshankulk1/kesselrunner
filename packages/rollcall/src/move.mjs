@@ -296,8 +296,9 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(stage, { recursive: true });
   try {
-    // The home, minus what only a live process here means.
+    // The home, minus what only a live process here means. Words held since the pause travel with it (move-held.json).
     const hd = store.homeDir(h);
+    const heldNow = heldOf(h).length;
     cpSync(hd, join(stage, "home"), { recursive: true, verbatimSymlinks: true, preserveTimestamps: true, filter: (src) => src === hd || !liveFile(relative(hd, src)) });
     // Each worktree's state.
     const { worktrees } = worktreesOf(agents);
@@ -346,7 +347,7 @@ export async function pack({ home: h }, { host = defaultHost } = {}) {
     writeJson(join(stage, "move.json"), move);
     const t = spawnSync("tar", ["-czf", path, "-C", stage, "."], { encoding: "utf8", maxBuffer: 1 << 26 });
     if (t.status !== 0) refuse("failed", `tar could not write the archive: ${(t.stderr || t.error?.message || "").trim()}`);
-    store.writeHomeFile(h, "move-out", { id, archive: path, running, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
+    store.writeHomeFile(h, "move-out", { id, archive: path, running, heldPacked: heldNow, at: Date.now(), state: "packed", worktrees: wts.map((w) => ({ path: w.path, branch: w.branch, tip: w.tip, fingerprint: w.fingerprint })) });
     const buf = readFileSync(path);
     return { path, bytes: buf.length, sha256: sha256(buf), running };
   } catch (e) {
@@ -650,11 +651,28 @@ export async function finish({ home: h, to }) {
   if (!out || out.state !== "packed") refuse("not-found", `${h} has no packed move to finish`);
   const movedTo = String(to ?? "").trim() || "another machine";
   const movedAt = Date.now();
-  store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, worktrees: out.worktrees ?? [] });
+  store.writeHomeFile(h, "moved", { movedTo, movedAt, id: out.id, archive: out.archive, running: out.running, heldPacked: out.heldPacked ?? 0, worktrees: out.worktrees ?? [] });
   if (store.readHomeFile(h, "chat")) { const { updateChat } = await import("./host/chat.mjs"); updateChat(h, (c) => { c.movedTo = movedTo; c.movedAt = movedAt; return true; }); }
   store.writeHomeFile(h, "move-out", null);
   store.pokeWatcher(h);
-  return { home: h, movedTo, movedAt };
+  // Words held after the archive was written did not travel: the front end forwards them.
+  return { home: h, movedTo, movedAt, held: heldOf(h).slice(out.heldPacked ?? 0) };
+}
+
+/** Words said to the home's agents while it was moving or moved away (the host holds them): { ref, uuid, text, at, from, attachments }. */
+export const heldOf = (h) => store.readHomeFile(h, "move-held")?.words ?? [];
+
+/** Delivers held words in order, each with its own uuid and sender; attachments that are not here are dropped. */
+async function deliverHeld(h, host) {
+  const words = heldOf(h);
+  store.writeHomeFile(h, "move-held", null);
+  const delivered = [];
+  const failed = [];
+  for (const w of words) {
+    const r = await host("say", { ref: w.ref, text: w.text, from: w.from ?? "owner", uuid: w.uuid, attachments: (w.attachments ?? []).filter((a) => existsSync(a)) }, { start: true });
+    if (r?.ok) delivered.push(w.uuid); else failed.push({ ref: w.ref, uuid: w.uuid, why: r?.error?.message ?? "the agent host did not answer" });
+  }
+  return { delivered, failed };
 }
 
 /** Wakes `refs` with `text(ref)` as rollcall's words: { woke, failed }. */
@@ -677,8 +695,9 @@ export async function resume({ home: h, here = null }, { host = defaultHost } = 
   const place = placeName(here);
   await host("system", { ref: h, text: `Moved to ${place} from ${m.from}` }, { start: true });
   const r = await wake(m.running ?? [], (ref) => `This chat moved from ${m.from} to ${place}. Your files are now at ${m.agents?.[ref] ?? "the same place in this machine's checkout"}. Carry on where you left off.`, host);
+  const held = await deliverHeld(h, host);
   store.writeHomeFile(h, "moved-in", { ...m, resumedAt: Date.now() });
-  return { home: h, ...r };
+  return { home: h, ...r, held };
 }
 
 /** `chat.move.undo`: on the source after a failed move: the home is live here again, its running agents carry on. */
@@ -693,8 +712,9 @@ export async function undo({ home: h }, { host = defaultHost } = {}) {
   if (out.archive && existsSync(out.archive)) { rmSync(out.archive, { force: true }); deleted = true; }
   const cwd = Object.fromEntries(agentsOf(h).map((a) => [a.ref, a.cwd]));
   const r = await wake(out.running ?? [], (ref) => `This chat was paused for a move that did not go ahead. Your files are where they were${cwd[ref] ? `, at ${cwd[ref]}` : ""}. Carry on where you left off.`, host);
+  const held = await deliverHeld(h, host);
   store.pokeWatcher(h);
-  return { home: h, ...r, archiveDeleted: deleted };
+  return { home: h, ...r, held, archiveDeleted: deleted };
 }
 
 /** `chat.move.discard`: on the target, drops what an unpack made; a checkout it did not make is never touched. */

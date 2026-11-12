@@ -280,7 +280,7 @@ test("move: the CLI answers check as the API does", async (t) => {
   assert.equal(out.result.worktrees[0].unpushed, 1);
 });
 
-test("host: a home that appears while the host runs is adopted; one moved away hears nothing", async (t) => {
+test("host: a home that appears while the host runs is adopted; words to one moved away are held", async (t) => {
   const x = setup(t);
   await x.startHost();
   const c = await x.client();
@@ -299,6 +299,63 @@ test("host: a home that appears while the host runs is adopted; one moved away h
   await until(() => readFileSync(join(wd, "history.jsonl"), "utf8").includes("Moved to Cloud from Mac"));
   write(join(x.sb.home, "_supervisors", h, "moved.json"), JSON.stringify({ movedTo: "Cloud", movedAt: Date.now() }));
   const said = await c.call("say", { ref: h, text: "hello" });
-  assert.equal(said.ok, false);
-  assert.match(said.error.message, /moved to Cloud/);
+  assert.equal(said.how, "held");
+  assert.match(said.why, /moved to Cloud/);
+});
+
+/** What the host does with words said to a moving home: it adds them to the home's move-held.json. */
+function hold(storeDir, word) {
+  const f = join(storeDir, "_supervisors", H, "move-held.json");
+  const held = readJson(f) ?? { words: [] };
+  held.words.push({ ref: H, at: Date.now(), from: "owner", attachments: [], ...word });
+  writeFileSync(f, JSON.stringify(held));
+}
+
+test("move: words said while moving wait, travel with the chat, and go in after the moved line (or at the source on undo)", async (t) => {
+  const sb = sandbox(t);
+  const { a } = mac(sb, t);
+  const b = place(sb, "cloud");
+  // Words arrive while the agents pause: they travel. Words after the archive is written do not.
+  const host = fakeHost({ [H]: "running" });
+  const park = host;
+  const pauseHost = async (op, payload, opts) => { if (op === "park") hold(a.store, { uuid: "u1", text: "first, while it paused" }); return park(op, payload, opts); };
+  const packed = await as(a, () => move.pack({ home: H }, { host: pauseHost }));
+  hold(a.store, { uuid: "u2", text: "late, after the archive" });
+  await as(b, () => move.unpack({ path: packed.path, from: "MacBook Pro" }, { host: noHost() }));
+  assert.deepEqual(readJson(join(b.store, "_supervisors", H, "move-held.json")).words.map((w) => w.uuid), ["u1"]);
+  const there = fakeHost();
+  const r = await as(b, () => move.resume({ home: H, here: "Cloud" }, { host: there }));
+  assert.deepEqual(there.calls.map((c) => `${c.op}:${c.from ?? ""}:${c.uuid ?? ""}`), ["system::", "say:rollcall:", "say:owner:u1"], "the moved line, then the held words in order, as the owner's, uuid kept");
+  assert.deepEqual(r.held.delivered, ["u1"]);
+  assert.equal(existsSync(join(b.store, "_supervisors", H, "move-held.json")), false);
+
+  // At the source: finish keeps holding and names the words that did not travel; undo delivers every held word here.
+  const f = await as(a, () => move.finish({ home: H, to: "Cloud" }));
+  assert.deepEqual(f.held.map((w) => w.uuid), ["u2"]);
+  const back = fakeHost();
+  const u = await as(a, () => move.undo({ home: H }, { host: back }));
+  assert.deepEqual(back.calls.map((c) => `${c.op}:${c.from}:${c.uuid ?? ""}`), ["say:rollcall:", "say:owner:u1", "say:owner:u2"]);
+  assert.deepEqual(u.held.delivered, ["u1", "u2"]);
+  for (const n of ["move-held.json", "move-out.json", "moved.json"]) assert.equal(existsSync(join(a.store, "_supervisors", H, n)), false, n);
+});
+
+test("host: words to a moving or moved-away home are held with the home, never waking its agents", async (t) => {
+  const x = setup(t);
+  x.launch();
+  await x.startHost();
+  const c = await x.client();
+  const hd = join(x.sb.home, "_supervisors", x.h);
+  write(join(hd, "move-out.json"), JSON.stringify({ id: "m", state: "pausing" }));
+  const r1 = await c.call("say", { ref: `${x.h}:t1`, text: "while moving", uuid: "w-1" });
+  assert.equal(r1.how, "held");
+  assert.equal(r1.uuid, "w-1");
+  rmSync(join(hd, "move-out.json"));
+  write(join(hd, "moved.json"), JSON.stringify({ movedTo: "Cloud", movedAt: Date.now() }));
+  const r2 = await c.call("say", { ref: `${x.h}:t1`, text: "after it left", from: "rollcall" });
+  assert.equal(r2.how, "held");
+  assert.match(r2.why, /moved to Cloud/);
+  const held = readJson(join(hd, "move-held.json")).words;
+  assert.deepEqual(held.map((w) => [w.ref, w.text, w.from]), [[`${x.h}:t1`, "while moving", "owner"], [`${x.h}:t1`, "after it left", "rollcall"]]);
+  assert.equal(x.fake().length, 0, "the agent never started");
+  assert.notEqual(x.agent()?.state, "running");
 });

@@ -304,6 +304,18 @@ class Agent {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
+    // A chat moving to another machine, or moved away (move.mjs), never wakes here: its words wait with the home, and
+    // go to its agents where it lands (resume), or here again if the move is undone.
+    const moving = store.readHomeFile(this.h, "move-out");
+    const moved = store.readHomeFile(this.h, "moved");
+    if (moving || moved) {
+      const q = { ref: this.ref, uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
+      const held = store.readHomeFile(this.h, "move-held") ?? { words: [] };
+      held.words.push(q);
+      store.writeHomeFile(this.h, "move-held", held);
+      const why = moved ? `${this.ref} moved to ${moved.movedTo ?? "another machine"}: the words wait there` : `${this.ref} is moving: the words go in where it lands`;
+      return { ok: true, how: "held", uuid: q.uuid, why };
+    }
     // A chat's record, or a hosted crew's from before chats once the owner renamed or archived it.
     const listed = this.id ? null : readChat(this.h);
     if (listed?.archivedAt) {
@@ -314,9 +326,6 @@ class Agent {
     }
     if (listed && (from ?? "owner") === "owner") touchChat(this.h);
     if (this.rec.state === "stopped" && from === "rollcall") return err("refused", `${this.ref} is stopped`);
-    // A chat that moved to another machine (move.mjs) runs only there: one live copy.
-    const moved = store.readHomeFile(this.h, "moved");
-    if (moved) return err("refused", `${this.ref} moved to ${moved.movedTo ?? "another machine"}`);
     // A supervisor's prompt hook tells the owner's lines from rollcall's by this note (hooks.mjs keyed).
     if (!this.id && (from ?? "owner") === "owner" && text.trim()) store.writeHomeFile(this.h, "app-line", { text, at: Date.now(), client: "host" });
     if (this.rec.state === "terminal") {
