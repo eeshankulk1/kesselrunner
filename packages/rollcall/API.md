@@ -345,7 +345,7 @@ Most results carry `view`: the task's view after the action, as in the snapshot.
 | `away.set` | `on` (bool) | `away` (the new value), `already` | `rollcall away on\|off` |
 | `held.answer` | `id`, `allow` (bool), optional `why` (up to 2,000) | `answered`, `already`, `delivered`, `how`, `view` (the task's view, or null) | `rollcall away allow\|deny <id> ["<why>"]` |
 | `held.allowAll` | optional `home` (only that supervisor's) | `approved` (ids), `count` | `rollcall away allow-all` |
-| `blocker.clear` | `kind` (`usage`, `billing`, `disk`, `power`, `memory`) | `cleared` | `rollcall blockers clear <kind>` |
+| `blocker.clear` | `kind` (`usage`, `usage-codex`, `billing`, `disk`, `power`, `memory`, `spotlight`) | `cleared` | `rollcall blockers clear <kind>` |
 | `review.comments` | `task` | `comments` (below) | `rollcall task comments <task> --json` |
 | `review.comment` | `task`, `file` (relative to its worktree, or absolute inside it), `line`, optional `end`, `text`, optional `send` (bool) | `comment` (its number), `sent`, `message`, `view` | `rollcall task comment <task> <file>:<line>[-<end>] "<text>"` |
 | `review.send` | `task` | `message`, `view` | `rollcall task comments <task> send` |

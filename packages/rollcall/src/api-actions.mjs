@@ -24,7 +24,7 @@ import { turnDiff, turnsCommand, worktreeOf } from "./snapshot.mjs";
 import { PATCH_MAX, checkLog, commentsNow, prTimeline, repoItems, runLog, taskDiff, turnsOf } from "./api-reads.mjs";
 import { answerDecision, recordWords, taskCommand } from "./task.mjs";
 import * as tmux from "./tmux.mjs";
-import { closeBlocker } from "./trouble.mjs";
+import { KINDS, closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
@@ -674,7 +674,7 @@ export const ACTIONS = {
     cli: "rollcall blockers clear <kind>",
     run(p) {
       const kind = str(p, "kind");
-      if (!["usage", "billing", "disk", "power", "memory"].includes(kind)) refuse("bad-payload", "kind is one of usage, billing, disk, power, memory");
+      if (!KINDS.includes(kind)) refuse("bad-payload", `kind is one of ${KINDS.join(", ")}`);
       return { cleared: closeBlocker(kind) };
     },
   },
