@@ -2,6 +2,7 @@
 name: ios-driver
 description: "iOS simulator driving worker. Spawned by the /ios-sim skill with a complete brief (app, simulator, launch state, numbered flows with expected results, evidence wanted); builds, installs and launches the app, drives it like a user with `iosim` (taps, typing, swipes, the accessibility listing, screenshots), and returns ONLY a structured report plus the paths of a few screenshots - build logs, UI listings and intermediate screenshots stay in this agent's context. Do not spawn directly: the /ios-sim skill scopes the check and writes the brief."
 model: sonnet
+omitClaudeMd: true
 color: cyan
 codex: never
 ---

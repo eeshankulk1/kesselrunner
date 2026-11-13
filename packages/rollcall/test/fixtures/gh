@@ -10,7 +10,10 @@
 //                 and a merge is refused until the head it names has shown), failView?: text (pr view fails with it),
 //            annotations?: { <job id>: [{ message }] }, reruns: { <run id>: n }, calls: [argv...],
 //            failGraphql?: text (api graphql fails with it), upToDate?: true (branch protection: a PR must hold its base),
-//            failMerge?: text (the next pr merge fails with it, once) }
+//            failMerge?: text (the next pr merge fails with it, once),
+//            logs?: { <run id>: text } (run view <id> --log-failed),
+//            merged?: { checkRuns: [{ name, status, conclusion }], statuses: [{ context, state }], deployments: [{ id, environment, state, url }] }
+//              (what a merge commit started, as the ship script's after-merge runner reads it through gh api) }
 //   A PR's review threads: pr.threads = [{ id, isResolved, isOutdated, path, line, comments: [{ author: { login, __typename }, body, url, createdAt }] }];
 //   api graphql answers the reviewThreads query and the addPullRequestReviewThreadReply / resolveReviewThread mutations.
 // A check runs forever (pending: true, or pendingIfFiles: every file exists at the PR's head).
@@ -153,6 +156,22 @@ if (group === "pr" && cmd === "view") {
   process.stdout.write(JSON.stringify({ data }));
 } else if (group === "api" && /\/check-runs\/(\d+)\/annotations$/.test(cmd)) {
   process.stdout.write(JSON.stringify(s.annotations?.[/\/check-runs\/(\d+)\//.exec(cmd)[1]] ?? []));
+} else if (group === "pr" && cmd === "edit") {
+  const pr = find(ref);
+  if (!pr) die("no such pull request");
+  if (opt("--body") !== undefined) pr.body = opt("--body");
+} else if (group === "run" && cmd === "view" && has("--log-failed")) {
+  if (s.logs?.[ref] === undefined) die(`run ${ref} not found`);
+  process.stdout.write(s.logs[ref]);
+} else if (group === "api" && /\/commits\/[0-9a-f]+\/check-runs/.test(cmd)) {
+  process.stdout.write(JSON.stringify({ total_count: (s.merged?.checkRuns ?? []).length, check_runs: (s.merged?.checkRuns ?? []).map((r) => ({ details_url: null, ...r })) }));
+} else if (group === "api" && /\/commits\/[0-9a-f]+\/status$/.test(cmd)) {
+  process.stdout.write(JSON.stringify({ state: "success", statuses: s.merged?.statuses ?? [] }));
+} else if (group === "api" && /\/deployments\?sha=/.test(cmd)) {
+  process.stdout.write(JSON.stringify((s.merged?.deployments ?? []).map((d) => ({ id: d.id, environment: d.environment }))));
+} else if (group === "api" && /\/deployments\/(\d+)\/statuses/.test(cmd)) {
+  const d = (s.merged?.deployments ?? []).find((x) => String(x.id) === /\/deployments\/(\d+)\//.exec(cmd)[1]);
+  process.stdout.write(JSON.stringify(d ? [{ state: d.state, environment_url: d.url ?? null, log_url: null }] : []));
 } else if (group === "run" && cmd === "rerun") {
   s.reruns[ref] = (s.reruns[ref] ?? 0) + 1;
 } else {

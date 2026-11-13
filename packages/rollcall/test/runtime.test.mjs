@@ -79,7 +79,7 @@ test("two tasks on one web app run their dev servers at once on their own ports,
   const started1 = sup.cli(["task", "run", "t1", "start", "web"]);
   assert.equal(started1.code, 0, started1.stdout + started1.stderr);
   assert.equal(sup.cli(["task", "run", "t2", "start", "web"]).code, 0);
-  t.after(() => { sup.cli(["task", "run", "t1", "stop", "all"]); sup.cli(["task", "run", "t2", "stop", "all"]); });
+  sb.atEnd(() => { sup.cli(["task", "run", "t1", "stop", "all"]); sup.cli(["task", "run", "t2", "stop", "all"]); });
   const p1 = one.runtime.ports.base;
   const p2 = two.runtime.ports.base;
   const body = async (p) => (await fetch(`http://127.0.0.1:${p}`)).text();
@@ -220,7 +220,7 @@ test("archive frees a task's folder and ports and keeps its work; restore brings
   rmSync(join(wt, "README.md"));
   write(join(wt, ".env"), "ignored\n");
   assert.equal(sup.cli(["task", "run", "t1", "start", "web"]).code, 0);
-  t.after(() => sup.cli(["task", "run", "t1", "stop", "all"]));
+  sb.atEnd(() => sup.cli(["task", "run", "t1", "stop", "all"]));
   await until(() => fetch(`http://127.0.0.1:${port}`).then(() => true, () => false));
 
   // First what goes and how much it frees; nothing is removed.
