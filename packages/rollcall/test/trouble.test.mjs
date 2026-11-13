@@ -229,7 +229,8 @@ function leftovers(t) {
   const folder = (id, ms) => { const p = join(temp, "-project", id); write(join(p, "scratchpad/x"), "x"); age(join(p, "scratchpad"), ms); age(p, ms); return p; };
   const ended = folder(UUID(1), 2 * DAY);
   const openTask = folder(UUID(2), 2 * DAY);
-  const young = folder(UUID(3), 2 * 3600_000);
+  const young = folder(UUID(3), 8 * 3600_000); // ended 8 hours ago: on the list for the owner's yes
+  const midTask = folder(UUID(5), 3 * 3600_000); // quiet 3 hours: a long task may still come back to it
   const quietLess = folder(UUID(4), 600_000);
   const live = folder(sup.id, 2 * DAY);
   const notSession = folder("not-a-session", 2 * DAY);
@@ -250,7 +251,7 @@ function leftovers(t) {
     "999994 1 02:00:00 /Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome Helper --type=renderer --user-data-dir=/tmp/x",
     "",
   ].join("\n"));
-  return { ...m, sup, env, orphan, gone, kept, open, away, module, ended, openTask, young, quietLess, live, notSession, dead, running, fresh, other, upload, uploading, npm };
+  return { ...m, sup, env, orphan, gone, kept, open, away, module, ended, openTask, young, midTask, quietLess, live, notSession, dead, running, fresh, other, upload, uploading, npm };
 }
 
 test("gc removes what ended work left and nothing an open task or a running session may need", (t) => {
@@ -270,27 +271,26 @@ test("gc removes what ended work left and nothing an open task or a running sess
 test("rollcall clean clears what rebuilds itself without asking, and keeps what work uses", (t) => {
   const l = leftovers(t);
   const dry = l.sup.cli(["clean", "--dry-run"]).stdout;
-  assert.match(dry, /would clear 4 folders that rebuild themselves/);
+  assert.match(dry, /would clear 3 folders that rebuild themselves/);
   assert.match(dry, new RegExp(`Kept-abc\\n.*Xcode build folder of ${l.sb.main}/src`));
   assert.match(dry, /ModuleCache\.noindex\n.*shared build cache/);
   assert.match(dry, /npm-cache\n.*download cache/);
-  assert.match(dry, /temp folder of an ended session/);
-  assert.match(dry, /nothing waits for your yes/);
-  for (const p of [l.open, l.gone, l.live, l.openTask, l.quietLess]) assert.ok(!dry.includes(p), `${p} is not listed`);
+  // A recent session's temp folder is not cleared: it waits for the owner's yes, and only once quiet six hours.
+  assert.match(dry, new RegExp(`rollcall clean --yes deletes these 1 \\(.*\\n\\n.*${l.young}\\n.*temp folder of a session that ended, quiet 8 hours`));
+  for (const p of [l.open, l.gone, l.live, l.openTask, l.quietLess, l.midTask]) assert.ok(!dry.includes(p), `${p} is not listed`);
   for (const p of [l.kept, l.module, l.young, l.npm]) assert.ok(existsSync(p), "a dry run clears nothing");
 
   // A build running puts every Xcode folder off limits, and an install the package caches. So does ps not answering.
   const ps = readFileSync(process.env.ROLLCALL_PS_FILE, "utf8");
   writeFileSync(process.env.ROLLCALL_PS_FILE, "123 456 01:00 /usr/bin/xcodebuild test\n124 456 01:00 node /usr/local/bin/npm install\n");
-  assert.match(l.sup.cli(["clean"]).stdout, /cleared 1 folder that rebuild/);
-  assert.ok(!existsSync(l.young));
+  assert.doesNotMatch(l.sup.cli(["clean"]).stdout, /cleared/);
   assert.ok(existsSync(l.kept) && existsSync(l.module) && existsSync(l.npm), "in use");
   writeFileSync(process.env.ROLLCALL_PS_FILE, "");
   assert.doesNotMatch(l.sup.cli(["clean"]).stdout, /cleared/);
   writeFileSync(process.env.ROLLCALL_PS_FILE, ps);
   assert.match(l.sup.cli(["clean"]).stdout, /cleared 3 folders that rebuild themselves/);
   for (const p of [l.kept, l.module, l.npm]) assert.ok(!existsSync(p), `${p} went`);
-  for (const p of [l.open, l.live, l.openTask, l.quietLess]) assert.ok(existsSync(p), `${p} stays`);
+  for (const p of [l.open, l.live, l.openTask, l.quietLess, l.midTask, l.young]) assert.ok(existsSync(p), `${p} stays`);
 });
 
 /** A worktree in the leftovers' repo whose work never landed, last touched `days` ago. */
@@ -315,16 +315,16 @@ test("the yes-list: worktrees whose work never landed, untouched two weeks, remo
   assert.deepEqual(store.readCleanList(), { items: [], shown: 0 });
   // The watcher's run saves a list the owner hears only a count of.
   assert.equal(l.sup.cli(["clean", "--low-disk"]).code, 0);
-  assert.deepEqual(store.readCleanList().items.map((x) => x.path), [stale]);
+  assert.deepEqual(store.readCleanList().items.map((x) => x.path).sort(), [l.young, stale].sort());
   assert.equal(store.readCleanList().shown, 0);
   const first = l.sup.cli(["clean", "--yes"]).stdout;
-  assert.match(first, /rollcall clean --yes removes these 1 worktrees/);
+  assert.match(first, /rollcall clean --yes deletes these 2 /);
   assert.match(first, /worktree of stale whose work never landed, untouched 20 days: 1 uncommitted change lost; its branch stays/);
-  assert.ok(!first.includes(recent) && !first.includes(l.open), "touched lately, or an open task's");
+  assert.ok(!first.includes(recent) && !first.includes(l.open) && !first.includes(l.midTask), "touched lately, or an open task's");
   assert.match(first, /nothing removed yet/);
   assert.ok(existsSync(stale), "seen first");
-  assert.match(l.sup.cli(["clean", "--yes"]).stdout, /removed 1 worktree/);
-  assert.ok(!existsSync(stale) && existsSync(recent));
+  assert.match(l.sup.cli(["clean", "--yes"]).stdout, /removed 2 folders/);
+  assert.ok(!existsSync(stale) && !existsSync(l.young) && existsSync(recent) && existsSync(l.midTask));
   assert.match(execFileSync("git", ["-C", l.sb.main, "branch", "--list", "stale"], { encoding: "utf8" }), /stale/, "its commits stay on its branch");
 });
 
@@ -333,11 +333,12 @@ test("a recently edited uncommitted file keeps a stale worktree off the yes-list
   l.sb.session(l.sb.main).start();
   const wt = staleWorktree(l, "edited");
   assert.equal(l.sup.cli(["clean", "--low-disk"]).code, 0);
-  assert.deepEqual(store.readCleanList().items.map((x) => x.path), [wt], "stale: listed");
+  const listed = () => store.readCleanList().items.map((x) => x.path).filter((p) => p !== l.young); // the fixture's temp folder is listed too
+  assert.deepEqual(listed(), [wt], "stale: listed");
   writeFileSync(join(wt, "notes.txt"), "edited in an IDE, no git call\n");
   age(wt, 20 * DAY);
   assert.equal(l.sup.cli(["clean", "--low-disk"]).code, 0);
-  assert.deepEqual(store.readCleanList().items, [], "a fresh edit counts as a touch");
+  assert.deepEqual(listed(), [], "a fresh edit counts as a touch");
   assert.ok(!l.sup.cli(["clean", "--yes"]).stdout.includes(wt));
   assert.ok(existsSync(wt));
 });
@@ -395,7 +396,7 @@ test("a low disk is one notice with the list; a run that makes room says nothing
   look(later());
   await until(() => l.notes().some((n) => /disk/.test(n.title)), { timeout: 20_000 });
   const [note] = l.notes();
-  assert.match(note.text, /^The disk has 6 GB free\. rollcall already cleared .* of leftovers\. Worktrees whose work never landed, untouched for two weeks, hold .* more, listed in .*clean-list\.txt\. Say "clean up" to a supervisor, or run rollcall clean to see them: none goes until you say yes\./);
+  assert.match(note.text, /^The disk has 6 GB free\. rollcall already cleared .* of leftovers\. Worktrees whose work never landed and recent temp folders of ended sessions hold .* more, listed in .*clean-list\.txt\. Say "clean up" to a supervisor, or run rollcall clean to see them: none goes until you say yes\./);
   assert.ok(!existsSync(l.gone), "what surely belongs to nothing goes at once");
   assert.ok(!existsSync(l.kept) && !existsSync(l.npm), "what rebuilds itself goes too");
   assert.ok(existsSync(stale), "work that never landed waits on the owner");

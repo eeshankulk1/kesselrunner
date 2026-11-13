@@ -296,7 +296,7 @@ export function diskRunEnded({ freed, found }, now = Date.now()) {
   if (gb >= lowGb() + DISK_ROOM_GB) { closeBlocker("disk"); return; }
   store.updateTrouble((t) => { if (t.open.disk) t.open.disk.total = found; });
   const fresh = isNews(told, "disk", now);
-  if (fresh) notify(`rollcall: ${NAMES.disk}`, `The disk has ${Number.isFinite(gb) ? Math.round(gb * 10) / 10 : open.disk.gb ?? "?"} GB free.${freed ? ` rollcall already cleared ${freed} of leftovers.` : ""} ${found ? `Worktrees whose work never landed, untouched for two weeks, hold ${found} more, listed in ${store.cleanListPath()}. Say "clean up" to a supervisor, or run rollcall clean to see them: none goes until you say yes.` : "Nothing else can go without your say."} Work goes on, and what waits on disk space resumes once there is room.`);
+  if (fresh) notify(`rollcall: ${NAMES.disk}`, `The disk has ${Number.isFinite(gb) ? Math.round(gb * 10) / 10 : open.disk.gb ?? "?"} GB free.${freed ? ` rollcall already cleared ${freed} of leftovers.` : ""} ${found ? `Worktrees whose work never landed and recent temp folders of ended sessions hold ${found} more, listed in ${store.cleanListPath()}. Say "clean up" to a supervisor, or run rollcall clean to see them: none goes until you say yes.` : "Nothing else can go without your say."} Work goes on, and what waits on disk space resumes once there is room.`);
   heard("disk", now, fresh);
 }
 

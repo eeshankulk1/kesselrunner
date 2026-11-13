@@ -17,6 +17,9 @@ import * as store from "./store.mjs";
 
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
+// A temp folder of an ended session is listed for the owner's yes only after this long quiet: a task can run for hours,
+// and a helper session rollcall has no record of may still be writing to it. Past a day, gc's sweep takes it.
+const TEMP_QUIET = 6 * HOUR;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // A browser younger than this may still be finding its feet: its parent can be between processes.
 const BROWSER_MIN_AGE_S = 600;
@@ -176,8 +179,8 @@ const statSafe = (p) => { try { return statSync(p); } catch { return null; } };
  * What only rebuilds itself and goes without asking, on a low disk and when `rollcall clean` runs: [{ path, kb, why }],
  * biggest first. While no build runs (a failed ps may hide one): build folders of projects that still exist (not those
  * of open work or a running session, one built in the last hour, or the lander's own) and Xcode's shared caches. While
- * no package install runs: package managers' download caches. Always: temp folders of sessions over for less than a
- * day, quiet for an hour, since a helper session rollcall has no record of may still be running.
+ * no package install runs: package managers' download caches. A recent session's temp folder is not here: it holds
+ * scratch files and task output, so it waits for the owner's yes (deleteList).
  */
 export function rebuildableList(now = Date.now()) {
   const used = inUse();
@@ -194,10 +197,12 @@ export function rebuildableList(now = Date.now()) {
     for (const n of ls(derivedRoot()).filter((x) => x.endsWith(".noindex"))) rows.push({ path: join(derivedRoot(), n), why: "Xcode's shared build cache: the next build makes it again" });
   }
   if (ps && !INSTALLING.test(ps)) for (const p of packageCaches().filter((x) => statSafe(x))) rows.push({ path: p, why: "a package manager's download cache: the next install fills it again" });
-  for (const t of endedTemp(used).filter((x) => now - x.touched <= DAY && now - x.touched > HOUR)) rows.push({ path: t.path, why: "temp folder of an ended session" });
   const sizes = sizesKb(rows.map((r) => r.path));
   return rows.map((r) => ({ ...r, kb: sizes.get(r.path) ?? 0 })).sort((a, b) => b.kb - a.kb);
 }
+
+/** Temp folders of sessions over for less than a day and quiet for TEMP_QUIET: [{ path, touched }]. */
+const recentTemp = (now) => endedTemp(inUse()).filter((t) => now - t.touched <= DAY && now - t.touched > TEMP_QUIET);
 
 /** Clears what rebuildableList names. Returns { kb, items } of what went (with `dryRun`, what would). */
 export function clearRebuildable({ dryRun = false, now = Date.now() } = {}) {
@@ -206,22 +211,27 @@ export function clearRebuildable({ dryRun = false, now = Date.now() } = {}) {
 }
 
 /**
- * What goes only on the owner's word: [{ path, kb, why, main }], biggest first. `worktrees`: worktrees whose work never
- * landed and that no one touched for two weeks (gc.mjs unlandedWorktrees, for every repo). Removing one loses its
- * uncommitted changes; its branch stays.
+ * What goes only on the owner's word: [{ path, kb, why, main (a worktree's repo) }], biggest first. `worktrees`:
+ * worktrees whose work never landed and that no one touched for two weeks (gc.mjs unlandedWorktrees, for every repo);
+ * removing one loses its uncommitted changes, and its branch stays. Then temp folders of sessions over for less than a
+ * day and quiet for six hours (scratch files, task output); past a day gc's sweep takes them.
  */
 export function deleteList(worktrees = [], now = Date.now()) {
-  const sizes = sizesKb(worktrees.map((w) => w.path));
-  return worktrees.map((w) => ({
-    path: w.path, main: w.main, kb: sizes.get(w.path) ?? 0,
-    why: `worktree${w.branch ? ` of ${w.branch}` : ""} whose work never landed, untouched ${Math.floor((now - w.touched) / DAY)} days: ${w.lost}; its branch stays`,
-  })).sort((a, b) => b.kb - a.kb);
+  const rows = [
+    ...worktrees.map((w) => ({
+      path: w.path, main: w.main,
+      why: `worktree${w.branch ? ` of ${w.branch}` : ""} whose work never landed, untouched ${Math.floor((now - w.touched) / DAY)} days: ${w.lost}; its branch stays`,
+    })),
+    ...recentTemp(now).map((t) => ({ path: t.path, why: `temp folder of a session that ended, quiet ${Math.floor((now - t.touched) / HOUR)} hours: its scratch files and task output` })),
+  ];
+  const sizes = sizesKb(rows.map((r) => r.path));
+  return rows.map((r) => ({ ...r, kb: sizes.get(r.path) ?? 0 })).sort((a, b) => b.kb - a.kb);
 }
 
 const listText = (items) => {
   const total = items.reduce((s, x) => s + x.kb, 0);
   return [
-    `rollcall clean --yes removes these ${items.length} worktrees (${gb(total)}). Their work never landed: what is not committed is lost, their branches stay. Nothing goes until you say so.`,
+    `rollcall clean --yes deletes these ${items.length} (${gb(total)}). None comes back by itself: a worktree loses what is not committed (its branch stays), a temp folder its session's files. Nothing goes until you say so.`,
     "", ...items.map((x) => `${gb(x.kb).padStart(9)}  ${x.path}\n           ${x.why}`), "",
   ].join("\n");
 };
@@ -243,9 +253,10 @@ export function saveDeleteList({ shown = false, now = Date.now(), worktrees = []
 export const deleteListSeen = (now = Date.now()) => now - store.readCleanList().shown < DAY;
 
 /** Deletes what the saved list names and is still free to go (the list may be old; `worktrees` is now's). Returns what went. */
-export function deleteListed(worktrees = []) {
+export function deleteListed(worktrees = [], now = Date.now()) {
   const safe = new Map(worktrees.map((w) => [w.path, w.main]));
-  return store.readCleanList().items.filter((x) => safe.has(x.path) && !dropWorktree(safe.get(x.path), x.path));
+  const temps = new Set(recentTemp(now).map((t) => t.path));
+  return store.readCleanList().items.filter((x) => (safe.has(x.path) ? !dropWorktree(safe.get(x.path), x.path) : temps.has(x.path) && remove(x.path)));
 }
 
 /** The size of `kb` in words. */

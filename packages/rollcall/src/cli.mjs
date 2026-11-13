@@ -56,9 +56,10 @@ ${RESULTS_USAGE}
                                          whose session ended
   rollcall gc --log                      this repo's worktrees the last gc kept and why, and what gc removed or
                                          failed to remove lately
-  rollcall clean [--yes] [--dry-run]     clears what rebuilds itself (build folders, caches, temp folders) without
+  rollcall clean [--yes] [--dry-run]     clears what rebuilds itself (build folders, package caches) without
                                          asking, then lists worktrees whose work never landed, untouched for two
-                                         weeks, with sizes; --yes removes those (their branches stay)
+                                         weeks, and temp folders of sessions ended 6h to a day ago, with sizes;
+                                         --yes deletes those (a worktree's branch stays)
   rollcall remind "<text>" --in <30m|2h|1d>   a line for the owner later, for a step only they can take; bare: what is set
   rollcall blockers [clear <kind>]       what stops work on this Mac or account now (usage, billing, disk, power,
                                          memory), told to the owner once; clear: it is fixed, so what waits goes on
@@ -691,8 +692,8 @@ function gcLog() {
 
 /**
  * `rollcall clean`, in two tiers (the owner's rule): what only rebuilds itself goes without asking (leftovers.mjs
- * rebuildableList), and it prints what goes only on the owner's word: worktrees whose work never landed, untouched for
- * two weeks. `--yes` removes those if the list was shown in the last day (a --yes on a list the owner has not seen
+ * rebuildableList), and it prints what goes only on the owner's word (deleteList): worktrees whose work never landed,
+ * untouched for two weeks, and recent temp folders of ended sessions. `--yes` removes those if the list was shown in the last day (a --yes on a list the owner has not seen
  * prints it instead, so nothing goes unseen). `--dry-run` takes nothing. The watcher starts `--low-disk` when the disk
  * runs low (the leftovers, every repo's gc, the rebuildable tier, then the list and the owner's one notice) and
  * `--sweep` when memory does (the leftovers alone: test browsers nothing uses).
@@ -712,7 +713,7 @@ async function clean(args) {
   const dryRun = args.includes("--dry-run");
   if (yes && deleteListSeen()) {
     const gone = deleteListed(unlandedEverywhere());
-    say(gone.length ? [`rollcall: removed ${gone.length} worktree${gone.length === 1 ? "" : "s"} (${sizeOf(gone.reduce((s, x) => s + x.kb, 0))})`, ...gone.map((x) => `  ${x.path}`)].join("\n") : "rollcall: nothing removed: run rollcall clean first to see the list");
+    say(gone.length ? [`rollcall: removed ${gone.length} folder${gone.length === 1 ? "" : "s"} (${sizeOf(gone.reduce((s, x) => s + x.kb, 0))})`, ...gone.map((x) => `  ${x.path}`)].join("\n") : "rollcall: nothing removed: run rollcall clean first to see the list");
     return 0;
   }
   const cleared = clearRebuildable({ dryRun });
