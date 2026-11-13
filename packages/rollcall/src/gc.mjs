@@ -5,12 +5,17 @@
 // the head of a merged PR, or merging it into main changes nothing: squash
 // merges), it is not a branch made in the last day that has no commit yet,
 // git holds no lock on it, no process (agent session, shell, dev server) has
-// its cwd inside it, and `git status` is clean. Checks run cheapest first. The
-// test manifest's worktree.teardown runs next (e.g. deleting a per-worktree
-// database branch); then plain `git worktree remove` (which itself refuses
-// untracked files) and the branch. Nothing outside .claude/worktrees/ is touched.
+// its cwd inside it, and `git status` is clean (or shows only tracked files
+// missing: a removal that stopped partway, whose files are all on main). Checks
+// run cheapest first. The test manifest's worktree.teardown runs next (e.g.
+// deleting a per-worktree database branch); then the worktree moves in one step
+// into the repo's git dir (rollcall-trash), git forgets it, its branch goes, and
+// its files are deleted with no time limit. A move either happens or leaves the
+// worktree whole, so a slow delete can never strand one half-removed (git's own
+// `worktree remove` deletes in place, and a 30 s limit used to kill it partway).
+// Nothing outside .claude/worktrees/ is touched.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, join, sep } from "node:path";
 import { defaultBranch, fetchSync, gitSync, locate, mainSha } from "./git.mjs";
 import { keyOf, manifestAt } from "./results.mjs";
@@ -131,6 +136,38 @@ export function sizesKb(paths) {
   return sizes;
 }
 
+/** Where gc moves a worktree before deleting its files: the repo's git dir, on the same disk as its worktrees. */
+const trashOf = (commonDir) => join(commonDir, "rollcall-trash");
+
+/**
+ * Removes worktree `path` in a step that either happens or leaves it whole: a rename into the trash, then git forgets
+ * it. A rename across disks (a worktrees folder linked elsewhere) cannot be one step: git removes it in place, with no
+ * time limit. Returns null, or why it failed.
+ */
+function removeWorktree(info, path) {
+  const trash = trashOf(info.commonDir);
+  try {
+    mkdirSync(trash, { recursive: true });
+    renameSync(path, join(trash, `${basename(path)}-${Date.now()}`));
+  } catch (e) {
+    if (e.code !== "EXDEV") return e.code ? `${e.code}: ${e.message}` : String(e);
+    const rm = gitSync(info.top, ["worktree", "remove", "--force", path], { timeout: 0 });
+    return rm.status === 0 ? null : lastLine(rm.stderr) || "git worktree remove failed";
+  }
+  gitSync(info.top, ["worktree", "prune"]);
+  return null;
+}
+
+/** Deletes what gc moved to the trash, this run's and any an earlier run left when it was stopped. Returns what stayed. */
+export function emptyTrash(commonDir) {
+  const trash = trashOf(commonDir);
+  let names;
+  try { names = readdirSync(trash); } catch { return []; }
+  const stuck = [];
+  for (const n of names) { try { rmSync(join(trash, n), { recursive: true, force: true, maxRetries: 2 }); } catch (e) { stuck.push(`${join(trash, n)}: ${e.code ?? e.message}`); } }
+  return stuck;
+}
+
 /** gc with no word on checkouts' runtime (a caller that loads none): it removes worktrees and touches nothing else. */
 const NO_RUNTIME = { stopAllActions: () => [], endSpotlight: () => null, forgetCheckout: () => {} };
 
@@ -149,17 +186,19 @@ export async function gcRuntime() {
  * ({ id, state, baseSha, land(why, head), hold(head) }) or null: an open task keeps its worktree, unless
  * its branch has commits of its own since its base and that work has landed, which marks it landed
  * (`land`; it returns what keeps the task open instead, and `hold` says it without writing) and lets the
- * other checks decide. `chat(path)` says why a chat keeps a worktree (one not archived), else null. `runtime` (gcRuntime) cleans up after a worktree it removes. Returns { removed: [{ name,
- * branch, kb, why }], kept: [{ name, branch, why }] }.
+ * other checks decide. `chat(path)` says why a chat keeps a worktree (one not archived), else null; it keeps it until the
+ * chat's own work landed. `runtime` (gcRuntime) cleans up after a worktree it removes. Returns { removed: [{ name,
+ * branch, kb, why }], kept: [{ name, branch, why, failed (a teardown or removal that failed) }], stuck: [trash folders
+ * it could not delete] }.
  */
 export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task = () => null, chat = () => null, runtime = NO_RUNTIME } = {}) {
-  const out = { removed: [], kept: [] };
+  const out = { removed: [], kept: [], stuck: [] };
   const info = locate(mainPath);
   if (!info) return out;
   const main = info.top;
   const root = join(main, ".claude", "worktrees") + sep;
   const candidates = listWorktrees(main).filter((w) => real(w.path).startsWith(root));
-  if (!candidates.length) return out;
+  if (!candidates.length) { if (!dryRun) out.stuck = emptyTrash(info.commonDir); return out; }
 
   const b = defaultBranch(info);
   const base = b && mainSha(info, b) ? `origin/${b}` : null;
@@ -167,7 +206,8 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
   let prHeads = null;
   let cwds;
   let missing = false;
-  const keep = (w, why) => out.kept.push({ name: basename(w.path), branch: w.branch, why });
+  const keep = (w, why, failed = false) => out.kept.push({ name: basename(w.path), path: real(w.path), branch: w.branch, why, ...(failed ? { failed } : {}) });
+  const prMerged = (w) => { if (!w.branch) return false; prHeads ??= mergedPrHeads(main); return !!prHeads.get(w.branch)?.includes(w.head); };
   const doomed = [];
 
   for (const w of candidates) {
@@ -177,10 +217,7 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
     let why = null;
     const onMain = w.branch ? merged.has(w.branch) : base && w.head && gitSync(main, ["merge-base", "--is-ancestor", w.head, base]).status === 0;
     if (onMain) why = `in ${base}`;
-    if (!why && w.branch) {
-      prHeads ??= mergedPrHeads(main);
-      if (prHeads.get(w.branch)?.includes(w.head)) why = "PR merged";
-    }
+    if (!why && prMerged(w)) why = "PR merged";
     if (!why && base && w.head && contentIn(main, base, w.head)) why = `content in ${base}`;
     // Content on main counts as landed whatever the task's state (a worker that merged and never said so),
     // once its branch has commits of its own since the one it started from (a branch that only caught up
@@ -193,16 +230,21 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
       const held = dryRun ? t.hold(w.head) : t.land(why, w.head);
       if (held) { keep(w, `task ${t.id} is open (${t.state}): ${held}`); continue; }
     }
-    // A chat not archived keeps its worktree, landed or not: a fresh one has no commits and reads as merged and unused.
+    // A chat not archived keeps its worktree until its own work landed: commits of its own whose content is on main,
+    // or a merged PR at its HEAD. A fresh one has no commits and sits on main, so it reads as merged and stays.
     const kept = chat(path);
-    if (kept) { keep(w, kept); continue; }
+    if (kept && !(why && (!onMain || prMerged(w)))) { keep(w, kept); continue; }
     if (!why) { keep(w, "not merged"); continue; }
     if (onMain && w.branch && untouchedNew(main, w.branch)) { keep(w, "new, nothing committed yet"); continue; }
     // A session in it, or work not committed, keeps it before anything of its runtime is touched.
     if (occupied(path)) { keep(w, "in use"); continue; }
-    const status = gitSync(path, ["status", "--porcelain"]);
+    // Without the index refresh, which would make a worktree no one works in look touched (unlandedWorktrees).
+    const status = gitSync(path, ["--no-optional-locks", "status", "--porcelain"]);
     if (status.status !== 0) { keep(w, "git status failed"); continue; }
-    if (status.stdout.trim()) { keep(w, "uncommitted changes"); continue; }
+    const changes = status.stdout.split("\n").filter(Boolean);
+    // Only tracked files missing: a removal that stopped partway. Their content is on main (why), so nothing is lost.
+    if (changes.length && !changes.every((l) => l.startsWith(" D "))) { keep(w, "uncommitted changes"); continue; }
+    if (changes.length) why = `${why}; finishing a removal that stopped partway`;
     // Its own run actions (a dev server rollcall started) stop with it, so they do not keep it "in use"; a spotlight on it ends.
     if (!dryRun) {
       runtime.stopAllActions(path);
@@ -226,21 +268,76 @@ export function gcRepo(mainPath, { dryRun = false, occupied = () => false, task 
       ?? (base ? teardownIn(baseManifest ??= gitSync(main, ["show", `${base}:.claude/test-manifest.json`]).stdout ?? "") : null);
     if (teardown) {
       const t = run("sh", ["-c", teardown], { cwd: d.path, timeout: 180_000 });
-      if (t.status !== 0) { keep(d.w, `teardown failed: ${lastLine(t.stderr || t.stdout || t.error)}`); continue; }
+      if (t.status !== 0) { keep(d.w, `teardown failed: ${lastLine(t.stderr || t.stdout || t.error)}`, true); continue; }
     }
     ready.push(d);
   }
   const sizes = sizesKb(ready.map((d) => d.path));
   for (const d of ready) {
-    const rm = gitSync(main, ["worktree", "remove", d.path]);
-    if (rm.status !== 0) { keep(d.w, `remove failed: ${lastLine(rm.stderr)}`); continue; }
+    const failed = removeWorktree(info, d.path);
+    if (failed) { keep(d.w, `remove failed: ${failed}`, true); continue; }
     if (d.w.branch) gitSync(main, ["branch", "-D", d.w.branch]);
     dropSnapshots(d.path);
     runtime.forgetCheckout(d.path);
     out.removed.push({ name: basename(d.path), branch: d.w.branch, kb: sizes.get(d.path) ?? 0, why: d.why });
   }
   if (missing) gitSync(main, ["worktree", "prune"]);
+  out.stuck = emptyTrash(info.commonDir);
   return out;
+}
+
+const statMs = (p) => { try { return statSync(p).mtimeMs; } catch { return 0; } };
+
+/** When anyone last worked in a worktree: its folder, or git's index, HEAD or reflog for it (a commit, a checkout, an add). */
+function lastTouched(path) {
+  const info = locate(path);
+  const g = info?.gitDir;
+  return Math.max(statMs(path), ...(g ? [join(g, "index"), join(g, "HEAD"), join(g, "logs", "HEAD")].map(statMs) : []));
+}
+
+/**
+ * Worktrees whose work never landed and that no one has touched for `days`: what `rollcall clean` lists for the
+ * owner's yes. Only those gc keeps as "not merged" or "uncommitted changes" (an open task's, an open chat's, a locked
+ * one stay out), with no session or process in them. [{ path, main, branch, touched, lost }]: `lost` says what removing
+ * it loses (its uncommitted changes; its branch stays, so its commits do not).
+ */
+export function unlandedWorktrees(mainPath, { occupied = () => false, task = () => null, chat = () => null, now = Date.now(), days = 14 } = {}) {
+  const info = locate(mainPath);
+  if (!info) return [];
+  const res = gcRepo(mainPath, { dryRun: true, occupied, task, chat });
+  const old = res.kept.filter((k) => (k.why === "not merged" || k.why === "uncommitted changes") && !occupied(k.path) && now - lastTouched(k.path) > days * DAY);
+  if (!old.length) return [];
+  const cwds = processCwds();
+  const out = [];
+  for (const k of old.filter((k) => !cwds?.some((c) => c === k.path || c.startsWith(k.path + sep)))) {
+    // -z: paths unquoted; a rename's old path follows as its own entry. A folder's own mtime misses an edit deeper in
+    // it, and an IDE's git calls may leave the index alone, so a changed file's mtime also counts as a touch.
+    const st = gitSync(k.path, ["--no-optional-locks", "status", "--porcelain", "-z"]);
+    if (st.status !== 0) continue;
+    const entries = st.stdout.split("\0").filter(Boolean);
+    // A loop, not Math.max(...spread): a half-deleted tree can have 100k entries. A missing file stats as 0.
+    let touched = lastTouched(k.path), count = 0;
+    for (let i = 0; i < entries.length; i++, count++) {
+      touched = Math.max(touched, statMs(join(k.path, entries[i].slice(3))));
+      if (/[RC]/.test(entries[i].slice(0, 2))) i++;
+    }
+    if (now - touched <= days * DAY) continue;
+    const lost = count ? `${count} uncommitted change${count === 1 ? "" : "s"} lost` : "nothing uncommitted";
+    out.push({ path: k.path, main: info.top, branch: k.branch, touched, lost });
+  }
+  return out;
+}
+
+/**
+ * Removes a worktree whose work did not land, on the owner's word (`rollcall clean --yes`): moved out in one step and
+ * deleted, as gc removes one, uncommitted changes and all. Its branch stays. Returns null, or why it failed.
+ */
+export function dropWorktree(mainPath, path) {
+  const info = locate(mainPath);
+  if (!info) return "not a git checkout";
+  const failed = removeWorktree(info, path);
+  if (!failed) { dropSnapshots(path); emptyTrash(info.commonDir); }
+  return failed;
 }
 
 /**

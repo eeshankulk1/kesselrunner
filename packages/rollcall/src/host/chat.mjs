@@ -431,33 +431,51 @@ export function archiveChat(h, by, now = Date.now(), busy = {}) {
 }
 
 /**
- * Unarchives chat `h`. A worktree gc removed comes back from origin's default branch on a new branch, and `note` says
- * so. Returns the record, or null when the chat is gone.
+ * A worktree gc removed (its work landed) comes back for chat record `c` from origin's default branch, in the same
+ * folder so its session resumes there, on a new branch; `note` says so. Changes `c`; whether a worktree was missing.
+ */
+function restoreWorktree(h, c) {
+  if (!c.worktree || existsSync(c.worktree) || !existsSync(c.folder)) return false;
+  if (c.repo?.main) gitSync(c.repo.main, ["worktree", "prune"]);
+  const taken = (b) => c.repo?.main && gitSync(c.repo.main, ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`]).status === 0;
+  let b = `chat/${h}`;
+  for (let n = 2; taken(b) && n < 50; n++) b = `chat/${h}-${n}`;
+  const w = makeWorktree(h, c.folder, { branch: b });
+  if (w.worktree) {
+    c.note = `The old worktree was cleaned up after its work landed: this is a new one from ${defaultBranchOf(c) ?? "the default branch"}, on ${b}.`;
+    c.branch = b;
+    c.worktree = w.worktree;
+  } else {
+    c.note = w.note;
+    c.worktree = null;
+    c.branch = null;
+  }
+  writeChatLaunch(h, c, { session: readJson(launchFile(h, null))?.session ?? null, resume: !!readJson(launchFile(h, null))?.resume });
+  return true;
+}
+
+/**
+ * Unarchives chat `h`, with its worktree back if gc removed it (restoreWorktree). Returns the record, or null when the
+ * chat is gone.
  */
 export function unarchiveChat(h) {
   return updateChat(h, (c) => {
     if (!c.archivedAt) return false;
     c.archivedAt = null;
     c.archivedBy = null;
-    if (c.worktree && !existsSync(c.worktree) && existsSync(c.folder)) {
-      if (c.repo?.main) gitSync(c.repo.main, ["worktree", "prune"]);
-      const taken = (b) => c.repo?.main && gitSync(c.repo.main, ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`]).status === 0;
-      let b = `chat/${h}`;
-      for (let n = 2; taken(b) && n < 50; n++) b = `chat/${h}-${n}`;
-      const w = makeWorktree(h, c.folder, { branch: b });
-      if (w.worktree) {
-        c.note = `The old worktree was cleaned up after its work landed: this is a new one from ${defaultBranchOf(c) ?? "the default branch"}, on ${b}.`;
-        c.branch = b;
-        c.worktree = w.worktree;
-      } else {
-        c.note = w.note;
-        c.worktree = null;
-        c.branch = null;
-      }
-      writeChatLaunch(h, c, { session: readJson(launchFile(h, null))?.session ?? null, resume: !!readJson(launchFile(h, null))?.resume });
-    }
+    restoreWorktree(h, c);
     return true;
   });
+}
+
+/**
+ * Before chat `h` takes the owner's words: a worktree gc removed once the chat's work landed (gc.mjs; the chat stays
+ * open) comes back. Whether it did.
+ */
+export function ensureChatWorktree(h) {
+  let back = false;
+  updateChat(h, (c) => (back = !c.archivedAt && restoreWorktree(h, c)));
+  return back;
 }
 
 const defaultBranchOf = (c) => { const info = c.repo?.main ? locate(c.repo.main) : null; const b = info ? defaultBranch(info) : null; return b ? `origin/${b}` : null; };

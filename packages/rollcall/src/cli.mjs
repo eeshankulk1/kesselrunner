@@ -7,12 +7,12 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { gcRepo, gcRuntime, pruneRefs, summary } from "./gc.mjs";
+import { gcRepo, gcRuntime, pruneRefs, summary, unlandedWorktrees } from "./gc.mjs";
 import { gitSync, locate, mainCheckout, repoKey } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
 import { ancestry, pidAlive } from "./proc.mjs";
 import { parkAll, parkedLines } from "./park.mjs";
-import { deleteListed, deleteListSeen, saveDeleteList, sizeOf, sweepLeftovers } from "./leftovers.mjs";
+import { clearRebuildable, deleteListed, deleteListSeen, saveDeleteList, sizeOf, sweepLeftovers } from "./leftovers.mjs";
 import { reminders, watchHome } from "./watch.mjs";
 import { backText, comeBack, unparkHome, writeWindow } from "./window.mjs";
 import { USAGE as QUEUE_USAGE, queueCommand } from "./queue.mjs";
@@ -29,7 +29,7 @@ import * as store from "./store.mjs";
 import { allowAll, answerHeld, awayState, heldView, setAway } from "./away.mjs";
 import { ensureWatcher, holderOf, homeOf, idOf, label, pickName, releaseHome, takeHome, taskEnv, workerState } from "./supervisor.mjs";
 import { isOpen } from "./state.mjs";
-import { KINDS, closeBlocker, diskRunEnded, lines as troubleLines } from "./trouble.mjs";
+import { KINDS, closeBlocker, diskRunEnded, notify, lines as troubleLines } from "./trouble.mjs";
 import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskCommand, visibleTasks } from "./task.mjs";
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
@@ -54,9 +54,14 @@ ${RESULTS_USAGE}
   rollcall gc [--dry-run] [--all]        remove merged, clean, unused worktrees under .claude/worktrees/
                                          (--all: every repo rollcall has seen), and what ended work left
                                          on the machine: DerivedData of projects that are gone, temp folders of
-                                         sessions over for a day, test browsers whose session ended
-  rollcall clean [--yes]                 the delete list for a low disk: folders only rebuildable, with sizes.
-                                         It deletes nothing until --yes, which takes what the list shows
+                                         sessions over for a day, upload folders over a day old, test browsers
+                                         whose session ended
+  rollcall gc --log                      this repo's worktrees the last gc kept and why, and what gc removed or
+                                         failed to remove lately
+  rollcall clean [--yes] [--dry-run]     clears what rebuilds itself (build folders, package caches) without
+                                         asking, then lists worktrees whose work never landed, untouched for two
+                                         weeks, and temp folders of sessions ended 6h to a day ago, with sizes;
+                                         --yes deletes those (a worktree's branch stays)
   rollcall remind "<text>" --in <30m|2h|1d>   a line for the owner later, for a step only they can take; bare: what is set
   rollcall blockers [clear <kind>]       what stops work on this Mac or account now (usage, billing, disk, power,
                                          memory), told to the owner once; clear: it is fixed, so what waits goes on
@@ -661,6 +666,34 @@ function chatKeeps() {
 }
 const realOf = (p) => { try { return realpathSync(p); } catch { return p; } };
 
+/** What keeps a repo's worktrees for gc: `occupied(path)` (a session whose process still runs, however idle) and `task(path)`. */
+function gcContext(key, recs = store.listRecords(key)) {
+  const live = recs.filter(isAlive).map((r) => r.checkout);
+  // An open task keeps its worktree whatever else holds; one whose work is on main is marked landed and collected,
+  // unless its worker still runs or it waits on the owner.
+  // By path, not by key: a repo under two keys (its origin changed) still keeps its open tasks' worktrees.
+  const tasks = store.listTasks().filter((t) => isOpen(t) && t.worktree);
+  const task = (path) => {
+    const t = tasks.find((x) => x.worktree === path);
+    return t ? { id: t.id, state: t.state, baseSha: t.baseSha ?? null, land: (why, head) => mergeSeen(t, { why, head }), hold: (head) => mergeHold(t, head) } : null;
+  };
+  return { occupied: (path) => live.includes(path), task };
+}
+
+/** Every repo's worktrees whose work never landed and that no one touched for two weeks (gc.mjs unlandedWorktrees). */
+function unlandedEverywhere() {
+  const chat = chatKeeps();
+  // A repo can sit under two keys (its origin changed): each checkout is looked at once.
+  const seen = new Set();
+  return store.listRepoKeys().flatMap((key) => {
+    const recs = store.listRecords(key);
+    const main = recs.map((r) => r.main).find((m) => m && existsSync(m));
+    if (!main || seen.has(realOf(main))) return [];
+    seen.add(realOf(main));
+    return unlandedWorktrees(main, { ...gcContext(key, recs), chat });
+  });
+}
+
 /**
  * Removes worktrees whose work already landed (see gc.mjs for the rules).
  * `--report` is the hooks' background mode: quiet, and the summary is saved for
@@ -668,12 +701,14 @@ const realOf = (p) => { try { return realpathSync(p); } catch { return p; } };
  * 10 min) for that process to exit first: SessionEnd passes the harness's.
  */
 async function gc(args) {
+  if (args.includes("--log")) return gcLog();
   const dryRun = args.includes("--dry-run");
   const report = args.includes("--report");
   const afterPid = Number(flag(args, "--after-pid")[0]);
   for (const end = Date.now() + 10 * 60_000; afterPid > 1 && pidAlive(afterPid) && Date.now() < end;) await sleep(1000);
   const here = args.includes("--all") ? null : repoHere();
   const out = [];
+  let removedAny = false;
   for (const key of here ? [here.repo.key] : store.listRepoKeys()) {
     const recs = store.listRecords(key);
     const main = here ? mainCheckout(here.info) : recs.map((r) => r.main).find((m) => m && existsSync(m));
@@ -681,22 +716,20 @@ async function gc(args) {
     const name = here?.repo.name ?? recs.find((r) => r.repoName)?.repoName ?? key;
     const release = store.lockGc(key);
     if (!release) { if (!report) out.push(`${name}: another gc is running here; skipped`); continue; }
-    // Any session whose process still runs keeps its checkout, however long it has been idle.
-    const live = recs.filter(isAlive).map((r) => r.checkout);
-    // An open task keeps its worktree whatever else holds; one whose work is on main is marked landed and collected,
-    // unless its worker still runs or it waits on the owner.
-    const tasks = store.listTasks().filter((t) => isOpen(t) && t.repo?.key === key);
-    const task = (path) => {
-      const t = tasks.find((x) => x.worktree === path);
-      return t ? { id: t.id, state: t.state, baseSha: t.baseSha ?? null, land: (why, head) => mergeSeen(t, { why, head }), hold: (head) => mergeHold(t, head) } : null;
-    };
+    const { occupied, task } = gcContext(key, recs);
     let res;
     let refs = 0;
     try {
-      res = gcRepo(main, { dryRun, occupied: (path) => live.includes(path), task, chat: chatKeeps(), runtime: await gcRuntime() });
+      res = gcRepo(main, { dryRun, occupied, task, chat: chatKeeps(), runtime: await gcRuntime() });
       if (!dryRun && store.claimRefsSlot(key)) refs = pruneRefs(main, { queued: Object.keys(store.readQueue(key).entries) });
     } finally { release(); }
     const line = summary(name, res, { dryRun });
+    removedAny ||= !dryRun && res.removed.length > 0;
+    // A failure reaches the owner once (the same one again is not news): it keeps the worktree until it is fixed.
+    if (!dryRun) {
+      const news = store.recordGc(key, res);
+      if (news.length) notify(`rollcall: ${name}`, `gc could not remove ${news.length === 1 ? "a finished worktree" : `${news.length} finished worktrees`}: ${news.join("; ")}. ${news.length === 1 ? "It stays" : "They stay"} until that is fixed; rollcall gc --log in ${main} shows every worktree gc keeps and why.`);
+    }
     if (refs && !report) out.push(`${name}: pruned ${refs} old ref${refs === 1 ? "" : "s"}`);
     if (report) { if (line) store.appendGcReport(key, line); continue; }
     if (line) out.push(line);
@@ -704,8 +737,9 @@ async function gc(args) {
   }
   // Snapshot repos of worktrees that are gone (removed by hand, or before snapshots were pruned with them).
   if (!dryRun) pruneSnapshots();
-  // Once an hour on this machine from the background; a gc by hand always looks.
-  if (!report || store.claimLeftoversSlot()) {
+  // Once an hour on this machine from the background, and whenever a worktree went (its build data goes with it); a gc
+  // by hand always looks.
+  if (!report || removedAny || store.claimLeftoversSlot()) {
     const { line } = sweepLeftovers({ dryRun });
     if (line && report && here) store.appendGcReport(here.repo.key, line);
     if (line && !report) out.push(line);
@@ -714,32 +748,49 @@ async function gc(args) {
   return 0;
 }
 
+/** `rollcall gc --log`: what the last gc in this repo kept and why, and the newest of what it removed or failed. */
+function gcLog() {
+  const here = repoHere();
+  const read = (p) => { try { return readFileSync(p, "utf8").trimEnd(); } catch { return ""; } };
+  const kept = read(store.gcKeptPath(here.repo.key));
+  const log = read(store.gcLogPath(here.repo.key)).split("\n").filter(Boolean).slice(-30);
+  say([kept || "rollcall: no gc has run here yet", ...(log.length ? ["", `latest of ${store.gcLogPath(here.repo.key)}:`, ...log] : [])].join("\n"));
+  return 0;
+}
+
 // ---------------------------------------------------------------- clean / blockers
 
 /**
- * `rollcall clean`: prints what could go on a low disk, and with --yes deletes what it showed in the last day (a --yes
- * on a list the owner has not seen prints it instead, so nothing goes unseen). The watcher
- * starts `--low-disk` when the disk runs low (every repo's gc, the leftovers, then the list and the owner's one
- * notice) and `--sweep` when memory does (the leftovers alone: test browsers nothing uses).
+ * `rollcall clean`, in two tiers (the owner's rule): what only rebuilds itself goes without asking (leftovers.mjs
+ * rebuildableList), and it prints what goes only on the owner's word (deleteList): worktrees whose work never landed,
+ * untouched for two weeks, and recent temp folders of ended sessions. `--yes` removes those if the list was shown in the last day (a --yes on a list the owner has not seen
+ * prints it instead, so nothing goes unseen). `--dry-run` takes nothing. The watcher starts `--low-disk` when the disk
+ * runs low (the leftovers, every repo's gc, the rebuildable tier, then the list and the owner's one notice) and
+ * `--sweep` when memory does (the leftovers alone: test browsers nothing uses).
  */
 async function clean(args) {
   if (args.includes("--sweep")) { sweepLeftovers(); return 0; }
   if (args.includes("--low-disk")) {
     const swept = sweepLeftovers();
     await gc(["--all", "--report"]);
-    const { items, total } = saveDeleteList();
-    diskRunEnded({ freed: swept.kb ? sizeOf(swept.kb) : null, found: items.length ? total : null });
+    const cleared = clearRebuildable();
+    const { items, total } = saveDeleteList({ worktrees: unlandedEverywhere() });
+    const kb = swept.kb + cleared.kb;
+    diskRunEnded({ freed: kb ? sizeOf(kb) : null, found: items.length ? total : null });
     return 0;
   }
   const yes = args.includes("--yes");
-  if (!yes || !deleteListSeen()) {
-    const { items } = saveDeleteList({ shown: true });
-    say(items.length ? readFileSync(store.cleanListPath(), "utf8").trimEnd() : "rollcall: nothing on the delete list");
-    if (yes && items.length) say("rollcall: nothing deleted yet, as this list had not been shown. rollcall clean --yes again deletes it.");
+  const dryRun = args.includes("--dry-run");
+  if (yes && deleteListSeen()) {
+    const gone = deleteListed(unlandedEverywhere());
+    say(gone.length ? [`rollcall: removed ${gone.length} folder${gone.length === 1 ? "" : "s"} (${sizeOf(gone.reduce((s, x) => s + x.kb, 0))})`, ...gone.map((x) => `  ${x.path}`)].join("\n") : "rollcall: nothing removed: run rollcall clean first to see the list");
     return 0;
   }
-  const gone = deleteListed();
-  say(gone.length ? [`rollcall: deleted ${gone.length} folder${gone.length === 1 ? "" : "s"} (${sizeOf(gone.reduce((s, x) => s + x.kb, 0))})`, ...gone.map((x) => `  ${x.path}`)].join("\n") : "rollcall: nothing deleted: run rollcall clean first to see the list");
+  const cleared = clearRebuildable({ dryRun });
+  if (cleared.items.length) say([`rollcall: ${dryRun ? "would clear" : "cleared"} ${cleared.items.length} folder${cleared.items.length === 1 ? "" : "s"} that rebuild themselves (${sizeOf(cleared.kb)}):`, ...cleared.items.map((x) => `${sizeOf(x.kb).padStart(9)}  ${x.path}\n           ${x.why}`)].join("\n"));
+  const { items } = saveDeleteList({ shown: !dryRun, worktrees: unlandedEverywhere() });
+  say(items.length ? readFileSync(store.cleanListPath(), "utf8").trimEnd() : "rollcall: nothing waits for your yes");
+  if (yes && items.length && !dryRun) say("rollcall: nothing removed yet, as this list had not been shown. rollcall clean --yes again removes it.");
   return 0;
 }
 
