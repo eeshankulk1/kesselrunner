@@ -551,7 +551,9 @@ export function park(t, w, now = Date.now()) {
   const idle = Math.max(1, Math.round((now - w.since) / 60_000));
   const lines = [
     `# rollcall: task ${t.home}:${t.id}'s worker is parked. Its tmux pane sources this file; Enter resumes it here.`,
-    `printf '\\n  %s is parked: its worker stopped after %s minutes idle, to free memory. Its conversation is saved.\\n  Press Enter to bring it back here. It also comes back by itself when the owner or the supervisor writes to it.\\n\\n' ${q(label(t))} ${q(String(idle))}`,
+    t.fresh?.session === w.session
+      ? `printf '\\n  %s is parked: its PR is open and the ship script has it. Its conversation is saved.\\n  When the owner or the supervisor next writes to it, a fresh worker starts from the task record. Press Enter to bring back this conversation instead.\\n\\n' ${q(label(t))}`
+      : `printf '\\n  %s is parked: its worker stopped after %s minutes idle, to free memory. Its conversation is saved.\\n  Press Enter to bring it back here. It also comes back by itself when the owner or the supervisor writes to it.\\n\\n' ${q(label(t))} ${q(String(idle))}`,
     "read -r _ || exit 0",
     `. ${q(script)}`,
   ];
@@ -563,8 +565,121 @@ export function park(t, w, now = Date.now()) {
   return r.ok;
 }
 
-/** Brings a parked worker back in its window with `prompt` (null: none, it waits for words). Returns { ok, err }. */
-export const unpark = (t, prompt, w = workerState(t)) => launch(t, { prompt, resume: true, mode: w?.mode ?? null, model: w?.model, effort: w?.effort });
+/**
+ * Brings a parked worker back in its window with `prompt` (null: none, it waits for words), of `kind` ("notice" or
+ * the owner's "words"). When a fresh start is due (freshDue) a fresh worker takes `prompt` instead. Returns { ok,
+ * err, fresh }.
+ */
+export function unpark(t, prompt, w = workerState(t), { kind = "notice", mode = null } = {}) {
+  const why = freshDue(t, w);
+  if (why) return goFresh(t, w, why, prompt, kind);
+  return launch(t, { prompt, resume: true, mode: mode ?? w?.mode ?? null, model: w?.model, effort: w?.effort });
+}
+
+// ---------------------------------------------------------------- fresh starts
+
+// Every request re-sends the whole conversation, so a long session pays for its size on every turn, and after an
+// hour idle the prompt cache has expired as well. Two moments where a worker has already stopped get a fresh worker
+// instead of the old conversation resumed: its PR is open and rollcall's ship script has it (watch.mjs marks the
+// task and parks the worker at once), and words or news for a worker parked over an hour at a big context. Both
+// need a where-I-am note from the worker's last turn (`task where`); no note, or work in flight, means resume. The
+// old conversation stays on disk and can still be resumed (start.mjs --resume --session). Both triggers are
+// trials: ROLLCALL_FRESH_PR=0 and ROLLCALL_FRESH_IDLE=0 turn them off.
+export const freshPrOn = () => store.envFlag("ROLLCALL_FRESH_PR") !== false;
+export const freshIdleOn = () => store.envFlag("ROLLCALL_FRESH_IDLE") !== false;
+export const freshIdleMs = () => msEnv("ROLLCALL_FRESH_IDLE_MS", 3600_000);
+export const freshTokens = () => msEnv("ROLLCALL_FRESH_TOKENS", 200_000);
+
+/** Whether the task's where-I-am note comes from worker `w`'s last turn: its own, written after that turn began. */
+export function whereCurrent(t, w, log = store.readStatus(t.home, t.id)) {
+  if (!t.where?.text || !w?.session || t.where.session !== w.session) return false;
+  return t.where.at >= (log.findLast((e) => e.ev === "busy")?.at ?? 0);
+}
+
+/** Worker `w`'s context in tokens when it last measured it, however long ago (a parked worker's does not change). */
+function lastTokens(t, w) {
+  const c = store.readHomeFile(t.home, `context-${t.id}`);
+  return c && (!c.session || c.session === w.session) ? c.tokens ?? null : null;
+}
+
+/**
+ * Why the parked worker `w` gives way to a fresh worker the next time it is needed, or null when it resumes: the
+ * task marked for it (its PR is open), or idle over an hour at a context over 200k tokens; either way with a
+ * where-I-am note from its last turn. A worker that runs, or one stopped on purpose, a hosted one (the host parks its
+ * own) and a v2 one always resume.
+ */
+export function freshDue(t, w, now = Date.now()) {
+  if (!isOpen(t) || !w?.parked || w.alive || w.legacy || w.hosted || w.stopped) return null;
+  if (!whereCurrent(t, w)) return null;
+  const f = t.fresh?.session === w.session ? t.fresh : null;
+  if (f?.off) return null;
+  if (f && (f.queued || (f.trigger === "idle" ? freshIdleOn() : freshPrOn()))) return f.why;
+  const idle = now - (w.since ?? now);
+  const tokens = lastTokens(t, w) ?? 0;
+  if (!freshIdleOn() || idle < freshIdleMs() || tokens < freshTokens()) return null;
+  return `idle ${Math.round(idle / 60_000)} minutes at ${Math.round(tokens / 1000)}k tokens of context`;
+}
+
+/**
+ * Marks task `t` so its parked worker `w` gives way to a fresh worker the next time it is needed (the PR trigger).
+ * Returns whether it marked it.
+ */
+export function markFresh(t, w, why, now = Date.now()) {
+  const r = store.withTasksLock(t.home, () => {
+    const x = store.readTask(t.home, t.id);
+    if (!x || x.sessions.at(-1)?.id !== w.session) return false;
+    x.fresh = { at: now, session: w.session, why, trigger: "pr", pending: [], queued: false };
+    store.writeTask(x);
+    return true;
+  });
+  return !!r?.out;
+}
+
+/**
+ * Hands what would have brought worker `w` back (`prompt`, of `kind`) to a fresh worker: it waits on the task for
+ * the fresh worker's brief (a launch with a new session keeps no words on the delivery queue), and the watcher starts
+ * that worker (start.mjs --fresh). The same text twice is kept once: the watcher asks again each look until it runs.
+ */
+function goFresh(t, w, why, prompt, kind) {
+  const now = Date.now();
+  const r = store.withTasksLock(t.home, () => {
+    const x = store.readTask(t.home, t.id);
+    if (!x) return false;
+    const f = x.fresh?.session === w.session ? x.fresh : { at: now, session: w.session, why, trigger: "idle" };
+    const pending = [...(f.pending ?? [])];
+    const text = prompt && store.clip(prompt, 4000);
+    if (text && !pending.some((p) => p.text === text)) pending.push({ at: now, kind, text });
+    x.fresh = { ...f, pending, queued: true };
+    store.writeTask(x);
+    return !f.queued;
+  });
+  if (!r) return { ok: false, err: "the task store stayed busy" };
+  if (r.out) store.enqueueWake(t.home, { task: t.id, kind: "fresh" });
+  ensureWatcher(t.home);
+  return { ok: true, session: null, fresh: true };
+}
+
+/**
+ * A fresh start that did not happen (start.mjs failed, or the old worker came back first, by Enter in its tab): no
+ * fresh start for that worker any more, and what waited for the fresh one goes to it, resumed when it is not running.
+ * Returns launch's result when it resumed it, else null.
+ */
+export function freshUndo(t0) {
+  const r = store.withTasksLock(t0.home, () => {
+    const x = store.readTask(t0.home, t0.id);
+    if (!x?.fresh) return null;
+    const pending = x.fresh.pending ?? [];
+    x.fresh = { ...x.fresh, pending: [], queued: false, off: true };
+    store.writeTask(x);
+    return { t: x, pending };
+  });
+  if (!r?.out) return null;
+  const { t, pending } = r.out;
+  const w = workerState(t);
+  if (!isOpen(t) || !w || w.stopped || w.session !== t.fresh.session) return null;
+  if (w.alive) { for (const p of pending) enqueue(t, p.kind === "words" ? "words" : "notice", p.text); return null; }
+  return launch(t, { prompt: pending.map((p) => p.text).join("\n\n") || null, resume: true, mode: w.mode, model: w.model, effort: w.effort });
+}
 
 // ---------------------------------------------------------------- the owner's words, typed
 
@@ -590,7 +705,8 @@ export function deliverWords(t, text, { record, mode = null }) {
     if (r.typed || waiting(t.home, t.id).every((x) => x.typedAt)) return { ok: true, how: r.how ?? "typed" };
     return { ok: true, how: "held", why: r.err ? `typing into its pane failed (${r.err}), so rollcall tries again` : whyHeld(t, w) };
   }
-  const r = launch(t, { prompt: text, resume: true, mode: mode ?? w.mode, model: w.model, effort: w.effort });
+  const r = w.parked ? unpark(t, text, w, { kind: "words", mode }) : launch(t, { prompt: text, resume: true, mode: mode ?? w.mode, model: w.model, effort: w.effort });
+  if (r.fresh) return { ok: true, how: "fresh" };
   return r.ok ? { ok: true, how: "resumed" } : { ok: false, why: `its worker could not be resumed: ${r.err}` };
 }
 

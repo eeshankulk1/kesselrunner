@@ -85,6 +85,10 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
   rollcall task stage <id|here> "<stage>" | done   the ship's stage now, for its tab: minutes against the usual time
   rollcall task output <id|here> ["<text>" | --file <f>]   save the worker's final report
   rollcall task handoff <id|here> ["<text>" | --file <f>]  a worker's handoff: rollcall starts a fresh worker from it
+  rollcall task where <id|here> ["<text>" | --file <f>]    the worker's where-I-am note, each time it stops for the
+                                         owner and when its PR opens: done, half-done, the files that matter, its
+                                         next step, the owner's last ask. A fresh worker may start from it. Outside
+                                         a task it does nothing
   rollcall task wait-for <id|here> <disk|power|billing|"<check command>"> [--every <minutes>] [--why "<what it waits on>"]
                                          end your turn after this: your worker parks and comes back once the
                                          check exits 0 (it runs in your worktree, read-only by contract) or the
@@ -505,6 +509,7 @@ function show(args, ctx) {
     ctx.say("\nWorker sessions:");
     for (const s of t.sessions) ctx.say(`- ${s.id}${s.name ? ` (${s.name})` : ""}, started ${ago(s.at, now)}${s.endedAt ? `, replaced ${ago(s.endedAt, now)}` : ""}`);
   }
+  if (t.where) ctx.say(`\nWhere-I-am note (${ago(t.where.at, now)}${t.where.session ? `, worker ${short(t.where.session)}` : ""}):\n${t.where.text}`);
   if (t.handoff) ctx.say(`\nLast handoff (${ago(t.handoff.at, now)}${t.handoff.context === null ? "" : `, at ${t.handoff.context}% context`}):\n${t.handoff.text}`);
   if (t.output) ctx.say(`\nLast report (${ago(t.output.at, now)}):\n${t.output.text}`);
   return 0;
@@ -782,6 +787,36 @@ function handoff(args, ctx) {
   return 0;
 }
 
+/** The longest where-I-am note: a page, not a handoff. */
+const MAX_WHERE = 6000;
+
+/**
+ * `task where`: the worker's where-I-am note, written while the work is still in its head, each time it stops to
+ * wait for the owner and when its PR opens. One note, the latest, beside the owner's words and the last report: a
+ * resumed worker and the owner read it, and when it comes from the worker's last turn rollcall may start a fresh
+ * worker from it instead of resuming a long conversation (supervisor.mjs freshDue). Outside a task it does nothing,
+ * so the core instructions can say it to every session.
+ */
+function where(args, ctx) {
+  const id = args.shift();
+  if (id === "here" && !ctx.home && !taskEnv() && !taskAt(process.cwd())) return 0;
+  const t0 = resolve(id, ctx);
+  const [file] = ctx.flag(args, "--file");
+  let text = args.join(" ");
+  if (file) { try { text = readFileSync(file, "utf8"); } catch { ctx.fail(`cannot read ${file}`); } }
+  if (text === "-") text = readFileSync(0, "utf8");
+  text = text.trim();
+  if (!text) ctx.fail('usage: rollcall task where <id|here> ["<text>" | --file <f>]');
+  const long = overLimit("a where-I-am note", text, MAX_WHERE);
+  if (long) ctx.fail(`${long}: keep it to what a fresh worker needs first`);
+  if (!isOpen(t0)) return 0;
+  const g = ctx.whoAmI();
+  mayWrite(t0, g, ctx);
+  const t = update(t0, ctx, (t) => { t.where = { at: Date.now(), by: author(t, g), session: t.sessions.at(-1)?.id ?? null, text }; });
+  ctx.say(`${t.id}: where-I-am note saved`);
+  return 0;
+}
+
 function close(args, ctx) {
   const t0 = resolve(args.shift(), ctx);
   const why = store.oneLine(args.join(" "));
@@ -912,7 +947,7 @@ function relay(args, ctx) {
   if (!isOpen(t) && !t.sessions.length) ctx.fail(`${t.id} is ${t.state} and never had a worker`);
   const text = part ?? said.text;
   const r = deliverWords(t, text, { record: (x) => recordWords(t, x, "supervisor"), mode: g.mode ?? null });
-  ctx.say(r.ok ? `${t.id}: the owner's words ${r.how === "held" ? `wait for its worker (${r.why})` : r.how === "resumed" ? "resumed its stopped worker" : "were typed into its worker"}: "${store.clip(store.oneLine(text), 120)}"` : `${t.id}: the owner's words are recorded, but ${r.why}`);
+  ctx.say(r.ok ? `${t.id}: the owner's words ${r.how === "held" ? `wait for its worker (${r.why})` : r.how === "resumed" ? "resumed its stopped worker" : r.how === "fresh" ? "go to a fresh worker, which starts with them in its brief" : "were typed into its worker"}: "${store.clip(store.oneLine(text), 120)}"` : `${t.id}: the owner's words are recorded, but ${r.why}`);
   return r.ok ? 0 : 1;
 }
 
@@ -1118,7 +1153,7 @@ async function restore(args, ctx) {
   if (!t.sessions.length || !isOpen(t)) return 0;
   const nudge = `[rollcall] Task ${t.id} was archived and is restored: the worktree is back at ${t.worktree} with your uncommitted work (anything that was staged is now unstaged), its setup runs again (\`${cli()} task setup ${t.id}\`), and its run actions are stopped.${r.notes.length ? ` ${r.notes.join(". ")}.` : ""} Carry on where you left off.`;
   const l = unpark(t, nudge);
-  ctx.say(l.ok ? `  its worker resumed in its window` : `  its worker did not resume: ${l.err} (${START} ${t.id} --resume "restored")`);
+  ctx.say(l.ok ? (l.fresh ? `  a fresh worker takes over from its record` : `  its worker resumed in its window`) : `  its worker did not resume: ${l.err} (${START} ${t.id} --resume "restored")`);
   return 0;
 }
 
@@ -1153,7 +1188,7 @@ async function spotlight(args, ctx) {
 }
 
 const COMMANDS = {
-  new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, decisions, stage, "wait-for": waitFor,
+  new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, where, decisions, stage, "wait-for": waitFor,
   // The supervisor's tools on a worker (task-agent.mjs): through the agent host for a hosted one.
   chat: async (a, c) => (await import("./task-agent.mjs")).chatCmd(a, c, resolve),
   interrupt: async (a, c) => { notWorker("interrupt", c); return (await import("./task-agent.mjs")).interruptCmd(a, c, (id, cx) => { const t = resolve(id, cx); mayWrite(t, cx.whoAmI(), cx); return t; }); },
@@ -1237,6 +1272,18 @@ export function afterRunning(t, now = Date.now()) {
   const a = store.readQueue(repoKey(info).key).after?.[n];
   if (!a || a.stage === "done") return false;
   return a.pid ? sameProcess(a.pid, a.start) : now - a.at < 60_000;
+}
+
+/**
+ * Whether rollcall's ship script holds task `t`'s PR: the merge queue has it checking or waiting its turn (not parked
+ * on someone), or its after-merge runner is going. Its worker then has nothing to do until news comes.
+ */
+export function shipHolds(t, now = Date.now()) {
+  const n = Number(/\/pull\/(\d+)/.exec(t.pr ?? "")?.[1]);
+  if (!n || !t.repo?.key) return false;
+  const e = store.readQueue(t.repo.key).entries?.[n];
+  if (e && (e.state === "checking" || e.state === "waiting")) return true;
+  return afterRunning(t, now);
 }
 
 /**

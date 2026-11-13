@@ -522,6 +522,32 @@ test("an option that merges never opens a picker, where Enter takes the first op
   assert.deepEqual(ask([{ label: "Shipping label" }, { label: "Other" }]), ["Shipping label", "Other"], "a word that only starts the same stays");
 });
 
+test("task where keeps the worker's latest where-I-am note, with its session, for task show; outside a task it does nothing", (t) => {
+  const sb = sandbox(t);
+  const sup = sb.session(sb.root);
+  sup.start();
+  sup.cli(["supervise", "alpha"]);
+  const plain = sup.cli(["task", "where", "here", "half done"]);
+  assert.deepEqual([plain.code, plain.stdout], [0, ""]);
+  sup.cli(["task", "new", "header", "--repo", sb.main]);
+  const w = workerEnv("alpha", "t1");
+  assert.match(sup.cli(["task", "where", "here"], w).stderr, /usage: rollcall task where/);
+  assert.match(sup.cli(["task", "where", "here", "x".repeat(6001)], w).stderr, /over the limit of 6000/);
+  assert.match(sup.cli(["task", "where", "here", "Header done; footer next."], w).stdout, /^t1: where-I-am note saved/);
+  const file = join(sb.root, "where.md");
+  write(file, "Header and footer done.\nPR open; waiting on CI.\n");
+  assert.equal(sup.cli(["task", "where", "here", "--file", file], w).code, 0);
+  const task = json(sup.cli(["task", "show", "t1", "--json"]));
+  assert.equal(task.where.text, "Header and footer done.\nPR open; waiting on CI.", "the latest note replaces the last");
+  assert.equal(task.where.by, "worker");
+  assert.equal(task.where.session, null, "no worker yet");
+  assert.match(sup.cli(["task", "show", "t1"]).stdout, /\nWhere-I-am note \([^)]*\):\nHeader and footer done\.\nPR open; waiting on CI\./);
+  assert.equal(sup.cli(["task", "output", "t1", "Done."], w).code, 0);
+  assert.equal(sup.cli(["task", "close", "t1"], w).code, 0);
+  assert.equal(sup.cli(["task", "where", "t1", "late"], w).code, 0, "a finished task takes no note, quietly");
+  assert.equal(json(sup.cli(["task", "show", "t1", "--json"])).where.text, "Header and footer done.\nPR open; waiting on CI.");
+});
+
 test("task stage notes a ship's stage and counts a stage's time once the next starts; outside a task it does nothing", (t) => {
   const sb = sandbox(t);
   const sup = sb.session(sb.root);
