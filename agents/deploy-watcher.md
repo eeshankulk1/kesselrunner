@@ -2,6 +2,7 @@
 name: deploy-watcher
 description: "Use this agent immediately after a PR is merged to watch any CI/CD or deployment triggered by the merge and report the outcome - or point it at a past merge commit to answer 'did the deploy for that merge succeed?'. It finds GitHub Actions runs, check runs, and deployment statuses (Vercel, Railway, etc.) attached to the merge commit, polls until they finish or time out, and reports pass/fail with failure details."
 model: sonnet
+omitClaudeMd: true
 color: green
 tools: Bash, Read
 ---

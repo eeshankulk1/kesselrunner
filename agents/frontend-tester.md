@@ -2,6 +2,7 @@
 name: frontend-tester
 description: "Browser-level frontend verification worker. Spawned by the /frontend-test skill with a route checklist, tier (smoke|full), and server config; drives a real browser via Playwright MCP, checks console + network + visuals, and returns ONLY a structured report - all snapshot/screenshot noise stays in this agent's context. Do not spawn directly for scoping decisions; the /frontend-test skill decides what to test."
 model: sonnet
+omitClaudeMd: true
 color: green
 ---
 
