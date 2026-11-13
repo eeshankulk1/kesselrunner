@@ -50,6 +50,7 @@ export function sandbox(t) {
   git(main, "push", "-q", "-u", "origin", "main");
   const home = join(root, "home");
   const procs = [];
+  const ends = [];
   const sb = {
     root, origin, main, home,
     // Most suites exercise sessions sharing the main checkout, so the worktrees-only guard is off
@@ -76,8 +77,14 @@ export function sandbox(t) {
       return new Session(sb, cwd, h, opts.id);
     },
     track(p) { procs.push(p); return p; },
+    /**
+     * `fn` runs before the sandbox goes (t.after hooks run in the order added, so one a test adds runs after the
+     * sandbox is removed): stopping a dev server through rollcall needs the home still there.
+     */
+    atEnd(fn) { ends.push(fn); },
   };
   t.after(() => {
+    for (const fn of ends) { try { fn(); } catch {} }
     for (const p of procs) { try { p.kill("SIGKILL"); } catch {} }
     if (!process.env.ROLLCALL_KEEP_SANDBOX) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); // a detached fetch may still be writing
   });
