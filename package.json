@@ -25,7 +25,7 @@
     "node": ">=20"
   },
   "kesselrunner": {
-    "docsic": "0.6.0",
+    "docsic": "0.7.0",
     "docsicConfig": {
       "distill": "auto",
       "sweep": "carry"
