@@ -56,6 +56,8 @@ What the supervisor and its workers do on their own:
 | `/update-tests <what changed>` | Bring tests in line with implementation changes (the test-updater agent) |
 | `/frontend-test <what changed>` | Check UI changes in a real browser |
 | `/ios-sim <what changed>` | Check an iOS app in the simulator: the ios-driver agent taps through the changed flows and returns screenshots |
+| `/prod-read <question>` | Read the live system without changing it (service status, deploys, logs, variable names, read-only queries) through the prod-reader agent, from the project's manifest `production` block |
+| `/browser <task>` | Work in a browser that is not testing your own app (vendor setup, a dashboard, a form) through the browser-operator agent |
 | `/ship-ios-build` | iOS verify, then a TestFlight upload (a project's own ship skill takes precedence) |
 | `/recap <project> [window]` | What happened recently, from memory, worklog and git/PR history |
 | `/handoff` or `/handoff resume [repo, branch or PR]` | Write the prompt the next session starts from (your decisions and where the work stands, no directions), or pick up where the last session stopped |
@@ -91,8 +93,8 @@ The commands a person types. The full list, and what each session sees, is in [r
 | `rollcall turns [<task>]` | A task worktree's per-turn snapshots, shell changes included. `turns diff <n>` and `turns since <n>` show changes; `turns restore <n>` puts the files back to turn n (the state it replaces is saved first) |
 | `rollcall allow-main [--off]` | Let agents edit this repo's main checkout, shared by every session (for example a notes repo that commits straight to main) |
 | `rollcall allow-shared` | Let a session edit, and run checkout-changing git in, a checkout another session is using, on purpose |
-| `rollcall gc [--dry-run] [--all]` | Remove merged, clean, unused task worktrees and their branches, running the manifest's `worktree.teardown` first. An open task's worktree, a branch made in the last day with nothing committed yet, and an unarchived cockpit chat's worktree, stay. It also sweeps what ended work left behind (DerivedData of gone projects, old session temp folders, orphan test browsers). Runs in the background at session start and end |
-| `rollcall clean [--yes]` | A low disk's delete list, with sizes; nothing goes until `--yes` |
+| `rollcall gc [--dry-run] [--all]` | Remove merged, clean, unused task worktrees and their branches, running the manifest's `worktree.teardown` first. An open task's worktree, a branch made in the last day with nothing committed yet, and an open cockpit chat's worktree until its work landed, stay. A worktree left half-removed (tracked files missing) is finished off. It also sweeps what ended work left behind (DerivedData of gone projects, old session temp folders, old App Store upload folders, orphan test browsers). Runs in the background at session start and end; `--log` shows what it kept and why |
+| `rollcall clean [--yes] [--dry-run]` | Clears what rebuilds itself (build folders, package caches) without asking, then lists worktrees whose work never landed, untouched for two weeks, and temp folders of sessions that ended 6 hours to a day ago, with sizes; those go only on `--yes` (a worktree's branch stays) |
 | `rollcall away [on \| off \| status]` | Away mode for the whole Mac: while on, a worker's permission prompt is held (refused with a note, so it carries on) and its question waits on its task; `off` lists what got done and what was held. `allow\|deny <id>` and `allow-all` answer what was held, from your own terminal |
 | `rollcall blockers [clear <kind>]` | What stops work on this machine or account now (usage limit, Codex's usage limit, which holds only Codex tasks, GitHub billing, disk, power, memory, and Spotlight's index stuck read-only after a low disk, with the command that fixes it). You hear each once, work resumes by itself when the cause is gone, and `clear <kind>` says it is fixed |
 | `rollcall remind "<text>" --in <2h>` | A line for you later, for a step only you can take |
@@ -125,7 +127,7 @@ Set these under `env` in `~/.claude/settings.json`, so the supervisor and its wo
 
 ## Running the helper agents on Codex
 
-The named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, deploy-watcher) normally run as Claude subagents. With a Codex plan, `kesselrunner delegate codex` runs them there instead: Claude Code keeps orchestrating, each worker runs as a non-interactive `codex exec` in the repo with the same instructions and returns the same report, and your Claude usage drops to the orchestration. ios-driver always stays on Claude: it needs the iOS simulator, which a Codex worker cannot reach. Needs a logged-in Codex CLI (the ChatGPT desktop app's bundled one is found; `npm i -g @openai/codex` also works). How it works and what Codex workers lack: [codex-parity.md](codex-parity.md).
+The named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, deploy-watcher, and the helpers code-scout, web-researcher, prod-reader, browser-operator) normally run as Claude subagents. With a Codex plan, `kesselrunner delegate codex` runs them there instead: Claude Code keeps orchestrating, each worker runs as a non-interactive `codex exec` in the repo with the same instructions and returns the same report, and your Claude usage drops to the orchestration. ios-driver always stays on Claude: it needs the iOS simulator, which a Codex worker cannot reach. Needs a logged-in Codex CLI (the ChatGPT desktop app's bundled one is found; `npm i -g @openai/codex` also works). One agent can move alone: `backend: codex` in its frontmatter runs it on Codex while the rest stay on Claude (`backend: claude` pins one to Claude). How it works and what Codex workers lack: [codex-parity.md](codex-parity.md).
 
 | Command | Does |
 |---|---|
@@ -182,8 +184,9 @@ CI (`.github/workflows/check.yml`) runs every suite below except the mods on eac
 | `bash test/sandbox.sh` | End-to-end install and sync in a throwaway HOME, with a fixture overlay rule and guard (needs network: installs docsic) |
 | `bash test/delegate.sh` | Offline check of the Codex delegation (fake Codex binary) |
 | `node --test test/rules.test.mjs` | `kesselrunner rules` in a throwaway HOME: on, off, the `CLAUDE.md` block before and after, an overlay rule winning over a core one, and what it refuses |
-| `node --test test/hooks.test.mjs` | The per-event hook entries: fixture guards in a throwaway overlay (order, override, the matcher built from their tools), rollcall answering for edits, deploy-watch for merges |
+| `node --test test/hooks.test.mjs` | The per-event hook entries: fixture guards in a throwaway overlay (order, override, the matcher built from their tools) and the core's `agent-model` guard, rollcall answering for edits, deploy-watch for merges |
 | `node --test test/supervisor.test.mjs` | The supervisor on a real tmux server (private socket) with a fake `claude`: the start, `@t3` and picks typed in, resume after a kill or a lost tmux server, `--fresh`, the worker's questions, the watcher, the status line and notifications, a supervisor handing over, and a scripted front-end client beside the Falcon (needs tmux; offline) |
 | `node --test test/ios-sim.test.mjs` | iosim's accessibility listing, element matching, simulator naming and install's checksum refusal (no simulator needed) |
+| `node --test test/prod-read.test.mjs` | `scripts/prod-read/read.mjs` with fake `railway` and `vercel` binaries: the commands each builds, variable names only, the redactor and output cap, usage errors |
 | `npm test --prefix packages/rollcall` | rollcall's suites on throwaway git repos, then its hook-latency bench |
 | `claude plugin validate . && claude plugin test mods/<name>` | The marketplace file and a mod's hooks module as the engine reads them, then the mod's tests (rollcall and `gh` faked; no session, no login) |

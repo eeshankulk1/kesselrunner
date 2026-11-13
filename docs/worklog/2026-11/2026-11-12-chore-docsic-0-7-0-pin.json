@@ -1,0 +1,1 @@
+{"date": "2026-11-12", "project": "kesselrunner", "summary": "Sync now installs docsic 0.7.0, whose hooks name changed memory files instead of pasting them and load a project only on the owner's own words.", "pr": 31, "why": "Puts plan 8's docsic changes (docsic #15) on every machine."}

@@ -13,7 +13,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { BIN, FIXTURES, denied, git, sandbox, until } from "./helpers.mjs";
+import { BIN, FIXTURES, denied, git, sandbox, until, write } from "./helpers.mjs";
 import { FAKE, FAKE_CODEX, lines, readJson, setup } from "./host-helpers.mjs";
 import { archiveDue, chatOptions, cleanTitle, draftTitle, renameBranch, slugOf } from "../src/host/chat.mjs";
 import { policyFor, sandboxPolicyOf } from "../src/harness/codex.mjs";
@@ -197,6 +197,35 @@ test("chat: a task it makes is a card in its history; archive is refused with op
   assert.ok(existsSync(wt2));
   assert.equal(u.result.chat.branch, `chat/${h2}`);
   assert.match(u.result.chat.note, /new one from origin\/main/);
+});
+
+test("chat: gc takes its worktree once its work landed and nothing runs there; the owner's words bring it back", async (t) => {
+  const x = chatSetup(t, { ROLLCALL_HOST_PARK_MS: "500" });
+  await x.startHost();
+  const { home: h } = x.newChat({ text: "Make a change" });
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: Make a change"));
+  const wt = x.chat(h).worktree;
+  const gc = () => spawnSync(process.execPath, [BIN, "gc"], { env: x.hostEnv, encoding: "utf8", cwd: x.sb.main }).stdout;
+  // A commit of its own, not landed yet: it stays.
+  write(join(wt, "src/chat.js"), "chat\n");
+  git(wt, "add", ".");
+  git(wt, "commit", "-qm", "chat work");
+  await until(() => x.chatAgent(h)?.state === "parked");
+  assert.match(gc(), new RegExp(`kept ${h} .*: chat ${h} is open`));
+  // Squash-merged on main: the worktree goes, the chat stays open.
+  write(join(x.sb.main, "src/chat.js"), "chat\n");
+  git(x.sb.main, "add", ".");
+  git(x.sb.main, "commit", "-qm", "chat work (#1)");
+  git(x.sb.main, "push", "-q", "origin", "main");
+  assert.match(gc(), new RegExp(`removed 1 merged worktree .*: ${h}`));
+  assert.ok(!existsSync(wt));
+  assert.equal(x.chat(h).archivedAt, null, "the chat itself stays");
+  // The owner's next words: the same folder comes back from main, on a new branch, and the chat carries on there.
+  assert.equal(x.api("task.tell", { task: h, text: "one more thing" }).ok, true);
+  await until(() => x.chatHistory(h).some((e) => e.ev === "item" && e.item.text === "done: one more thing"));
+  assert.ok(existsSync(join(wt, "src/chat.js")), "back, from main");
+  assert.equal(x.chat(h).branch, `chat/${h}`);
+  assert.match(x.chat(h).note, /new one from origin\/main/);
 });
 
 test("chat: a hosted crew from before chats archives, wakes on words and renames as a chat; a terminal crew does not", async (t) => {

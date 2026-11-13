@@ -42,7 +42,7 @@ export const tools = /^(Bash|Monitor)$/;     // optional: the tool names it sees
 export function check(payload, kit) { ... }  // a deny reason (string), or null to stay out of it
 ```
 
-`payload` is the hook's input from Claude Code. `kit` is the shell lexer guards share (`lib/shell-scan.mjs`: `SHELL`, `commandText`, `scan`) plus `core`, the core's directory, so a guard in an overlay needs no import path into the core. Sync builds the PreToolUse matcher from rollcall's tools plus each guard's `tools`; a guard that fails to load adds nothing and is skipped at run time. The core ships the mechanism and no guards of its own.
+`payload` is the hook's input from Claude Code. `kit` is the shell lexer guards share (`lib/shell-scan.mjs`: `SHELL`, `commandText`, `scan`) plus `core`, the core's directory, so a guard in an overlay needs no import path into the core. Sync builds the PreToolUse matcher from rollcall's tools plus each guard's `tools`; a guard that fails to load adds nothing and is skipped at run time. The core ships one guard, `agent-model.mjs` (an Agent call names its model, and test, review and docs work goes to the named agents; see `CLAUDE.md` "Delegation"). An overlay file of the same name replaces it, so one whose `check` returns `null` turns it off.
 
 ## Optional rules
 

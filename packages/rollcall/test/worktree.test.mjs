@@ -3,7 +3,7 @@
 // landed: clean, unused, merged - running the manifest's teardown first.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pruneRefs } from "../src/gc.mjs";
@@ -168,6 +168,72 @@ test("gc runs the manifest's worktree.teardown first, and keeps the worktree whe
   git(sb.main, "fetch", "-q", "origin");
   const out = s.cli(["gc"], { cwd: sb.main }).stdout;
   assert.match(out, /kept bad \(bad\): teardown failed: neon is down/);
+  assert.ok(existsSync(bad));
+});
+
+test("gc finishes a removal that stopped partway, moves a worktree out in one step, and logs what it kept and why", (t) => {
+  const sb = sandbox(t);
+  sb.env.ROLLCALL_NOTIFY_LOG = join(sb.root, "notify.log");
+  // Half-removed: git was killed partway through deleting it, so tracked files are missing and ignored output is left.
+  const half = landed(sb, "half");
+  for (let i = 0; i < 20; i++) write(join(half, `src/many/f${i}.js`), `${i}\n`);
+  git(half, "add", "."); git(half, "commit", "-qm", "many"); git(half, "push", "-q", "origin", "HEAD:main"); git(sb.main, "fetch", "-q", "origin");
+  write(join(half, "node_modules/dep/index.js"), "x\n");
+  write(join(sb.main, ".git/info/exclude"), "node_modules/\n"); // ignored in every worktree
+  for (let i = 0; i < 12; i++) rmSync(join(half, `src/many/f${i}.js`));
+  // Missing files plus a real edit, or plus a new file, is work: it stays.
+  const edited = landed(sb, "edited");
+  rmSync(join(edited, "src/edited.js"));
+  write(join(edited, "README.md"), "changed\n");
+  const added = landed(sb, "added");
+  rmSync(join(added, "src/added.js"));
+  write(join(added, "src/new.js"), "new\n");
+
+  const s = sb.session();
+  const dry = s.cli(["gc", "--dry-run"], { cwd: sb.main }).stdout;
+  assert.match(dry, /would remove 1 merged worktree: half/);
+  assert.match(dry, /kept edited \(edited\): uncommitted changes/);
+  assert.match(dry, /kept added \(added\): uncommitted changes/);
+  const out = s.cli(["gc"], { cwd: sb.main });
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /removed 1 merged worktree .*: half/);
+  assert.ok(!existsSync(half), "gone");
+  assert.ok(!git(sb.main, "worktree", "list").includes(half), "git forgot it");
+  assert.ok(!git(sb.main, "branch", "--format=%(refname:short)").split("\n").includes("half"), "its branch went");
+  const trash = join(sb.main, ".git", "rollcall-trash");
+  assert.deepEqual(existsSync(trash) ? readdirSync(trash) : [], [], "its files were deleted after the move");
+
+  // A run stopped between the move and the delete leaves the trash: the next gc empties it.
+  mkdirSync(join(trash, "older-1/node_modules"), { recursive: true });
+  write(join(trash, "older-1/node_modules/x.js"), "x\n");
+  s.cli(["gc"], { cwd: sb.main });
+  assert.deepEqual(readdirSync(trash), []);
+
+  // The log: every kept worktree and why, and what was removed.
+  const log = s.cli(["gc", "--log"], { cwd: sb.main }).stdout;
+  assert.match(log, /gc at .* kept 2 worktrees:/);
+  assert.match(log, /edited \(edited\): uncommitted changes/);
+  assert.match(log, /removed half \(half\): in origin\/main; finishing a removal that stopped partway/);
+  assert.ok(!existsSync(sb.env.ROLLCALL_NOTIFY_LOG), "nothing failed, so the owner hears nothing");
+});
+
+test("a failed teardown reaches the owner once, and is in gc's log", (t) => {
+  const sb = sandbox(t);
+  const notices = join(sb.root, "notify.log");
+  sb.env.ROLLCALL_NOTIFY_LOG = notices;
+  const bad = landed(sb, "bad");
+  write(join(bad, ".claude/test-manifest.json"), JSON.stringify({ worktree: { teardown: "echo neon is down >&2; exit 3" } }));
+  git(bad, "add", "-f", ".claude/test-manifest.json");
+  git(bad, "commit", "-qm", "bad teardown");
+  git(bad, "push", "-q", "origin", "HEAD:main");
+  git(sb.main, "fetch", "-q", "origin");
+  const s = sb.session();
+  s.cli(["gc"], { cwd: sb.main });
+  s.cli(["gc"], { cwd: sb.main });
+  const told = readFileSync(notices, "utf8").trim().split("\n");
+  assert.equal(told.length, 1, "the same failure is told once");
+  assert.match(told[0], /gc could not remove a finished worktree: bad: teardown failed: neon is down/);
+  assert.match(s.cli(["gc", "--log"], { cwd: sb.main }).stdout, /failed bad \(bad\): teardown failed: neon is down/);
   assert.ok(existsSync(bad));
 });
 

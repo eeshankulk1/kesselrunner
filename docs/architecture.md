@@ -25,8 +25,9 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `settings.core.json` | Core settings: hooks, plugins, marketplaces, the status line (`rollcall statusline`). `{{KESSELRUNNER}}` and `{{DOCSIC}}` are filled in at sync (see [overlay.md](overlay.md#paths-inside-your-files)) |
 | `.claude-plugin/marketplace.json` | Makes this repo the `kesselrunner` plugin marketplace: the mods in `mods/` by relative path, third-party mods pinned to a reviewed commit |
 | `mods/` | `rollcall-band`, `pr-band`, `clickable`: one folder per mod (manifest, hooks module, state contract, tests) |
-| `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher. The three that work from a complete brief (frontend-tester, ios-driver, deploy-watcher) set `omitClaudeMd: true` and start without the CLAUDE.md files; their own file and the brief carry what they need |
-| `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/handoff`, `/note`, `/frontend-test`, `/ios-sim`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
+| `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher, and the helpers code-scout, web-researcher, prod-reader, browser-operator ([helpers.md](helpers.md)). The three that work from a complete brief (frontend-tester, ios-driver, deploy-watcher) set `omitClaudeMd: true` and start without the CLAUDE.md files; their own file and the brief carry what they need |
+| `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/handoff`, `/note`, `/frontend-test`, `/ios-sim`, `/browser`, `/prod-read`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
+| `hooks/pre-tool-use/` | The core's one guard, `agent-model.mjs`: refuses an Agent call that would run on the session's model by accident (no model named on an agent that has none of its own), and a `general-purpose` call doing test, review or docs work |
 | `docs/` | These docs, plus the project docs standard, templates, the test-manifest schema, plans and the worklog |
 | `bin/kesselrunner.mjs` | The install, sync, doctor, delegate and rules CLI (`bin/dotclaude.mjs` is the old name) |
 | `lib/reconcile.mjs` | Install and sync: links, the `CLAUDE.md` block, settings merge, docsic, migrations, the malformed-settings guard |
@@ -34,7 +35,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `lib/guards.mjs` | Finds the PreToolUse guards in the core and the overlay and builds the hook's matcher |
 | `lib/rules.mjs` | Optional rules: the files in `rules/` of the core and overlay, and which are on |
 | `lib/agents.mjs` | Agent frontmatter parser and TOML escaper, shared by the Codex bridge and the delegation runner |
-| `lib/delegate.mjs` | Delegation settings, Codex CLI discovery and status, the model catalog |
+| `lib/delegate.mjs` | Delegation settings, an agent's own backend from its frontmatter, Codex CLI discovery and status, the model catalog |
 | `lib/legacy.mjs` | The names from before the rename, so old machines keep working |
 | `lib/shell-scan.mjs` | The shell lexer guards read command lines with |
 | `lib/hook-io.mjs` | A command hook's stdin and stdout, so each guard is a function `scripts/hooks/` calls and still a script of its own |
@@ -43,6 +44,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `scripts/supervisor/` | `start.mjs`: starts a task's worker in a window of its supervisor's tmux session (below) |
 | `scripts/codex-bridge/` | SessionStart: projects `~/.claude` into `~/.codex` |
 | `scripts/delegate/` | Runs a named agent on Codex (`kesselrunner delegate codex`); SessionStart: announces the backend |
+| `scripts/prod-read/` | `read.mjs`: the prod-reader's read-only view of a project's production (status, deployments, logs, variable names), from the test manifest's `production` block, with secrets redacted |
 | `scripts/deploy-watch/` | PostToolUse: a successful `gh pr merge` triggers the deploy-watcher agent (merges the ship script did not run: it watches its own) |
 | `scripts/ios-sim/` | `iosim` (on PATH): drives an iOS simulator for the ios-driver agent: a compact accessibility listing, taps and typing through [AXe](https://github.com/cameroncooke/AXe), screenshots, throwaway simulators |
 | `scripts/copy-helper/` | `kesselrunner Copy.app` (macOS): opens the `clickable` mod's copy links and copies the saved text; built and registered by `sync` |
@@ -109,6 +111,8 @@ To turn a mod off on one machine, set it to `false` under `enabledPlugins` in `~
 | [principles.md](principles.md) | Why it works the way it does |
 | [commands.md](commands.md) | Every command and setting a person types |
 | [overlay.md](overlay.md) | The personal layer, guards, optional rules, what sync changes in `~/.claude` |
+| [helpers.md](helpers.md) | The helper agents and the contract they share: when to hand over, the brief, the report, checking the proof |
+| [delegation.md](delegation.md) | What a session does to run a named agent on Claude or Codex, globally or per agent |
 | [codex-parity.md](codex-parity.md) | The Codex bridge, Codex workers for the Falcon (and what they lack), and running the helper agents on Codex |
 | [../packages/rollcall/API.md](../packages/rollcall/API.md) | rollcall's front-end interface: the snapshot, stream, actions and attach a front end relies on |
 | [project-docs.md](project-docs.md) | The docs standard the agents keep in each project repo |

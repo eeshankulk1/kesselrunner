@@ -58,7 +58,7 @@ function generateAgentsMd() {
 The instructions below were written for Claude Code and apply to Codex unchanged, with this mapping:
 
 - Slash commands (/pr-create, /note, /recap, ...) are skills in ~/.codex/skills/ - invoke via the skill of the same name.
-- Named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, ios-driver, deploy-watcher) are custom subagents in ~/.codex/agents/*.toml - where the instructions say "run the X agent", spawn that subagent.
+- Named agents (code-reviewer, test-runner, test-updater, docs-updater, frontend-tester, ios-driver, deploy-watcher, code-scout, web-researcher, prod-reader, browser-operator) are custom subagents in ~/.codex/agents/*.toml - where the instructions say "run the X agent", spawn that subagent.
 - The "claude-code-guide agent" and "Claude Code's native auto-memory" are Claude-only; ignore those references. For questions about THIS harness's behavior (hooks, config, skills), consult the Codex docs at https://developers.openai.com/codex instead of assuming.
 - Paths under ~/.claude/ are valid regardless of harness: ~/.claude/kesselrunner links to the kesselrunner core, so the docs and scripts referenced below exist as written.
 - The "Delegation" section is Claude-side routing: in Codex, named agents are always spawned as the subagent of that name.
