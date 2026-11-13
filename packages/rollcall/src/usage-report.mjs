@@ -223,6 +223,7 @@ export function build(files, { from, to }) {
   const ships = live.filter((f) => f.sub && f.group === "shipper" && f.win.length >= 2);
   const walls = [], stageMins = STAGES.map(() => []), stageTotals = STAGES.map(() => 0);
   const q = { pushed: 0, firstPass: 0, reviews: 0, pushes: 0, ciFails: 0 };
+  const byModel = {}; // per shipper model: the same signals, plus the spend and requests before the first push
   for (const f of ships) {
     const R = f.win, t0 = R[0].ts, t1 = R[R.length - 1].ts;
     walls.push((t1 - t0) / 60_000);
@@ -239,8 +240,17 @@ export function build(files, { from, to }) {
     const pushes = R.filter((r) => r.flags.includes("push")).length;
     const fails = R.filter((r) => r.flags.includes("cifail")).length;
     q.pushes += pushes; q.ciFails += fails;
-    q.reviews += R.reduce((s, r) => s + r.cats.filter((c) => c === "Agent:code-reviewer").length, 0);
+    const reviews = R.reduce((s, r) => s + r.cats.filter((c) => c === "Agent:code-reviewer").length, 0);
+    q.reviews += reviews;
     if (pushes) { q.pushed++; if (!fails) q.firstPass++; }
+    const pre = tPush ? R.filter((r) => r.ts < tPush) : R;
+    const spendBy = {};
+    for (const r of R) if (modelWeight(r.model)) spendBy[r.model] = (spendBy[r.model] ?? 0) + r.w;
+    const model = (Object.entries(spendBy).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "?").replace(/^claude-/, "");
+    const m = (byModel[model] ??= { ships: 0, pushed: 0, firstPass: 0, reviews: 0, pushes: 0, ciFails: 0, stepUps: 0, preW: [], preN: [] });
+    m.ships++; m.reviews += reviews; m.pushes += pushes; m.ciFails += fails; if (f.stepUp) m.stepUps++;
+    if (pushes) { m.pushed++; if (!fails) m.firstPass++; }
+    m.preW.push(pre.reduce((s, r) => s + r.w, 0)); m.preN.push(pre.length);
   }
   const wallTotal = stageTotals.reduce((a, b) => a + b, 0);
   const humans = mains.flatMap((f) => f.humans.filter((h) => inWin(h.ts)).map((h) => ({ ...h, sid: f.sid })));
@@ -280,6 +290,14 @@ export function build(files, { from, to }) {
       ciFailuresPerShip: ships.length ? round(q.ciFails / ships.length, 2) : null,
       ownerPrompts: humans.length, corrections, correctionsPerSession: promptSessions.size ? round(corrections / promptSessions.size, 3) : 0,
       sessionsWithCorrection: pct(corrSessions.size, promptSessions.size),
+      // The Sonnet shipper trial's measure: each shipper model's ships side by side. stepUps counts the runs that
+      // took over a ship after a cheaper run stopped ([step-up] in the prompt).
+      byShipperModel: Object.fromEntries(Object.entries(byModel).sort((a, b) => b[1].ships - a[1].ships).map(([k, m]) => [k, {
+        ships: m.ships, firstRunCiPass: m.pushed ? pct(m.firstPass, m.pushed) : null,
+        reviewsPerShip: round(m.reviews / m.ships, 2), pushesPerShip: round(m.pushes / m.ships, 2), ciFailuresPerShip: round(m.ciFails / m.ships, 2),
+        prePushMedianM: round(median(m.preW) / 1e6, 2), prePushMeanM: round(m.preW.reduce((a, b) => a + b, 0) / m.ships / 1e6, 2),
+        prePushRequestsMedian: median(m.preN), stepUps: m.stepUps,
+      }])),
     },
   };
 }
@@ -360,6 +378,10 @@ export function format(rep) {
   out.push("", "Quality signals",
     `  first-run CI pass: ${q.firstRunCiPass ?? "-"}% of ships that pushed; per ship: ${n(q.reviewsPerShip)} reviews, ${n(q.pushesPerShip)} pushes, ${n(q.ciFailuresPerShip)} CI failure reads`,
     `  owner corrections: ${n(q.corrections)} of ${n(q.ownerPrompts)} prompts, ${n(q.correctionsPerSession)} per session, in ${q.sessionsWithCorrection}% of sessions`);
+  const bm = Object.entries(q.byShipperModel ?? {});
+  if (bm.length) out.push("", "Ships by shipper model (before the first push: the part a model does)",
+    table(["model", "ships", "first-run CI %", "reviews", "pushes", "CI fail reads", "pre-push M median", "mean", "requests", "step-ups"],
+      bm.map(([k, v]) => [k, v.ships, v.firstRunCiPass ?? "-", v.reviewsPerShip, v.pushesPerShip, v.ciFailuresPerShip, v.prePushMedianM, v.prePushMeanM, v.prePushRequestsMedian, v.stepUps])));
   return out.join("\n");
 }
 
