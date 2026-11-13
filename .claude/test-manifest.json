@@ -23,7 +23,7 @@
       "tier": "fast",
       "testCommand": "node --test test/hooks.test.mjs",
       "ci": "pr",
-      "notes": "The PreToolUse and PostToolUse entries (scripts/hooks/) as Claude Code runs them, with fixture guards in a throwaway overlay: guard order, an overlay guard replacing a core one, a crashing or unloadable guard allowing while the rest run, a deny skipping rollcall, ROLLCALL_DISABLE, the tools each guard names and the matcher sync builds from them, plus deploy-watch after a merge. The core ships no guards; real ones and their tests live in an overlay."
+      "notes": "The PreToolUse and PostToolUse entries (scripts/hooks/) as Claude Code runs them, with fixture guards in a throwaway overlay: guard order, an overlay guard replacing a core one, a crashing or unloadable guard allowing while the rest run, a deny skipping rollcall, ROLLCALL_DISABLE, the tools each guard names and the matcher sync builds from them, plus deploy-watch after a merge. The core's one guard, agent-model, is tested here too; an overlay's own guards and their tests live in the overlay."
     },
     {
       "name": "ios-sim",
@@ -60,6 +60,15 @@
       "testCommand": "node --test test/release.test.mjs",
       "notes": "scripts/release.sh in a throwaway copy of the release files with a local bare origin: bump sets both versions and opens the CHANGELOG entry; tag refuses a dirty, unpushed or empty-entry main, then tags locally, prints the push, gh release and npm publish steps, and pushes nothing. Runs rollcall's npm pack --dry-run.",
       "ci": "pr"
+    },
+    {
+      "name": "prod-read",
+      "dir": ".",
+      "runner": "node:test",
+      "tier": "fast",
+      "testCommand": "node --test test/prod-read.test.mjs",
+      "ci": "pr",
+      "notes": "scripts/prod-read/read.mjs with fake railway and vercel binaries first on PATH, in a throwaway repo with a task worktree: the argv each command builds and that it runs in the main checkout, vars printing names only, the redactor and output cap, and usage errors. Never runs the real CLIs."
     },
     {
       "name": "supervisor",

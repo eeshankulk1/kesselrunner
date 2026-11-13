@@ -10,17 +10,22 @@
 //   node run.mjs <agent> [--cwd DIR] [--prompt-file F] [--sandbox MODE] [--dry-run]   (prompt on stdin unless --prompt-file)
 //   node run.mjs status [--hook]                                                       (which backend is configured)
 //
-// Exit codes: 0 done; 2 use the Agent tool (the backend is "claude", or the
-// agent's frontmatter says `codex: never`); 3 usage / missing agent / Codex
-// unavailable; otherwise Codex's own exit code (with Codex status 2 remapped
-// to 1 because 2 is reserved for the Agent fallback).
+// The backend is the global switch (`kesselrunner delegate`), unless the
+// agent's frontmatter picks its own: `backend: codex` runs it here even when
+// the switch says claude; `backend: claude` (or the older `codex: never`)
+// keeps it on the Agent tool.
+//
+// Exit codes: 0 done; 2 use the Agent tool (this agent's backend is
+// "claude"); 3 usage / missing agent / Codex unavailable; otherwise Codex's
+// own exit code (with Codex status 2 remapped to 1 because 2 is reserved for
+// the Agent fallback).
 import { execFileSync, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { escapeTomlBasic, parseAgent } from "../../lib/agents.mjs";
-import { codexStatus, readDelegation } from "../../lib/delegate.mjs";
+import { agentBackend, agentOverrides, codexStatus, readDelegation } from "../../lib/delegate.mjs";
 import { knob } from "../../lib/legacy.mjs";
 import { CLAUDE_DIR, inside } from "../../lib/reconcile.mjs";
 
@@ -73,38 +78,47 @@ const delegation = readDelegation();
 
 // ------------------------------------------------------------------ status
 if (isStatus) {
-  const codex = delegation.backend === "codex" ? codexStatus() : null;
+  const overrides = agentOverrides(delegation.backend);
+  const onCodex = overrides.filter((o) => o.backend === "codex").map((o) => o.name);
+  const onClaude = overrides.filter((o) => o.backend === "claude").map((o) => o.name);
+  const codex = delegation.backend === "codex" || onCodex.length ? codexStatus() : null;
   if (hook) {
-    // SessionStart hook: one line of context when the Codex backend is on, silence otherwise.
-    if (codex) console.log(codex.problem
+    // SessionStart hook: one line of context when any named agent runs on Codex, silence otherwise.
+    const how = `see ${join(CORE, "docs", "delegation.md")}`;
+    if (delegation.backend === "codex") console.log(codex.problem
       ? `[kesselrunner] delegation backend is set to codex but unusable: ${codex.problem}. Falling back to Claude subagents (the Agent tool) this session.`
-      : `[kesselrunner] delegation backend: codex (${codex.version}, model ${delegation.model ?? "config.toml default"}). Run named agents through scripts/delegate/run.mjs instead of the Agent tool - see "Delegation" in the global instructions.`);
+      : `[kesselrunner] delegation backend: codex (${codex.version}, model ${delegation.model ?? "config.toml default"}). Run named agents through scripts/delegate/run.mjs instead of the Agent tool${onClaude.length ? `, except ${onClaude.join(", ")} (the Agent tool always)` : ""} - ${how}.`);
+    else if (codex) console.log(codex.problem
+      ? `[kesselrunner] ${onCodex.join(", ")} ${onCodex.length > 1 ? "are" : "is"} set to run on codex but codex is unusable: ${codex.problem}. Spawn ${onCodex.length > 1 ? "them" : "it"} with the Agent tool this session.`
+      : `[kesselrunner] delegation backend: claude, except ${onCodex.join(", ")} on codex (${codex.version}): run ${onCodex.length > 1 ? "those" : "that one"} through scripts/delegate/run.mjs instead of the Agent tool - ${how}.`);
     process.exit(0);
   }
-  if (codex) {
-    console.log(`backend: codex${codex.bin ? ` (${codex.version ?? "unusable"}, ${codex.bin})` : ""}${codex.problem ? `\nproblem: ${codex.problem}` : ""}`);
+  if (delegation.backend === "codex") {
+    console.log(`backend: codex${codex.bin ? ` (${codex.version ?? "unusable"}, ${codex.bin})` : ""}${codex.problem ? `\nproblem: ${codex.problem}` : ""}${onClaude.length ? `\non claude by their own frontmatter: ${onClaude.join(", ")}` : ""}`);
     process.exit(codex.problem ? 3 : 0);
   }
-  console.log("backend: claude (Agent tool)");
-  if (!agentName) console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 15).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  console.log(`backend: claude (Agent tool)${onCodex.length ? `\non codex by their own frontmatter: ${onCodex.join(", ")}${codex?.problem ? ` (unusable: ${codex.problem})` : ""}` : ""}`);
+  if (!agentName) console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 21).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   process.exit(0);
 }
 
 // --------------------------------------------------------------------- run
-if (delegation.backend !== "codex") die(`delegation backend is "${delegation.backend}" - spawn ${agentName} with the Agent tool (subagent_type: "${agentName}") instead`, 2);
-
-const { bin, problem } = codexStatus();
-if (problem) die(`${problem}. Spawn ${agentName} with the Agent tool instead.`);
-
 if (!/^[\w-]+$/.test(agentName)) die(`invalid agent name "${agentName}"`);
 const agentPath = join(CLAUDE_DIR, "agents", `${agentName}.md`);
 if (!existsSync(agentPath)) die(`no agent named "${agentName}" in ${dirname(agentPath)}`);
 let agent;
 try { agent = parseAgent(readFileSync(agentPath, "utf8")); } catch (error) { die(`could not read ${agentPath}: ${error.message}`); }
 if (!agent) die(`${agentPath} has no frontmatter`);
-// An agent that cannot do its job in a Codex worker (ios-driver needs the
-// simulator, which the sandbox cannot reach) opts out for good.
-if (agent.get("codex") === "never") die(`${agentName} always runs as a Claude subagent (frontmatter \`codex: never\`) - spawn it with the Agent tool (subagent_type: "${agentName}") instead`, 2);
+// The agent's own pick beats the global switch: an agent that cannot do its job in a Codex worker (ios-driver
+// needs the simulator, which the sandbox cannot reach) stays on Claude, and one can move to Codex alone.
+const own = agentBackend(agent);
+if ((own ?? delegation.backend) !== "codex") {
+  die(own ? `${agentName} always runs as a Claude subagent (frontmatter \`${agent.get("backend") ? "backend: claude" : "codex: never"}\`) - spawn it with the Agent tool (subagent_type: "${agentName}") instead`
+    : `delegation backend is "${delegation.backend}" - spawn ${agentName} with the Agent tool (subagent_type: "${agentName}") instead`, 2);
+}
+
+const { bin, problem } = codexStatus();
+if (problem) die(`${problem}. Spawn ${agentName} with the Agent tool instead.`);
 
 const cwd = resolve(cwdArg ?? process.cwd());
 let root;

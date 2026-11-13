@@ -56,20 +56,21 @@ you ──▶ the Falcon (supervisor) ──┬──▶ worker: worktree + tmux
 
 - **The Falcon, the supervisor.** The one session you type into. It turns each ask into a task, puts a crew member on it, brings the crew's questions to its own picker, and never edits code itself. More ships wait in the hangar: a second supervisor is the Venator, then the Ghost, each with its own crew.
 - **The crew.** Each worker is an ordinary Claude Code session in its own git worktree and tmux tab, so tasks never share a checkout. Click a tab to watch one, or type `@leia <words>` to talk to it.
-- **The ship chain.** `/pr-create` checks, reviews and documents the change, opens the PR and watches CI, with helper agents for review, tests and docs.
+- **The ship chain.** `/pr-create` checks, reviews and documents the change, opens the PR and watches CI, with helper agents for review, tests and docs. More helpers search code, research the web, read production without changing it (`/prod-read`) and work in a browser (`/browser`). A guard refuses an agent call that would run on the wrong model ([helpers](docs/helpers.md)).
 - **[rollcall](packages/rollcall/README.md).** Keeps every session aware of the others, holds the task records, and runs the merge queue: a script that lands green PRs in the order they became ready, as they are when they merge cleanly and otherwise in trains tested as the tree that lands.
 - **[docsic](https://github.com/eeshankulk1/docsic).** Project memory. Where each project stands and what past sessions learned reach every new session without you asking.
 
 [rollcall](packages/rollcall/README.md) also runs an agent host for cockpit, the Mac and iOS apps: chats and crews on Claude Code or Codex, each with a model, permission mode and effort level you can change mid-chat, and away mode, which holds a worker's permission prompts for you instead of blocking it.
 
 Your own instructions, settings, skills and guards live in an [overlay](docs/overlay.md), a folder of yours that sync layers on top and never touches.
-The same setup also runs in OpenAI Codex, and the helper agents can run on a Codex plan ([details](docs/codex-parity.md)).
+The same setup also runs in OpenAI Codex, and each helper agent can run on a Codex plan or stay on Claude ([delegation](docs/delegation.md), [details](docs/codex-parity.md)).
 
 ## Read more
 
 - [Principles](docs/principles.md) - why it works the way it does
 - [Commands](docs/commands.md) - everything you type: `kesselrunner`, `falcon`, `rollcall`, the slash commands, the settings
 - [Architecture](docs/architecture.md) - the parts, the repo layout, what it changes in `~/.claude`, the mods
+- [Helpers](docs/helpers.md) and [delegation](docs/delegation.md) - the helper agents, and running them on Claude or Codex
 - [Overlay](docs/overlay.md) - your personal layer: instructions, settings, skills, agents, rules and guards
 - [rollcall](packages/rollcall/README.md) - sessions, tasks, supervisors and the merge queue in depth
 - [docsic](https://github.com/eeshankulk1/docsic) - the memory layer, its own project

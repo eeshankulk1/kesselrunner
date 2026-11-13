@@ -261,20 +261,24 @@ worker's window).
 ## Delegation - running the agents on Codex
 
 `kesselrunner delegate codex` makes the named agents (code-reviewer, test-runner,
-test-updater, docs-updater, frontend-tester, deploy-watcher) run on the user's
-Codex plan instead of as Claude subagents. Claude Code stays the orchestrator;
-only the worker changes.
+test-updater, docs-updater, frontend-tester, deploy-watcher and the helpers in
+[helpers.md](helpers.md)) run on the user's Codex plan instead of as Claude
+subagents. Claude Code stays the orchestrator; only the worker changes. One agent
+can also pick its own backend in its frontmatter: `backend: codex` moves it alone
+while the switch stays on claude, and `backend: claude` (or the older `codex: never`)
+keeps it on Claude whatever the switch says. What a session does with each:
+[delegation.md](delegation.md).
 
 | Piece | Role |
 |---|---|
 | `lib/delegate.mjs` | The settings (written through `writeEnv`, which `kesselrunner rules` shares: `env.KESSELRUNNER_DELEGATE`, `env.KESSELRUNNER_CODEX_MODEL`, and `env.KESSELRUNNER_CODEX_EFFORT` in `~/.claude/settings.json`, so they are also available as shell environment variables), Codex CLI discovery (`KESSELRUNNER_CODEX_BIN`, `CODEX_CLI_PATH`, PATH, the ChatGPT app bundle, and `~/.codex/bin/codex`), login check, and model catalog |
 | `lib/agents.mjs` | Shared agent frontmatter parsing and lossless TOML basic-string escaping used by the bridge and delegation runner |
 | `scripts/delegate/run.mjs <agent>` | Runs one agent: `~/.claude/agents/<agent>.md` body -> Codex `developer_instructions`; task prompt (stdin / `--prompt-file`) -> user turn; `codex exec --ephemeral -C <cwd>` with hooks disabled (the worker must not re-run sync, the bridge, or docsic); prints only the final message + a trailer line; Codex's output streams live to a log in `$TMPDIR/kesselrunner-delegate/` (path on stderr at start and on the trailer) |
-| `scripts/delegate/run.mjs status --hook` | SessionStart hook: one context line when the backend is codex (or why it cannot be used), silence otherwise |
+| `scripts/delegate/run.mjs status --hook` | SessionStart hook: one context line when any agent runs on codex (the switch, or agents whose frontmatter says `backend: codex`), or why it cannot be used; silence otherwise |
 | CLAUDE.md "Delegation" | Tells Claude what "spawn X" means on each backend. Skills and the deploy-watch hook say "spawn X" and never name the mechanism |
 
-Exit codes of the runner: 0 done; 2 use the Agent tool (the backend is claude, or the
-agent opted out with `codex: never`); 3 usage, unknown agent, or Codex unusable;
+Exit codes of the runner: 0 done; 2 use the Agent tool (this agent's backend is claude:
+the switch with no `backend:` of its own, or `backend: claude` / `codex: never`); 3 usage, unknown agent, or Codex unusable;
 anything else is Codex's own exit code. Codex
 status 2 is remapped to 1 because exit 2 is reserved for the Claude fallback.
 

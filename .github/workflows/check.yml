@@ -149,8 +149,8 @@ jobs:
         run: for f in bin/*.mjs lib/*.mjs scripts/*/*.mjs migrations/*.mjs packages/*/bin/*.mjs packages/*/src/*.mjs packages/*/src/*/*.mjs; do node --check "$f"; done
       - name: delegate
         run: bash test/delegate.sh
-      - name: hooks, ios-sim, copy-helper, rules, release
-        run: node --test test/hooks.test.mjs test/ios-sim.test.mjs test/copy-helper.test.mjs test/rules.test.mjs test/release.test.mjs
+      - name: hooks, ios-sim, copy-helper, rules, release, prod-read
+        run: node --test test/hooks.test.mjs test/ios-sim.test.mjs test/copy-helper.test.mjs test/rules.test.mjs test/release.test.mjs test/prod-read.test.mjs
 
   rollcall:
     name: rollcall

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { pull } from "../lib/pull.mjs";
 import { CLAUDE_DIR, STATE_DIR, carryLegacyState, readJson, readState, reconcile, reconcileClaudeMd, unlinkedCoreBins } from "../lib/reconcile.mjs";
 import { knob } from "../lib/legacy.mjs";
-import { BACKENDS, codexStatus, findCodex, listCodexModels, readDelegation, readSettings, writeDelegation, writeEnv } from "../lib/delegate.mjs";
+import { BACKENDS, agentOverrides, codexStatus, findCodex, listCodexModels, readDelegation, readSettings, writeDelegation, writeEnv } from "../lib/delegate.mjs";
 import { RULES_KEY, enabledRules, listRules } from "../lib/rules.mjs";
 import { check as checkTools } from "../packages/rollcall/src/needs.mjs";
 
@@ -250,12 +250,13 @@ function doctor() {
   if (want && !docsic) issues.push(`docsic not on PATH (want ${want})`);
   for (const name of unlinkedCoreBins(CORE)) issues.push(`${name} not on PATH (the global npm link does not point at this core)`);
   const { backend } = readDelegation(settings ?? {});
-  const codex = backend === "codex" ? codexStatus() : null;
-  if (codex?.problem) issues.push(`delegation backend is codex but ${codex.problem}`);
+  const own = agentOverrides(backend).map((o) => `${o.name} on ${o.backend}`);
+  const codex = backend === "codex" || own.some((o) => o.endsWith(" on codex")) ? codexStatus() : null;
+  if (codex?.problem) issues.push(`${backend === "codex" ? "delegation backend is codex" : "an agent's frontmatter picks codex"} but ${codex.problem}`);
   const rulesOn = enabledRules(settings?.env);
   const offered = new Set(listRules(CORE, overlayDir()).map((r) => r.name));
   for (const name of rulesOn) if (!offered.has(name)) issues.push(`rule "${name}" is switched on but in neither the core nor the overlay - run kesselrunner rules off ${name}`);
-  console.log(`core: ${CORE}\noverlay: ${state.overlay ?? "(none)"}\nlast sync: ${state.lastSync ?? "never"}\nmigrations: ${(state.migrations ?? []).join(", ") || "(none)"}\ndelegation: ${backend}${codex && !codex.problem ? ` (${codex.version})` : ""}\nrules: ${rulesOn.join(", ") || "(none)"}\ntools: ${tools.length ? `${tools.length} missing (below)` : `git, tmux, Claude Code, gh (logged in), Node ${process.versions.node}`}`);
+  console.log(`core: ${CORE}\noverlay: ${state.overlay ?? "(none)"}\nlast sync: ${state.lastSync ?? "never"}\nmigrations: ${(state.migrations ?? []).join(", ") || "(none)"}\ndelegation: ${backend}${codex && !codex.problem ? ` (${codex.version})` : ""}${own.length ? `; by their own frontmatter: ${own.join(", ")}` : ""}\nrules: ${rulesOn.join(", ") || "(none)"}\ntools: ${tools.length ? `${tools.length} missing (below)` : `git, tmux, Claude Code, gh (logged in), Node ${process.versions.node}`}`);
   if (warnings.length) console.log(`\n${warnings.map((w) => `warning: ${w}`).join("\n")}`);
   console.log(issues.length ? `\n${issues.map((i) => `- ${i}`).join("\n")}\n\nMost of these are fixed by: kesselrunner sync` : "\nno issues");
   process.exitCode = issues.length ? 1 : 0;

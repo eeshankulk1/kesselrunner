@@ -48,6 +48,17 @@ set +e; RUN code-reviewer --prompt-file 2>"$SB/err"; code=$?; set -e
 [ "$code" = 3 ] && grep -q -- '--prompt-file requires a value' "$SB/err" || fail "runner missing option value"
 ok "claude backend: runner defers to the Agent tool"
 
+# 1b. an agent's own `backend: codex` runs it on Codex while the switch stays on claude; the hook names it
+printf -- '---\nname: solo\ndescription: x\nbackend: codex\n---\nWork alone.\n' > "$CLAUDE_CONFIG_DIR/agents/solo.md"
+echo "solo task" > "$SB/solo.txt"
+RUN solo --cwd "$SB" --prompt-file "$SB/solo.txt" > "$SB/solo.out" || fail "backend: codex agent did not run on Codex"
+grep -q "solo task" "$FAKE_RECORD.stdin" && grep -q "fake verdict" "$SB/solo.out" || fail "backend: codex agent output"
+RUN status --hook | grep -q "delegation backend: claude, except solo on codex (codex-cli 9.9.9-fake)" || fail "hook names the agent on codex"
+RUN status | grep -q "on codex by their own frontmatter: solo" || fail "status names the agent on codex"
+set +e; echo task | RUN code-reviewer >/dev/null 2>&1; code=$?; set -e
+[ "$code" = 2 ] || fail "the other agents stay on the Agent tool"
+ok "backend: codex moves one agent"
+
 # 2. delegate codex writes settings env; doctor/status/hook report it
 DC delegate codex | grep -q "now run on Codex (codex-cli 9.9.9-fake)" || fail "delegate codex"
 node -e 'const s=require(process.argv[1]); if(s.model!=="keep-me"||s.env.KESSELRUNNER_DELEGATE!=="codex"||s.env.KEEP_ME!=="yes") throw 1' "$CLAUDE_CONFIG_DIR/settings.json" || fail "settings env"
@@ -100,7 +111,11 @@ set +e; echo task | RUN sim-only --cwd "$SB" >/dev/null 2>"$SB/err"; code=$?; se
 [ "$code" = 2 ] && grep -q 'subagent_type: "sim-only"' "$SB/err" && grep -q 'codex: never' "$SB/err" || fail "codex: never exit code"
 [ ! -e "$FAKE_RECORD.argv" ] || fail "codex: never still started Codex"
 grep -q '^codex: never$' "$CORE/agents/ios-driver.md" || fail "ios-driver must opt out of Codex (the sandbox cannot reach the simulator)"
-ok "codex: never keeps an agent on the Agent tool"
+printf -- '---\nname: pinned\ndescription: x\nbackend: claude\n---\nStay.\n' > "$CLAUDE_CONFIG_DIR/agents/pinned.md"
+set +e; echo task | RUN pinned --cwd "$SB" >/dev/null 2>"$SB/err"; code=$?; set -e
+[ "$code" = 2 ] && grep -q 'backend: claude' "$SB/err" || fail "backend: claude exit code"
+RUN status --hook | grep -q "except pinned, sim-only (the Agent tool always)" || fail "hook names the agents kept on Claude"
+ok "codex: never and backend: claude keep an agent on the Agent tool"
 
 # 5b. model/effort: list, validate, persist, reach the runner, clear
 models_out="$(DC delegate models)"
