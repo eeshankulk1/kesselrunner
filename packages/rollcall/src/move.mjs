@@ -8,13 +8,13 @@
 // to GitHub, and no verb stashes, resets or deletes the source's files. Same code on macOS and Linux: system git and tar.
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { heldPorts, inside, manifestOf, q } from "./checkout.mjs";
 import { transcriptFor } from "./conversation.mjs";
 import { bin as codexBin } from "./harness/codex.mjs";
-import { gitSync, isMainCheckout, locate, mainCheckout, remoteUrl, repoKey } from "./git.mjs";
+import { gitSync, isMainCheckout, locate, mainCheckout, originKey, remoteUrl, repoKey } from "./git.mjs";
 import { checkoutFacts, releasePorts } from "./runtime.mjs";
 import * as store from "./store.mjs";
 
@@ -241,14 +241,17 @@ const idleOnly = (idle, running) => (idle ?? []).filter((r) => !(running ?? []).
 
 /** Copies `rel` from `from` into `to` (files, folders, links as they are). */
 function copyRel(from, to, rel) {
-  // Names come from the archive: none may climb out of the folder it lands in.
-  if (typeof rel !== "string" || !rel || rel.startsWith("/") || rel.split("/").includes("..")) throw new Error(`a path in the archive is not safe: ${rel}`);
+  // Names come from the archive: none may climb out of the folder it lands in, or write a repo's `.git`.
+  if (!safeRel(rel)) throw new Error(`a path in the archive is not safe: ${rel}`);
   const parts = rel.replace(/\/$/, "").split("/").filter(Boolean);
-  // Nor go through a symlink already at the destination (a tracked `link -> /etc` and an untracked `link/x`).
+  // Nor go through a symlink, at the destination (a tracked `link -> /etc` and an untracked `link/x`) or in the archive
+  // (a member `link -> /home/me` and a listed `link/.ssh/id_rsa`, which would copy a file from outside it).
   for (let k = 1; k < parts.length; k++) {
-    let st = null;
-    try { st = lstatSync(join(to, ...parts.slice(0, k))); } catch {}
-    if (st?.isSymbolicLink()) throw new Error(`a path in the archive goes through a symlink: ${rel}`);
+    for (const base of [to, from]) {
+      let st = null;
+      try { st = lstatSync(join(base, ...parts.slice(0, k))); } catch {}
+      if (st?.isSymbolicLink()) throw new Error(`a path in the archive goes through a symlink: ${rel}`);
+    }
   }
   const dst = join(to, ...parts);
   try { if (lstatSync(dst).isSymbolicLink()) rmSync(dst); } catch {}
@@ -419,7 +422,8 @@ const keyOf = (dir) => { const info = locate(dir); return info ? { key: repoKey(
 /** A checkout here of the worktree's origin: one rollcall knows, else $HOME/<repo>, else a clone there. */
 function checkoutFor(w, made) {
   for (const p of knownCheckouts()) { const k = keyOf(p); if (k?.key === w.key) return k.main; }
-  const base = join(homedir(), w.repo);
+  // Never a dot-folder of $HOME (a repo named `.ssh` would clone into ~/.ssh).
+  const base = join(homedir(), w.repo.replace(/^\.+/, "") || "repo");
   for (let n = 1; n < 20; n++) {
     const dir = n === 1 ? base : `${base}-${n}`;
     if (existsSync(dir)) { const k = keyOf(dir); if (k?.key === w.key) return k.main; continue; }
@@ -511,14 +515,29 @@ function unsafeMember(path) {
 }
 
 const NAME = /^(?!\.{1,2}$)[A-Za-z0-9._-]+$/;
-const safeRel = (r) => typeof r === "string" && !!r && !r.startsWith("/") && !r.split("/").includes("..");
+/** What is wrong with a record's origin, repo and key, or null: a safe origin, and the repo and key it gives. */
+function badOrigin(r) {
+  if (typeof r.origin !== "string" || !r.origin || r.origin.startsWith("-") || /^(ext|fd)::/i.test(r.origin)) return `origin ${r.origin}`;
+  const k = originKey(r.origin);
+  if (!NAME.test(String(r.repo ?? "")) || r.repo !== k.name) return `repo ${r.repo}`;
+  if (r.key !== k.key) return `key ${r.key}`;
+  return null;
+}
+/**
+ * A relative path from an archive that stays in its folder: no `..`, no `.git` part (a planted `.git` pointing at a
+ * config of the archive's choosing runs its commands at the next git command).
+ */
+function safeRel(r) {
+  if (typeof r !== "string" || !r || r.startsWith("/")) return false;
+  const parts = r.replace(/\/$/, "").split("/");
+  return parts.every((x) => x && x !== "." && x !== ".." && x.toLowerCase() !== ".git");
+}
 /** What in an archive's move.json could reach outside its folders or pass as a git option, or null. */
 function badField(move) {
   if (!Array.isArray(move.worktrees) || !Array.isArray(move.sessions) || !Array.isArray(move.agents)) return "a list is missing";
   for (const w of move.worktrees) {
     if (!Number.isInteger(w?.i) || w.i < 0) return `worktree number ${w?.i}`;
-    if (!NAME.test(String(w.repo ?? ""))) return `repo ${w.repo}`;
-    if (typeof w.origin !== "string" || !w.origin || w.origin.startsWith("-") || /^(ext|fd)::/.test(w.origin)) return `origin ${w.origin}`;
+    if (badOrigin(w)) return badOrigin(w);
     if (w.main) continue;
     if (!/^[0-9a-f]{40,64}$/.test(String(w.tip ?? ""))) return `tip ${w.tip}`;
     if (typeof w.branch !== "string" || w.branch.startsWith("-") || spawnSync("git", ["check-ref-format", "--branch", w.branch], { stdio: "ignore" }).status !== 0) return `branch ${w.branch}`;
@@ -873,6 +892,181 @@ export async function discard({ home: h }, { host = defaultHost } = {}) {
   const removed = undoMade(h, m.made);
   await host("adopt", { refs }, { start: false });
   return { home: h, removed };
+}
+
+// ---------------------------------------------------------------- seed: a new chat elsewhere from a folder's state
+//
+// cockpit's Cloud chats: a new chat on another machine starts from exactly the state of a folder here. The Mac packs
+// the folder's checkout (`chat.seed.pack`), cockpit carries the archive, the machine unpacks it (`chat.seed.unpack`)
+// into a seed folder, and `chat.new` with that seed makes the chat's worktree at the folder's commit with its changes,
+// new files and secrets laid over it. Same pieces as a move's worktree; the main checkout's own work counts here.
+
+const HOUR = 3600_000;
+const SEED_ID = /^[a-z0-9]{1,16}-[0-9a-f]{8}$/;
+const seedId = () => `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+/** The folder `chat.seed.unpack` leaves for `chat.new`. */
+const seedDir = (seed) => join(movesDir(), `seed-in-${seed}`);
+
+/** Drops seed archives and seed folders older than an hour (not `keep`, the archive being opened). */
+function pruneSeeds(keep = null, now = Date.now()) {
+  let es = [];
+  try { es = readdirSync(movesDir()); } catch { return; }
+  for (const n of es) { const p = join(movesDir(), n); if (n.startsWith("seed-") && p !== keep && now - mtime(p) > HOUR) rmSync(p, { recursive: true, force: true }); }
+}
+
+/** An https origin without a user or token in it (https://user:token@host/...): the archive and the answer never carry one. */
+function withoutLogin(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return url;
+  try { const u = new URL(url); if (!u.username && !u.password) return url; u.username = ""; u.password = ""; return u.href; } catch { return url; }
+}
+
+/**
+ * `chat.seed.pack`: one archive of the git checkout at `cwd`, as it is now: the commits origin lacks, the tracked
+ * changes, the untracked files and the `.worktreeinclude` secrets. { path, bytes, sha256, repo, origin, branch, tip,
+ * changed, added, unpushed, secrets }. The checkout is only read.
+ */
+export function seedPack({ cwd }) {
+  if (typeof cwd !== "string" || !cwd.startsWith("/") || !isDir(cwd)) refuse("bad-payload", `no such folder: ${cwd}`);
+  const info = locate(cwd);
+  if (!info) refuse("no-repo", `${cwd} is not a git checkout`);
+  const top = info.top;
+  const origin = withoutLogin(remoteUrl(info) ?? null);
+  if (!origin) refuse("no-origin", `${cwd} has no GitHub origin to fetch from on Cloud: push it to GitHub first`);
+  const { key, name } = repoKey(info);
+  const tip = String(gitOut(top, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) ?? "").trim();
+  if (!tip) refuse("failed", `${cwd} has no commits yet`);
+  const branch = String(gitOut(top, ["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "").trim() || null;
+  ownMovesDir();
+  pruneSeeds();
+  const id = seedId();
+  const path = join(movesDir(), `seed-${id}.tar.gz`);
+  const stage = join(movesDir(), `seed-${id}.stage`);
+  mkdirSync(stage, { recursive: true, mode: 0o700 });
+  try {
+    const unpushed = Number(String(gitOut(top, ["rev-list", "--count", tip, "--not", "--remotes=origin"]) ?? "0").trim()) || 0;
+    const meta = { format: FORMAT, kind: "seed", id, repo: name, key, origin, branch, tip, bundle: false, diff: false, untracked: [], secrets: [], at: Date.now() };
+    if (unpushed > 0) {
+      const r = git(top, ["bundle", "create", join(stage, "branch.bundle"), "HEAD", "--not", "--remotes=origin"]);
+      if (r.status !== 0) refuse("failed", `could not bundle the commits origin lacks: ${why(r)}`);
+      meta.bundle = true;
+    }
+    const diff = git(top, ["diff", "--binary", "HEAD"], { encoding: "buffer" });
+    if (diff.status !== 0) refuse("failed", `could not read ${top}'s changes: ${why({ stderr: String(diff.stderr) })}`);
+    if (diff.stdout.length) { writeFileSync(join(stage, "changes.diff"), diff.stdout); meta.diff = true; }
+    meta.untracked = untrackedOf(top);
+    for (const rel of meta.untracked) copyRel(top, join(stage, "untracked"), rel);
+    meta.secrets = includesOf(top, mainCheckout(info));
+    for (const rel of meta.secrets) copyRel(top, join(stage, "include"), rel);
+    writeJson(join(stage, "seed.json"), meta);
+    writeFileSync(path, "", { mode: 0o600 });
+    const t = spawnSync("tar", ["-czf", path, "-C", stage, "."], { encoding: "utf8", maxBuffer: 1 << 26 });
+    if (t.status !== 0) refuse("failed", `tar could not write the archive: ${(t.stderr || t.error?.message || "").trim()}`);
+    const buf = readFileSync(path);
+    const changed = lines(gitOut(top, ["diff", "--name-only", "HEAD"])).length;
+    return { path, bytes: buf.length, sha256: sha256(buf), repo: name, origin, branch, tip, changed, added: meta.untracked.length, unpushed, secrets: meta.secrets };
+  } catch (e) {
+    rmSync(path, { force: true });
+    throw e;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+/** What in a seed.json could reach outside its folders or pass as a git option, or null. */
+function badSeedField(s) {
+  if (badOrigin(s)) return badOrigin(s);
+  if (!/^[0-9a-f]{40,64}$/.test(String(s.tip ?? ""))) return `tip ${s.tip}`;
+  if (s.branch !== null && (typeof s.branch !== "string" || s.branch.startsWith("-") || spawnSync("git", ["check-ref-format", "--branch", s.branch], { stdio: "ignore" }).status !== 0)) return `branch ${s.branch}`;
+  if (!Array.isArray(s.untracked) || !Array.isArray(s.secrets)) return "a list is missing";
+  for (const r of [...s.untracked, ...s.secrets]) if (!safeRel(r)) return `file ${r}`;
+  return null;
+}
+
+/**
+ * `chat.seed.unpack`: opens a seed archive received into `_moves/` and makes sure its commit is in a checkout of its
+ * origin here (found, else cloned). { seed, folder, repo, branch, tip, cloned }: `seed` goes to `chat.new`, `folder` is
+ * the main checkout here. The archive goes either way (it carries secrets); on a refusal so does what it made.
+ */
+export function seedUnpack({ path, sha256: want = null }) {
+  if (typeof path !== "string" || !path.startsWith("/")) refuse("bad-payload", "path is an absolute path");
+  let file = false;
+  try { file = lstatSync(path).isFile(); } catch {}
+  if (!file) refuse("bad-payload", `no seed archive at ${path}`);
+  ownMovesDir();
+  pruneSeeds(path);
+  const seed = seedId();
+  const dir = seedDir(seed);
+  const made = { clones: [] };
+  try {
+    if (want && sha256(readFileSync(path)) !== want) refuse("bad-payload", "the archive's sha256 does not match: it changed on the way");
+    const unsafe = unsafeMember(path);
+    if (unsafe) refuse("bad-payload", `the archive is not safe to open: ${unsafe}`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const t = spawnSync("tar", ["-xzf", path, "--no-same-owner", "--no-same-permissions", "-C", dir], { encoding: "utf8" });
+    if (t.status !== 0) refuse("bad-payload", `tar could not read the archive: ${(t.stderr || "").trim()}`);
+    chmodSync(dir, 0o700);
+    // Its age counts from now, not from the packed folder's time.
+    const now = new Date();
+    utimesSync(dir, now, now);
+    const s = readJson(join(dir, "seed.json"));
+    if (!s || s.format !== FORMAT || s.kind !== "seed") refuse("bad-payload", "not a seed archive (or one from a newer rollcall)");
+    const bad = badSeedField(s);
+    if (bad) refuse("bad-payload", `the archive's seed.json is not safe: ${bad}`);
+    const main = checkoutFor(s, made);
+    git(main, ["fetch", "--quiet", "--no-tags", "origin"], { timeout: 300_000 });
+    if (s.bundle) {
+      const r = git(main, ["bundle", "unbundle", join(dir, "branch.bundle")]);
+      if (r.status !== 0) refuse("failed", `the Mac's unpushed commits did not apply: ${why(r)}`);
+    }
+    if (!gitOk(main, ["cat-file", "-e", `${s.tip}^{commit}`])) refuse("failed", `the Mac's commit ${s.tip.slice(0, 8)} is neither in the archive nor on origin`);
+    return { seed, folder: main, repo: s.repo, branch: s.branch ?? null, tip: s.tip, cloned: made.clones.length > 0 };
+  } catch (e) {
+    for (const c of made.clones) rmSync(c, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  } finally {
+    // The archive is spent: one received into `_moves/` goes (it carries the secret files); the caller drops its own.
+    if (inside(path, movesDir())) rmSync(path, { force: true });
+  }
+}
+
+/**
+ * The seed `chat.new` names, checked against the folder the chat is for: { seed, dir, tip, ... } from its seed.json.
+ * Refuses `bad-payload` (not a seed id, or another repo's state) and `not-found` (gone: used, or older than an hour).
+ */
+export function seedFor(seed, folder) {
+  if (typeof seed !== "string" || !SEED_ID.test(seed)) refuse("bad-payload", `seed is the id chat.seed.unpack gave: ${seed}`);
+  const dir = seedDir(seed);
+  const s = isDir(dir) ? readJson(join(dir, "seed.json")) : null;
+  if (!s) refuse("not-found", "the folder's state is gone; try again");
+  // Checked again here: anything that can write `_moves/` could have left a seed folder chat.seed.unpack never opened.
+  const bad = s.format === FORMAT && s.kind === "seed" ? badSeedField(s) : "not a seed";
+  if (bad) refuse("bad-payload", `the seed is not safe to use: ${bad}`);
+  const k = keyOf(folder);
+  if (!k || k.key !== s.key) refuse("bad-payload", `the seed is ${s.repo}'s state, and ${folder} is ${k ? "another repo" : "not a git checkout"}`);
+  return { ...s, seed, dir };
+}
+
+/**
+ * Lays seed `s` over the fresh worktree `top` (at its tip): the changes, the untracked files, the secrets. What did not
+ * apply, in plain words for the chat's note, or null.
+ */
+export function applySeed(s, top) {
+  const missed = [];
+  if (s.diff) missed.push(...applyDiff(top, join(s.dir, "changes.diff")).map((n) => n.path));
+  for (const [sub, list] of [["untracked", s.untracked], ["include", s.secrets]]) {
+    for (const rel of list ?? []) {
+      try { copyRel(join(s.dir, sub), top, rel); } catch { missed.push(rel); }
+    }
+  }
+  if (!missed.length) return null;
+  const shown = missed.slice(0, 10).join(", ");
+  return `Started from the Mac folder's state, but some of it did not come over: ${shown}${missed.length > 10 ? ` and ${missed.length - 10} more` : ""}.`;
+}
+
+/** Deletes seed `seed`'s folder (used, or its chat failed). */
+export function dropSeed(seed) {
+  if (typeof seed === "string" && SEED_ID.test(seed)) rmSync(seedDir(seed), { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------- the host

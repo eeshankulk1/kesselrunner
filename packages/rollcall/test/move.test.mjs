@@ -5,11 +5,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { git, sandbox, until, write } from "./helpers.mjs";
 import { setup } from "./host-helpers.mjs";
 import * as move from "../src/move.mjs";
+import { originKey } from "../src/git.mjs";
 
 const H = "chat-abc123";
 const S = "11111111-2222-4333-8444-555555555555";
@@ -500,4 +501,219 @@ test("host: words to a moving or moved-away home are held with the home, never w
   assert.deepEqual(held.map((w) => [w.ref, w.text, w.from]), [[`${x.h}:t1`, "while moving", "owner"], [`${x.h}:t1`, "after it left", "rollcall"]]);
   assert.equal(x.fake().length, 0, "the agent never started");
   assert.notEqual(x.agent()?.state, "running");
+});
+
+// ---------------------------------------------------------------- seed: a new chat elsewhere from a folder's state
+
+/** The Mac folder: the main checkout itself with an unpushed commit, an edited file, a new file and a secret. */
+function seedFolder(sb) {
+  write(join(sb.main, ".gitignore"), ".env\nnode_modules/\n");
+  write(join(sb.main, ".worktreeinclude"), ".env\n");
+  git(sb.main, "add", ".");
+  git(sb.main, "commit", "-qm", "ignores");
+  git(sb.main, "push", "-q", "origin", "main");
+  write(join(sb.main, "src/c.js"), "committed here only\n");
+  git(sb.main, "add", ".");
+  git(sb.main, "commit", "-qm", "unpushed");
+  write(join(sb.main, "src/a.js"), "edited, not committed\n");
+  write(join(sb.main, "notes.txt"), "a new file\n");
+  write(join(sb.main, ".env"), "SECRET=1\n");
+  write(join(sb.main, "node_modules/x/index.js"), "stays\n");
+  return git(sb.main, "rev-parse", "HEAD");
+}
+
+/** Copies an archive into place `p`'s `_moves/`, as cockpit's move.put does. */
+function carry(p, from) {
+  const d = join(p.store, "_moves");
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  const to = join(d, `seed-got-${Math.random().toString(36).slice(2, 8)}.tar.gz`);
+  writeFileSync(to, readFileSync(from));
+  return to;
+}
+
+test("seed: pack a folder's state; unpack clones the repo where it is absent and finds it where present; the chat's worktree has it all", async (t) => {
+  const sb = sandbox(t);
+  const tip = seedFolder(sb);
+  const a = place(sb, "mac");
+  const b = place(sb, "cloud");
+  const before = tree(sb.main);
+  const status = git(sb.main, "status", "--porcelain");
+  const packed = await as(a, () => move.seedPack({ cwd: sb.main }));
+  assert.ok(packed.path.startsWith(join(a.store, "_moves", "seed-")) && packed.bytes > 0 && /^[0-9a-f]{64}$/.test(packed.sha256));
+  assert.equal(statSync(packed.path).mode & 0o777, 0o600);
+  assert.equal(statSync(join(a.store, "_moves")).mode & 0o777, 0o700);
+  assert.deepEqual({ ...packed, path: null, bytes: null, sha256: null }, { path: null, bytes: null, sha256: null, repo: "origin", origin: sb.origin, branch: "main", tip, changed: 1, added: 1, unpushed: 1, secrets: [".env"] });
+  assert.deepEqual(tree(sb.main), before, "the folder is byte for byte as it was");
+  assert.equal(git(sb.main, "status", "--porcelain"), status);
+  const listed = spawnSync("tar", ["-tzf", packed.path], { encoding: "utf8" }).stdout;
+  for (const m of ["seed.json", "branch.bundle", "changes.diff", "untracked/notes.txt", "include/.env"]) assert.match(listed, new RegExp(`(^|/)${m.replace(".", "\\.")}$`, "m"), m);
+  assert.doesNotMatch(listed, /node_modules/);
+
+  // The repo is not on the machine: cloned into $HOME/<repo>; the archive goes.
+  const got = carry(b, packed.path);
+  const u = await as(b, () => move.seedUnpack({ path: got, sha256: packed.sha256 }));
+  const folder = join(b.home, "origin");
+  assert.deepEqual({ ...u, seed: null }, { seed: null, folder, repo: "origin", branch: "main", tip, cloned: true });
+  assert.equal(existsSync(got), false, "the received archive goes (it carries secrets)");
+  const dir = join(b.store, "_moves", `seed-in-${u.seed}`);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+
+  // The chat's worktree from the seed: at the tip, with the change, the new file and the secret; the seed goes.
+  const { makeWorktree } = await import("../src/host/chat.mjs");
+  await as(b, () => {
+    const s = move.seedFor(u.seed, folder);
+    const w = makeWorktree("chat-seed01", folder, { base: s.tip });
+    assert.ok(w.worktree);
+    assert.equal(move.applySeed(s, w.worktree), null, "everything applied");
+    move.dropSeed(u.seed);
+    assert.equal(git(w.worktree, "rev-parse", "HEAD"), tip);
+    assert.equal(git(w.worktree, "branch", "--show-current"), "chat/chat-seed01");
+    assert.equal(readFileSync(join(w.worktree, "src/a.js"), "utf8"), "edited, not committed\n");
+    assert.equal(readFileSync(join(w.worktree, "src/c.js"), "utf8"), "committed here only\n");
+    assert.equal(readFileSync(join(w.worktree, "notes.txt"), "utf8"), "a new file\n");
+    assert.equal(readFileSync(join(w.worktree, ".env"), "utf8"), "SECRET=1\n");
+    assert.equal(existsSync(join(w.worktree, "node_modules")), false, "other ignored files stay");
+  });
+  assert.equal(existsSync(dir), false, "the seed folder goes once used");
+  await assert.rejects(as(b, () => move.seedFor(u.seed, folder)), (e) => e.code === "not-found" && e.message === "the folder's state is gone; try again");
+
+  // Present now: found, not cloned again. An archive outside _moves (cockpit's upload folder) opens and is left to its owner.
+  const again = await as(a, () => move.seedPack({ cwd: join(sb.main, "src") }));
+  const uploaded = join(sb.root, "upload-1.tar.gz");
+  writeFileSync(uploaded, readFileSync(again.path));
+  const u2 = await as(b, () => move.seedUnpack({ path: uploaded, sha256: again.sha256 }));
+  assert.equal(u2.folder, folder);
+  assert.equal(u2.cloned, false);
+  assert.ok(existsSync(uploaded), "a file outside _moves is the caller's to drop");
+  // A seed folder changed after unpack (anything that can write _moves/) is checked again before use.
+  const s2 = join(b.store, "_moves", `seed-in-${u2.seed}`, "seed.json");
+  const kept = readFileSync(s2, "utf8");
+  writeFileSync(s2, JSON.stringify({ ...JSON.parse(kept), untracked: [".git"] }));
+  await assert.rejects(as(b, () => move.seedFor(u2.seed, folder)), (e) => e.code === "bad-payload" && /not safe/.test(e.message));
+  writeFileSync(s2, kept);
+  // Another repo's folder does not take it.
+  const other = join(sb.root, "other");
+  git(sb.root, "init", "-q", other);
+  git(other, "remote", "add", "origin", join(sb.root, "elsewhere.git"));
+  await assert.rejects(as(b, () => move.seedFor(u2.seed, other)), (e) => e.code === "bad-payload");
+  await assert.rejects(as(b, () => move.seedFor("../../x", folder)), (e) => e.code === "bad-payload");
+});
+
+test("seed: refusals: no folder, no repo, no origin, an archive outside _moves, a wrong sha256, an unsafe archive, a tip nowhere", async (t) => {
+  const sb = sandbox(t);
+  seedFolder(sb);
+  const a = place(sb, "mac");
+  const b = place(sb, "cloud");
+  const code = (c) => (e) => e.code === c;
+  await assert.rejects(as(a, () => move.seedPack({ cwd: "relative" })), code("bad-payload"));
+  await assert.rejects(as(a, () => move.seedPack({ cwd: join(sb.root, "nope") })), code("bad-payload"));
+  const plain = join(sb.root, "plain");
+  mkdirSync(plain);
+  await assert.rejects(as(a, () => move.seedPack({ cwd: plain })), code("no-repo"));
+  const local = join(sb.root, "local");
+  git(sb.root, "init", "-q", local);
+  write(join(local, "x"), "x\n");
+  git(local, "add", ".");
+  git(local, "commit", "-qm", "x");
+  await assert.rejects(as(a, () => move.seedPack({ cwd: local })), (e) => e.code === "no-origin" && /no GitHub origin to fetch from on Cloud/.test(e.message));
+
+  const packed = await as(a, () => move.seedPack({ cwd: sb.main }));
+  // Not a file: refused. Outside _moves and refused: left alone (only an archive in _moves is deleted).
+  await assert.rejects(as(b, () => move.seedUnpack({ path: join(sb.root, "none.tar.gz") })), code("bad-payload"));
+  const outside = join(sb.root, "seed.tar.gz");
+  writeFileSync(outside, readFileSync(packed.path));
+  await assert.rejects(as(b, () => move.seedUnpack({ path: outside, sha256: "0".repeat(64) })), code("bad-payload"));
+  assert.ok(existsSync(outside));
+  // A wrong sha256: refused, and the received archive still goes.
+  const wrong = carry(b, packed.path);
+  await assert.rejects(as(b, () => move.seedUnpack({ path: wrong, sha256: "0".repeat(64) })), code("bad-payload"));
+  assert.equal(existsSync(wrong), false);
+  // Unsafe archives: a field or a member that reaches outside.
+  const craft = (name, change) => {
+    const d = join(sb.root, `craft-${name}`);
+    mkdirSync(d, { recursive: true });
+    assert.equal(spawnSync("tar", ["-xzf", packed.path, "-C", d]).status, 0);
+    change(d);
+    const out = join(sb.root, `${name}.tar.gz`);
+    assert.equal(spawnSync("tar", ["-czf", out, "-C", d, "."]).status, 0);
+    return carry(b, out);
+  };
+  const edit = (fn) => (d) => { const s = readJson(join(d, "seed.json")); fn(s); writeFileSync(join(d, "seed.json"), JSON.stringify(s)); };
+  const cases = {
+    untracked: edit((s) => { s.untracked.push("../../keep-me/x.txt"); }),
+    secret: edit((s) => { s.secrets.push("/etc/passwd"); }),
+    repo: edit((s) => { s.repo = "../keep-me"; }),
+    branch: edit((s) => { s.branch = "--upload-pack=touch"; }),
+    origin: edit((s) => { s.origin = "ext::sh -c touch% /tmp/pwned"; }),
+    originCase: edit((s) => { s.origin = "EXT::sh -c touch% /tmp/pwned"; }),
+    dotRepo: edit((s) => { s.repo = ".ssh"; }),
+    otherKey: edit((s) => { s.key = "other-0123456789ab"; }),
+    tip: edit((s) => { s.tip = "HEAD"; }),
+    kind: edit((s) => { s.kind = "move"; }),
+    // A planted `.git` (gitdir: a config with core.fsmonitor) would run its command at the worktree's next git command.
+    dotGit: edit((s) => { s.untracked.push(".git"); }),
+    dotGitCase: edit((s) => { s.untracked.push("sub/.GIT/config"); }),
+    dot: edit((s) => { s.secrets.push("./.env"); }),
+  };
+  for (const [name, change] of Object.entries(cases)) {
+    const p = craft(name, change);
+    await assert.rejects(as(b, () => move.seedUnpack({ path: p })), code("bad-payload"), name);
+    assert.equal(existsSync(p), false, name);
+  }
+  const d = join(sb.root, "craft-symlink");
+  mkdirSync(join(d, "untracked"), { recursive: true });
+  symlinkSync(b.home, join(d, "untracked", "out"));
+  write(join(d, "x.txt"), "overwritten\n");
+  const bsd = /bsdtar/.test(spawnSync("tar", ["--version"], { encoding: "utf8" }).stdout);
+  const swap = bsd ? ["-s", ",^x.txt$,untracked/out/x.txt,"] : ["--transform", "s,^x.txt$,untracked/out/x.txt,"];
+  const linked = join(sb.root, "symlink.tar.gz");
+  assert.equal(spawnSync("tar", ["-czf", linked, "-C", d, ...swap, "untracked/out", "x.txt"]).status, 0);
+  await assert.rejects(as(b, () => move.seedUnpack({ path: carry(b, linked) })), (e) => e.code === "bad-payload" && /symlink/.test(e.message));
+  assert.equal(existsSync(join(b.home, "x.txt")), false);
+
+  // A tip neither in the archive nor on origin: refused, the fresh clone removed.
+  const gone = craft("gone", edit((s) => { s.tip = "f".repeat(40); s.bundle = false; }));
+  await assert.rejects(as(b, () => move.seedUnpack({ path: gone })), (e) => e.code === "failed" && /the Mac's commit ffffffff is neither in the archive nor on origin/.test(e.message));
+  assert.equal(existsSync(join(b.home, "origin")), false, "the clone it made goes");
+  assert.deepEqual(readdirSync(join(b.store, "_moves")).filter((n) => n.startsWith("seed-in-")), [], "no seed folder left");
+  // An origin that cannot be cloned: failed with git's reason.
+  const bad = craft("noclone", edit((s) => { s.origin = join(sb.root, "missing.git"); Object.assign(s, { repo: originKey(s.origin).name, key: originKey(s.origin).key }); }));
+  await assert.rejects(as(b, () => move.seedUnpack({ path: bad })), (e) => e.code === "failed" && /could not clone/.test(e.message));
+});
+
+test("seed: a change that does not apply over the tip is named in the note; old seeds go after an hour", async (t) => {
+  const sb = sandbox(t);
+  seedFolder(sb);
+  const a = place(sb, "mac");
+  const b = place(sb, "cloud");
+  const packed = await as(a, () => move.seedPack({ cwd: sb.main }));
+  const u = await as(b, () => move.seedUnpack({ path: carry(b, packed.path) }));
+  const { makeWorktree } = await import("../src/host/chat.mjs");
+  await as(b, () => {
+    const s = move.seedFor(u.seed, u.folder);
+    const w = makeWorktree("chat-seed02", u.folder, { base: s.tip });
+    write(join(w.worktree, "src/a.js"), "something else\n");
+    git(w.worktree, "commit", "-qam", "moved on");
+    const note = move.applySeed(s, w.worktree);
+    assert.match(note, /^Started from the Mac folder's state, but some of it did not come over: src\/a\.js/);
+    assert.equal(readFileSync(join(w.worktree, "notes.txt"), "utf8"), "a new file\n", "the rest still came over");
+    // A listed file reached through a symlink in the seed (`link -> outside`, `link/secret.txt`) is not copied.
+    const outside = join(sb.root, "outside");
+    write(join(outside, "secret.txt"), "not the seed's\n");
+    symlinkSync(outside, join(s.dir, "untracked", "link"));
+    const w2 = makeWorktree("chat-seed03", u.folder, { base: s.tip });
+    const note2 = move.applySeed({ ...s, diff: false, untracked: ["link/secret.txt"], secrets: [] }, w2.worktree);
+    assert.match(note2, /did not come over: link\/secret\.txt/);
+    assert.equal(existsSync(join(w2.worktree, "link")), false);
+  });
+  // A seed folder older than an hour goes at the next pack or unpack; so does an old seed archive.
+  const dir = join(b.store, "_moves", `seed-in-${u.seed}`);
+  const old = carry(b, packed.path);
+  const then = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(dir, then, then);
+  utimesSync(old, then, then);
+  await as(b, () => move.seedPack({ cwd: sb.main }));
+  assert.equal(existsSync(dir), false);
+  assert.equal(existsSync(old), false);
+  await assert.rejects(as(b, () => move.seedFor(u.seed, u.folder)), (e) => e.code === "not-found");
 });

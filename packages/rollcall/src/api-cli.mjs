@@ -92,19 +92,20 @@ function resumeFor(t, client) {
 
 /**
  * `rollcall chat move <verb> --json '<payload>'` (or the payload on stdin): a chat move's step (move.mjs), run as the
- * API action chat.move.<verb>, printing the same JSON.
+ * API action chat.move.<verb>, printing the same JSON. `rollcall chat seed pack|unpack` runs chat.seed.<verb> the same way.
  */
 export async function chatCommand(args, ctx) {
   const json = (o) => ctx.say(JSON.stringify(o, null, 2));
   const [what, verb, ...rest] = args;
-  const verbs = Object.keys(ACTIONS).filter((k) => k.startsWith("chat.move.")).map((k) => k.slice(10));
-  if (what !== "move" || !verbs.includes(verb)) { json({ ok: false, error: { code: "bad-payload", message: `usage: rollcall chat move <${verbs.join("|")}> --json '<payload>'` } }); return 2; }
+  const group = what === "seed" ? "seed" : "move";
+  const verbs = Object.keys(ACTIONS).filter((k) => k.startsWith(`chat.${group}.`)).map((k) => k.slice(group.length + 6));
+  if ((what !== "move" && what !== "seed") || !verbs.includes(verb)) { json({ ok: false, error: { code: "bad-payload", message: `usage: rollcall chat ${group} <${verbs.join("|")}> --json '<payload>'` } }); return 2; }
   if (taskEnv() || ctx.whoAmI()) { json({ ok: false, error: { code: "refused", message: "a chat move acts as the owner, for the apps the owner uses" } }); return 1; }
   const i = rest.indexOf("--json");
   const body = i >= 0 ? rest[i + 1] : undefined;
   let payload;
   try { payload = JSON.parse(body === undefined || body === "-" ? readFileSync(0, "utf8") || "{}" : body); } catch { json({ ok: false, error: { code: "bad-payload", message: "the payload is not JSON" } }); return 2; }
-  const r = await runAction(`chat.move.${verb}`, payload, { client: payload?.client ?? "cli" });
+  const r = await runAction(`chat.${group}.${verb}`, payload, { client: payload?.client ?? "cli" });
   json(r);
   return r.ok ? 0 : 1;
 }

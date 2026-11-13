@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -155,6 +155,77 @@ test("chat.new: a folder git refuses runs the chat there, with a note; a Codex m
   assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", model: "gpt-5.6-terra" }).error.code, "not-available");
   assert.equal(x.api("chat.new", { cwd: x.sb.main, text: "hi", mode: "bypassPermissions" }).error.code, "bad-payload");
   assert.equal(x.api("chat.new", { cwd: "relative", text: "hi" }).error.code, "bad-payload");
+});
+
+test("chat.new with a seed: the worktree starts from the packed folder's exact state; the seed goes, used or refused", async (t) => {
+  const x = chatSetup(t);
+  await x.startHost();
+  // The Mac folder: an unpushed commit, an edited file, a new file and a .worktreeinclude secret.
+  const m = x.sb.main;
+  write(join(m, ".gitignore"), ".env\n");
+  write(join(m, ".worktreeinclude"), ".env\n");
+  git(m, "add", ".");
+  git(m, "commit", "-qm", "ignores");
+  git(m, "push", "-q", "origin", "main");
+  write(join(m, "src/c.js"), "committed here only\n");
+  git(m, "add", ".");
+  git(m, "commit", "-qm", "unpushed");
+  write(join(m, "src/a.js"), "edited\n");
+  write(join(m, "notes.txt"), "new\n");
+  write(join(m, ".env"), "SECRET=1\n");
+  const tip = git(m, "rev-parse", "HEAD");
+  // The same store stands in for the machine: unpack finds the checkout its tasks name (move.test.mjs covers a clone).
+  // HOME is the sandbox's, so a clone could never land in the real one.
+  const cloud = join(x.sb.root, "cloud-home");
+  mkdirSync(cloud);
+  const api = (action, payload, env = {}) => {
+    const r = spawnSync(process.execPath, [BIN, "api", "do", action, JSON.stringify(payload)], { env: { ...x.hostEnv, ...env }, encoding: "utf8", cwd: x.sb.root });
+    return JSON.parse(r.stdout);
+  };
+  const seedOf = () => {
+    const p = api("chat.seed.pack", { cwd: m });
+    assert.equal(p.ok, true, JSON.stringify(p));
+    const u = api("chat.seed.unpack", { path: p.result.path, sha256: p.result.sha256 }, { HOME: cloud });
+    assert.equal(u.ok, true, JSON.stringify(u));
+    assert.equal(u.result.tip, tip);
+    return u.result;
+  };
+  const u = seedOf();
+  assert.equal(u.folder, m);
+  assert.equal(u.cloned, false);
+  const r = x.newChat({ cwd: u.folder, seed: u.seed });
+  const wt = r.chat.worktree;
+  assert.equal(wt, join(u.folder, ".claude", "worktrees", r.home));
+  assert.equal(git(wt, "rev-parse", "HEAD"), tip, "based on the folder's commit");
+  assert.equal(r.chat.branch, `chat/${r.home}`);
+  assert.equal(readFileSync(join(wt, "src/a.js"), "utf8"), "edited\n");
+  assert.equal(readFileSync(join(wt, "notes.txt"), "utf8"), "new\n");
+  assert.equal(readFileSync(join(wt, ".env"), "utf8"), "SECRET=1\n");
+  assert.equal(r.chat.note, null);
+  const seeds = () => readdirSync(join(x.sb.home, "_moves")).filter((n) => n.startsWith("seed-in-"));
+  assert.deepEqual(seeds(), [], "the seed goes once used");
+  // Used again, or never there: not-found.
+  const gone = x.api("chat.new", { cwd: u.folder, text: "hi", seed: u.seed });
+  assert.deepEqual([gone.error.code, gone.error.message], ["not-found", "the folder's state is gone; try again"]);
+  // Another repo's folder: bad-payload, and the seed goes.
+  const u2 = seedOf();
+  const plain = join(x.sb.root, "plain");
+  mkdirSync(plain);
+  assert.equal(x.api("chat.new", { cwd: plain, text: "hi", seed: u2.seed }).error.code, "bad-payload");
+  assert.deepEqual(seeds(), []);
+  // Any refusal drops it too (here, no text).
+  const u3 = seedOf();
+  assert.equal(x.api("chat.new", { cwd: u3.folder, text: " ", seed: u3.seed }).error.code, "bad-payload");
+  assert.deepEqual(seeds(), []);
+  // The action never opens a seed unchecked: no sha256 (or not one), bad-payload.
+  const p4 = api("chat.seed.pack", { cwd: m });
+  assert.equal(api("chat.seed.unpack", { path: p4.result.path }, { HOME: cloud }).error.code, "bad-payload");
+  assert.equal(api("chat.seed.unpack", { path: p4.result.path, sha256: "nope" }, { HOME: cloud }).error.code, "bad-payload");
+  // No origin: the Mac's pack refuses.
+  const local = join(x.sb.root, "local");
+  git(x.sb.root, "init", "-q", local);
+  const no = api("chat.seed.pack", { cwd: local });
+  assert.equal(no.error.code, "no-origin");
 });
 
 test("chat: a task it makes is a card in its history; archive is refused with open tasks, by hand and words wake it", async (t) => {
