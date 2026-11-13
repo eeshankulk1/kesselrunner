@@ -160,7 +160,7 @@ export function promptOf(id, method, params, d, { cwd = null, now = Date.now() }
  *   { type: "cancel", rid }                  resolved elsewhere
  *   { type: "exit", code, err }              the app server ended without close()
  */
-export async function startCodex({ h, id, cfg, sock, envFile = null, env = process.env, hosted = false, hook: ownHook = null, on = () => {}, log = null }) {
+export async function startCodex({ h, id, cfg, mcp = null, sock, envFile = null, env = process.env, hosted = false, hook: ownHook = null, on = () => {}, log = null }) {
   const { recordAsk } = await import("../task.mjs");
   const say = (line) => { if (log || !id) log?.(line); else { try { store.appendStatus(h, id, { ev: "codex", line: store.clip(String(line), 300) }); } catch {} } };
   const emit = (e) => { try { on(e); } catch (x) { say(`a Codex event failed: ${x?.stack ?? x}`); } };
@@ -444,6 +444,8 @@ export async function startCodex({ h, id, cfg, sock, envFile = null, env = proce
       config: {
         ...(cfg.effort ? { model_reasoning_effort: cfg.effort } : {}),
         ...(cfg.sandbox === "workspace-write" ? { sandbox_workspace_write: { network_access: true, writable_roots: cfg.writableRoots ?? [] } } : {}),
+        // Extra MCP servers (worker-mcp.mjs), on every start and resume: never in the launch file, which rememberLaunch writes.
+        ...(mcp ?? {}),
       },
     };
     const opened = await Promise.race([failed, cfg.thread

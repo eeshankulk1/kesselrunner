@@ -154,6 +154,8 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   assert.equal(cfg.model, null, "a Claude model is not passed to Codex");
   assert.equal(cfg.approvalsReviewer, "auto_review");
 
+  // An extra MCP server a front end registered (worker-mcp.mjs) goes into the thread's config.
+  assert.equal((await mod("worker-mcp.mjs")).updateServer({ name: "web", command: process.execPath }).ok, true);
   const worker = spawn(process.execPath, [BIN, "codex-worker", h, "t1"], { env, cwd: dir, stdio: ["pipe", "pipe", "pipe"] });
   let err = "";
   worker.stderr.on("data", (d) => { err += d; });
@@ -169,6 +171,7 @@ test("a Codex worker: its thread starts on the brief, and its turns, receipts, d
   assert.equal(start.sandbox, "workspace-write");
   assert.equal(start.config.model_reasoning_effort, "high");
   assert.equal(start.config.sandbox_workspace_write.network_access, true);
+  assert.deepEqual(start.config["mcp_servers.web"], { command: process.execPath, args: [], env: { ROLLCALL_AGENT: "falcon:t1", ROLLCALL_AGENT_NAME: "yoda", ROLLCALL_HARNESS: "codex" }, tool_timeout_sec: 120 });
   await until(() => status().some((e) => e.ev === "idle" && e.last === "done: the brief TOKENS=400"), "the first turn's end");
   assert.ok(status().some((e) => e.ev === "busy"));
   assert.equal(store.readHomeFile(h, "outbox-t1"), null, "the brief's receipt took it off the queue");
@@ -395,4 +398,25 @@ test("chatOptions: each model carries its efforts and default, from Claude Code'
   } finally {
     for (const [k, v] of Object.entries(keep)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   }
+});
+
+test("a Claude worker in tmux: its launch line carries the extra MCP servers, before the session's flag, at each launch", async () => {
+  const dir = freshHome();
+  const env = cleanEnv({ ROLLCALL_HOME: process.env.ROLLCALL_HOME, ROLLCALL_WATCHER: "0" });
+  const made = spawnSync(process.execPath, [BIN, "task", "new", "claude job", "--no-repo", "--home", "falcon", "--harness", "claude", "--json"], { encoding: "utf8", env, cwd: dir });
+  assert.equal(made.status, 0, made.stderr);
+  const store = await mod("store.mjs");
+  const claude = await mod("harness/claude.mjs");
+  const mcp = await mod("worker-mcp.mjs");
+  const task = store.readTask("falcon", "t1");
+  const file = join(store.workerDir("falcon", "t1"), "mcp.json");
+  const { script } = claude.writeLaunch(task, { prompt: "the brief" });
+  assert.doesNotMatch(readFileSync(script, "utf8"), /--mcp-config/, "no server, no flag");
+  assert.equal(mcp.updateServer({ name: "web", command: process.execPath, args: ["x.js"], env: { K: "v" } }).ok, true);
+  claude.writeLaunch(task, { prompt: "the brief" });
+  assert.match(readFileSync(script, "utf8"), /--mcp-config '[^']*mcp\.json' --session-id /);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).mcpServers.web, { type: "stdio", command: process.execPath, args: ["x.js"], env: { K: "v", ROLLCALL_AGENT: "falcon:t1", ROLLCALL_AGENT_NAME: "yoda", ROLLCALL_HARNESS: "claude" } });
+  claude.writeLaunch(task, { resume: true });
+  assert.match(readFileSync(script, "utf8"), /--mcp-config '[^']*mcp\.json' --resume /);
+  rmSync(dir, { recursive: true, force: true });
 });

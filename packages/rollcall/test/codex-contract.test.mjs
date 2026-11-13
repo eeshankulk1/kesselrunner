@@ -31,6 +31,12 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
   const props = (f) => new Set(Object.keys(read(`v2/${f}.json`).properties ?? {}));
   for (const p of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "model", "config"]) assert.ok(props("ThreadStartParams").has(p), `thread/start takes ${p}`);
   for (const p of ["threadId", "approvalPolicy", "sandbox", "config"]) assert.ok(props("ThreadResumeParams").has(p), `thread/resume takes ${p}`);
+  // The config is open keys, each a dotted path into config.toml: workers' extra MCP servers go in as
+  // `mcp_servers.<name>` (worker-mcp.mjs codexConfig), so the owner's own [mcp_servers] stay.
+  for (const f of ["ThreadStartParams", "ThreadResumeParams"]) {
+    const config = read(`v2/${f}.json`).properties.config;
+    assert.ok(JSON.stringify(config).includes("additionalProperties"), `${f}.config takes any key`);
+  }
   for (const p of ["threadId", "input", "clientUserMessageId", "effort"]) assert.ok(props("TurnStartParams").has(p), `turn/start takes ${p}`);
   for (const p of ["threadId", "expectedTurnId", "input", "clientUserMessageId"]) assert.ok(props("TurnSteerParams").has(p), `turn/steer takes ${p}`);
   assert.ok(props("ThreadTokenUsageUpdatedNotification").has("tokenUsage"));

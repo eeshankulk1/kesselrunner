@@ -99,11 +99,16 @@ export function limitsOf(info) {
 
 const textOf = (c) => (typeof c === "string" ? c : Array.isArray(c) ? c.filter((x) => x?.type === "text").map((x) => x.text).join("\n") : "");
 
-/** The command line: Claude Code in stream mode on `cfg` (claude-launch.json), resuming when `resume`. */
+/**
+ * The command line: Claude Code in stream mode on `cfg` (claude-launch.json), resuming when `resume`. `cfg.mcpConfig`
+ * is the agent's extra MCP servers (worker-mcp.mjs), written at each start, never kept in the launch file.
+ */
 export function argsOf(cfg, resume) {
   return [
     "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
     "--replay-user-messages", "--permission-prompt-tool", "stdio",
+    // --mcp-config takes every word up to the next flag: the session's flag follows it.
+    ...(cfg.mcpConfig ? ["--mcp-config", cfg.mcpConfig] : []),
     ...(resume ? ["--resume", cfg.session] : ["--session-id", cfg.session]),
     // --add-dir takes every word up to the next flag: --settings follows it.
     ...(cfg.addDir?.length ? ["--add-dir", ...cfg.addDir] : []),

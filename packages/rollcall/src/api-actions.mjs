@@ -27,6 +27,7 @@ import * as tmux from "./tmux.mjs";
 import { KINDS, closeBlocker } from "./trouble.mjs";
 import { NAMES as HARNESS_NAMES, harnessName, harnessOf } from "./harness/index.mjs";
 import { effortOk, effortsFor, effortsOf } from "./harness/efforts.mjs";
+import { listServers, updateServer } from "./worker-mcp.mjs";
 
 /** kesselrunner's launcher, beside this package (the watcher runs the same file). */
 const START_FILE = process.env.ROLLCALL_START_FILE || fileURLToPath(new URL("../../../scripts/supervisor/start.mjs", import.meta.url));
@@ -706,6 +707,21 @@ export const ACTIONS = {
       }
       if (verb !== "list") await taskLater(["run", t.id, "--home", t.home, verb, str(p, "name", { max: 32 })]);
       return { view: fresh(t) };
+    },
+  },
+
+  // Extra MCP servers for every worker (worker-mcp.mjs): registered, replaced or removed by name; each worker gets them
+  // at its next start, fresh or resumed. `list: true` alone reads them.
+  "worker.mcp": {
+    cli: "a front end's settings (no Falcon command)",
+    // Registering the same server again is harmless, and a remembered reply would keep its environment (a secret,
+    // perhaps) in the request log.
+    repeatable: true,
+    run(p) {
+      if (p.list === true && p.name === undefined) return { servers: listServers() };
+      const r = updateServer(p);
+      if (!r.ok) refuse(r.code, r.message);
+      return { servers: r.servers, ...(r.removed !== undefined ? { removed: r.removed } : {}) };
     },
   },
 
