@@ -309,6 +309,18 @@ class Agent {
     text = String(text ?? "");
     attachments = Array.isArray(attachments) ? attachments.filter((p) => typeof p === "string").slice(0, 10) : [];
     if (!text.trim() && !attachments.length) return err("bad-payload", "nothing to say");
+    // A chat moving to another machine, or moved away (move.mjs), never wakes here: its words wait with the home, and
+    // go to its agents where it lands (resume), or here again if the move is undone.
+    const moving = store.readHomeFile(this.h, "move-out");
+    const moved = store.readHomeFile(this.h, "moved");
+    if (moving || moved) {
+      const q = { ref: this.ref, uuid: typeof uuid === "string" && uuid ? uuid : randomUUID(), text, at: Date.now(), from: from ?? "owner", attachments };
+      const held = store.readHomeFile(this.h, "move-held") ?? { words: [] };
+      held.words.push(q);
+      store.writeHomeFile(this.h, "move-held", held);
+      const why = moved ? `${this.ref} moved to ${moved.movedTo ?? "another machine"}: the words wait there` : `${this.ref} is moving: the words go in where it lands`;
+      return { ok: true, how: "held", uuid: q.uuid, why };
+    }
     // A chat's record, or a hosted crew's from before chats once the owner renamed or archived it.
     const listed = this.id ? null : readChat(this.h);
     if (listed?.archivedAt) {
@@ -813,6 +825,28 @@ function agentFor(ref) {
 }
 
 /**
+ * The agents of `refs` as they are on disk now: a home a move unpacked (its agents parked), replaced or removed. One
+ * with a process is left alone. { ok, adopted, skipped }.
+ */
+async function adopt(refs) {
+  const adopted = [];
+  const skipped = [];
+  for (const ref of refs) {
+    const old = agents.get(ref);
+    if (old?.proc) { skipped.push(ref); continue; }
+    if (old) { clearTimeout(old.parkTimer); old.closeSocket(); agents.delete(ref); }
+    const r = parseRef(ref);
+    if (!r || !existsSync(join(store.homeDir(r.h), "workers", r.id ?? r.h, "agent.json"))) continue;
+    const a = agentFor(ref);
+    if (!a) continue;
+    if (a.rec.state && a.rec.state !== "stopped") await a.listen();
+    if (a.rec.state) a.persist();
+    adopted.push(ref);
+  }
+  return { ok: true, adopted, skipped };
+}
+
+/**
  * Every agent a host ran before, from disk: a process recorded running is gone with that host, so it is parked. One
  * open in a terminal stays `terminal` while the command that runs it lives, and closes (closeTerminal) once it is gone.
  */
@@ -933,6 +967,15 @@ async function handle(req, c) {
         if (!a || a.id || !takesChatActions(a.h)) return err("not-found", `${req.ref} is not a chat`);
         return archiveAgent(a, req.by === "auto" ? "auto" : "owner");
       }
+      // A chat moved here or away (move.mjs): the agents of `refs` are read again from disk, as a restart would.
+      case "adopt": return await adopt(Array.isArray(req.refs) ? req.refs.map(String) : []);
+      // A system line in an agent's history (a move's "Moved to Cloud from This Mac").
+      case "system": {
+        const a = need();
+        if (typeof req.text !== "string" || !req.text.trim()) return err("bad-payload", "text is required");
+        a.item({ id: `system:${hex(6)}`, at: Date.now(), kind: "system", text: req.text });
+        return { ok: true };
+      }
       case "shutdown": setTimeout(() => shutdown?.(0), 20); return { ok: true };
       default: return err("bad-payload", `no op ${req.op}`);
     }
@@ -985,7 +1028,7 @@ export function archiveIdleChats(now = Date.now()) {
   for (const h of store.listHomes()) {
     if (!isChat(h)) continue;
     const c = readChat(h);
-    if (!c || c.archivedAt) continue;
+    if (!c || c.archivedAt || c.movedTo) continue;
     const a = agentFor(h);
     if (!archiveDue(c, { open: openTasks(h).length, running: a ? chatRunning(a) : false, requests: a ? a.hist.open.size : 0 }, now)) continue;
     if (a) archiveAgent(a, "auto");
