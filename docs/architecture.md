@@ -10,7 +10,7 @@ kesselrunner is a Claude Code setup in one repo: global instructions, skills, ag
 | Supervisor (the Falcon) | One session you talk to (on Claude Code); a worker per task in its own worktree and tmux tab, on Claude Code or Codex | `skills/supervisor/`, `scripts/supervisor/`, `falcon` in `packages/rollcall/` |
 | rollcall | Sessions aware of each other, task records, the merge queue, worktree cleanup, machine trouble, away mode (a worker's permission prompts held while the owner is out), the harness layer that runs a worker on either agent CLI, and the usage meter | `packages/rollcall/` ([README](../packages/rollcall/README.md)) |
 | Front-end interface | One versioned way in for every front end (the Falcon's actions, native apps, scripts): a snapshot, a stream of changes, every action, the reads a screen needs (diffs, turns, review comments, PR timeline, logs, repo items) so an app never runs git or gh itself, terminal attach, as `rollcall api` | `packages/rollcall/src/api*.mjs` ([API.md](../packages/rollcall/API.md)) |
-| Ship chain | `/pr-create` and the skills and agents it calls: checks, review, docs, PR, CI watch, landing, release steps | `skills/`, `agents/` |
+| Ship chain | `/pr-create` and the skills and agents it calls: checks, review, docs, the PR. Everything after the PR opens (CI watch, landing, the deploys, release commands) is rollcall's ship script, which wakes a model only when something fails | `skills/pr-create/` (a short core plus `references/`), `agents/`, `packages/rollcall/src/ship*.mjs` |
 | Memory | Project state and notes, loaded into each session | [docsic](https://github.com/eeshankulk1/docsic), installed and wired up by sync |
 | Codex bridge | The same setup in OpenAI Codex, Codex workers for the Falcon, and the helper agents on a Codex plan | `scripts/codex-bridge/`, `packages/rollcall/src/harness/` and `src/codex/`, `scripts/delegate/` ([codex-parity.md](codex-parity.md)) |
 | Overlay | Your personal layer on top of the core | a folder of yours ([overlay.md](overlay.md)) |
@@ -43,7 +43,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `scripts/supervisor/` | `start.mjs`: starts a task's worker in a window of its supervisor's tmux session (below) |
 | `scripts/codex-bridge/` | SessionStart: projects `~/.claude` into `~/.codex` |
 | `scripts/delegate/` | Runs a named agent on Codex (`kesselrunner delegate codex`); SessionStart: announces the backend |
-| `scripts/deploy-watch/` | PostToolUse: a successful `gh pr merge` triggers the deploy-watcher agent |
+| `scripts/deploy-watch/` | PostToolUse: a successful `gh pr merge` triggers the deploy-watcher agent (merges the ship script did not run: it watches its own) |
 | `scripts/ios-sim/` | `iosim` (on PATH): drives an iOS simulator for the ios-driver agent: a compact accessibility listing, taps and typing through [AXe](https://github.com/cameroncooke/AXe), screenshots, throwaway simulators |
 | `scripts/copy-helper/` | `kesselrunner Copy.app` (macOS): opens the `clickable` mod's copy links and copies the saved text; built and registered by `sync` |
 | `packages/rollcall/` | Self-contained package (own README, tests, no dependencies): imports nothing from kesselrunner. `src/runtime.mjs` and `src/runtime-cli.mjs` are a checkout's runtime (port blocks, setup, run actions, `serving`), with its read-only facts in `src/checkout.mjs`, the only part the hooks load (a test keeps it so), `src/archive.mjs` archive, restore and spotlight. `src/needs.mjs` is the first-run check `falcon` makes for tmux, git, Claude Code and Node 20 (`gh` only warns); `package.json` publishes it as `rollcall` |
@@ -78,7 +78,7 @@ Before that first prompt, `task new` has already made the worktree ready, so the
 Feedback reaches a running worker, or the PR, without prose. All three pieces live in `packages/rollcall/` and work from the terminal; details and syntax are in [rollcall's README](../packages/rollcall/README.md#review-loop).
 
 - **Line comments.** `rollcall task comment` stores a comment on a file and line of a task's worktree; `task comments <id> send` delivers all pending ones as one item through the worker's outbox, and the worker resolves or replies to each. The supervisor adds and sends them for the owner (`skills/supervisor/SKILL.md`).
-- **PR review threads.** `rollcall pr threads|reply|resolve` list and answer threads through `gh api graphql`. `queue add` refuses a PR with open threads (unless the owner says otherwise), and the lander pulls a PR back when a thread appears before the merge. `/pr-create` Steps 5 and 6 run this loop.
+- **PR review threads.** `rollcall pr threads|reply|resolve` list and answer threads through `gh api graphql`. `queue add` and `ship start` refuse a PR with open threads (unless the owner says otherwise), and the lander pulls a PR back when a thread appears before the merge. `/pr-create` runs this loop before the PR opens, and the ship script reports a thread that appears after (a `review` notice).
 - **Turn snapshots.** Every turn in a linked worktree, a Claude Code worker's or a Codex worker's, is saved to a private repo under the rollcall home, outside the project's refs. `rollcall turns` lists, diffs and restores them, including changes made by shell commands.
 
 ## Mods

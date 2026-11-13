@@ -93,7 +93,7 @@ that never runs Claude.
   shared-checkout denials, the git guard and the overlap warning. Codex sends
   no `agent_id` on tool events, so rollcall cannot tell a subagent's tool
   calls from the main thread's, and a notice may reach a subagent. The merge queue needs no hook at all: its lander
-  is a script, and a Codex shipper hears its news from `rollcall queue wait`.
+  is a script, and a Codex shipper (a session with no task) hears the ship script's news from `rollcall ship wait`.
   Claude sessions see Codex sessions as peers. `wait` needs a harness that
   wakes on a background command's exit; without one, run it in the
   foreground. Verify on the first live Codex session: `rollcall status` from

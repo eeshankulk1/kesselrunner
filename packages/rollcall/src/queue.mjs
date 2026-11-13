@@ -24,6 +24,7 @@ import { BIN, P, ago, fileList, isAlive, msgLine, short, who } from "./session.m
 import * as store from "./store.mjs";
 import { queueState, taskAt } from "./task.mjs";
 import { prThreads, threadLine } from "./threads.mjs";
+import { AGAIN, shipNews, startAfter } from "./ship-news.mjs";
 
 export const USAGE = `  rollcall queue add [--owner-ok "<their words>"]
                                          join the merge queue with this branch's PR, once it is open, pushed, green
@@ -50,7 +51,7 @@ export function gh(cwd, args, { timeout = 60_000, maxBuffer = 16 * 1024 * 1024 }
   const r = spawnSync(process.env.ROLLCALL_GH || "gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout, maxBuffer });
   return { ok: r.status === 0, out: r.stdout ?? "", err: (r.stderr ?? "").trim() || (r.error ? String(r.error.message) : "") };
 }
-const ghJson = (cwd, args) => { const r = gh(cwd, args); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
+export const ghJson = (cwd, args) => { const r = gh(cwd, args); try { return r.ok ? JSON.parse(r.out) : null; } catch { return null; } };
 
 const PR_FIELDS = "number,state,isDraft,headRefName,headRefOid,baseRefName,url,title,body,statusCheckRollup,mergeStateStatus";
 /** A commit status (an attest's, a deploy's) rather than a workflow's check run. */
@@ -209,10 +210,20 @@ export function guard(top, from, to, main) {
 
 // ---------------------------------------------------------------- outcomes
 
+/** What a session sent back does once its fix is pushed: a ship (ship.mjs) starts again; an old-style entry re-adds. */
+export const rejoin = (e) => (e.ship ? AGAIN : "wait for green checks, then rollcall queue add");
+
+/** What follows a landing: a ship's after-merge runner (ship.mjs) carries on, else the shipper's release steps. */
+export const landedNext = (e) => (e.ship && e.land
+  ? "rollcall now watches what the merge started and runs the release commands: nothing to do unless it says so."
+  : "Next: the manifest's release.afterMerge steps, then the report.");
+
 /**
- * Ends an entry's turn: `kind` is landed, conflict, failed, parked or left; `text` is what its session reads,
- * next step included. The entry leaves the queue, except a parked one, which stays for the owner to see.
- * Its session hears it (queue wait, and a [rollcall] line on its next tool call), and its task follows.
+ * Ends an entry's turn: `kind` is landed, conflict, failed, parked or left, and for a ship (ship.mjs) also red (its
+ * own checks), review (a thread once green) or green (a PR-only ship); `text` is what its session reads, next step
+ * included. The entry leaves the queue, except a parked one, which stays for the owner to see. Its session hears it
+ * (queue wait or ship wait, and a [rollcall] line on its next tool call), and its task follows. A ship's news that
+ * needs a model goes into its task's worker as a notice instead, and a ship that lands starts its after-merge runner.
  */
 export function finishEntry(key, e, kind, text, extra = {}) {
   const now = Date.now();
@@ -226,13 +237,19 @@ export function finishEntry(key, e, kind, text, extra = {}) {
     for (const [pr, at] of Object.entries(q.joined)) if (now - at > 14 * 86400_000) delete q.joined[pr]; // one that never came back
     q.outcomes.push({ pr: e.pr, branch: e.branch, session: e.session ?? null, kind, at: now, text, ...extra, ...times });
   });
-  store.appendEvent(key, { type: "queue", kind, session: "merge-queue", to: e.session ?? "", pr: e.pr, branch: e.branch, text: store.oneLine(text) });
+  // A ship's task hears through its worker (shipNews), not on the session's next tool call as well.
+  const to = e.ship && e.task ? "" : e.session ?? "";
+  store.appendEvent(key, { type: "queue", kind, session: "merge-queue", to, pr: e.pr, branch: e.branch, text: store.oneLine(text), ...(e.ship ? { ship: true } : {}) });
   if (kind === "landed") store.appendEvent(key, { type: "landed", session: e.session ?? "", who: e.who ?? `#${e.pr}`, branch: e.branch, pr: e.pr, sha: extra.sha ?? null });
   if (e.task) {
     const [h, id] = e.task.split(":");
+    const said = `${e.ship ? "ship" : "merge queue"}: ${kind} - ${store.clip(store.oneLine(text), 300)}`;
     if (kind === "parked") queueState(h, id, "queue-parked", { question: `merge queue parked #${e.pr}: ${store.clip(store.oneLine(text), 300)}` });
-    else if (kind === "conflict" || kind === "failed" || kind === "left" || kind === "review") queueState(h, id, "queue-sent-back", { note: `merge queue: ${kind} - ${store.clip(store.oneLine(text), 300)}` });
+    else if (["conflict", "failed", "left", "review", "red"].includes(kind)) queueState(h, id, "queue-sent-back", { note: said });
+    else if (kind === "green") queueState(h, id, "ship-green", { note: said });
   }
+  if (e.ship) shipNews(e, kind, text);
+  if (kind === "landed" && e.ship && e.land) startAfter(key, e, extra.sha ?? null);
 }
 
 /**
@@ -317,7 +334,7 @@ function add(args, ctx) {
   if (pr.headRefOid !== head) ctx.fail(`#${pr.number}'s head is ${short(pr.headRefOid)}, not HEAD (${short(head)}): GitHub has not seen your last push yet; try again in a moment`);
   if (pr.baseRefName !== b) ctx.fail(`#${pr.number} targets ${pr.baseRefName}, not ${b}: the queue lands on ${b}. Once ${pr.baseRefName} has landed, retarget it (gh pr edit ${pr.number} --base ${b}), then queue add`);
   const c = checksOf(pr.statusCheckRollup);
-  if (c.failed.length) ctx.fail(`#${pr.number} has red checks: ${c.failed.map((x) => x.name).join(", ")}. The queue takes green PRs: fix them first (/pr-create Step 5)`);
+  if (c.failed.length) ctx.fail(`#${pr.number} has red checks: ${c.failed.map((x) => x.name).join(", ")}. The queue takes green PRs: fix them first, or let rollcall ship start --land watch them`);
   if (c.pending.length) ctx.fail(`#${pr.number}'s checks are still running (${fileList(c.pending, 4)}): wait for them (gh pr checks ${pr.number} --watch), then queue add`);
   // Review threads: an open one lands only on the owner's word, given for exactly the threads open now.
   const th = prThreads(top, pr.number);
@@ -410,7 +427,7 @@ function queuedRepos(now) {
   return store.listRepoKeys().map(byKey).filter(({ key }) => {
     const q = store.readQueue(key);
     const l = store.readLander(key);
-    return Object.keys(q.entries).length || q.train || (l?.pid && sameProcess(l.pid, l.start)) || q.outcomes.some((o) => now - o.at < 86400_000);
+    return Object.keys(q.entries).length || q.train || (l?.pid && sameProcess(l.pid, l.start)) || q.outcomes.some((o) => now - o.at < 86400_000) || Object.values(q.after ?? {}).some((a) => a.stage !== "done");
   });
 }
 
@@ -483,6 +500,9 @@ function view(r) {
     repo: r.name, lander: lander?.pid && sameProcess(lander.pid, lander.start) ? lander : null,
     train: t && { ...t, ...(t.started ? { usual: median(q.times[t.suite]), last: lastLine(t.log) } : {}) },
     waiting: waiting.map((e) => ({ ...e, shared: shared(e) })), parked: Object.values(q.entries).filter((e) => e.state === "parked"),
+    // Ships (ship.mjs): PRs whose checks rollcall watches, and landed ones whose deploys and release steps it runs.
+    checking: Object.values(q.entries).filter((e) => e.state === "checking").sort((a, b) => a.at - b.at),
+    after: Object.values(q.after ?? {}).filter((a) => a.stage !== "done"),
     recent: q.outcomes.slice(-10),
   };
 }
@@ -503,7 +523,7 @@ function status(args, ctx) {
   if (!views.length) ctx.say(`${P} no repo has a merge queue now (nothing waiting, landing or landed in the last day)`);
   for (const v of views) {
     const t = v.train;
-    ctx.say(`${P} merge queue for ${v.repo}: ${v.waiting.length} waiting${v.parked.length ? `, ${v.parked.length} parked` : ""}${t ? `, train ${t.n} landing` : ""}; ${v.lander ? `lander running (pid ${v.lander.pid}, since ${ago(v.lander.at, now)})` : "no lander running"}`);
+    ctx.say(`${P} merge queue for ${v.repo}: ${v.waiting.length} waiting${v.parked.length ? `, ${v.parked.length} parked` : ""}${v.checking.length ? `, ${v.checking.length} with checks running` : ""}${t ? `, train ${t.n} landing` : ""}; ${v.lander ? `lander running (pid ${v.lander.pid}, since ${ago(v.lander.at, now)})` : "no lander running"}`);
     if (t) {
       const suite = t.started ? `, ${span(now - t.started)} so far${t.usual ? ` (usual ${span(t.usual)})` : ""}${t.last ? `; its log, ${ago(t.last.at, now)}: ${t.last.text}` : ""}` : "";
       ctx.say(`  train ${t.n}: ${t.prs.map((n) => `#${n}`).join(", ")} - ${t.stage}${suite} (train started ${ago(t.at, now)})`);
@@ -512,6 +532,8 @@ function status(args, ctx) {
       ctx.say(`  ${i + 1}. #${e.pr} ${e.branch}${e.solo ? " (alone)" : ""}, ready ${ago(e.at, now)}: ${e.files?.length ? fileList(e.files, 5) : "no files"}${e.shared.length ? `  <- touches your files: ${fileList(e.shared, 4)}` : ""}${e.stuck ? `  <- stuck since ${ago(e.stuck.since, now)}: ${store.clip(e.stuck.why, 120)}` : ""}${e.blocked ? `  <- sits out until GitHub ${e.blocked} clears` : ""}`);
     });
     for (const e of v.parked) ctx.say(`  parked: #${e.pr} ${e.branch} - ${store.clip(e.why ?? "", 300)}`);
+    for (const e of v.checking) ctx.say(`  checks running: #${e.pr} ${e.branch}, watched since ${ago(e.since ?? e.at, now)}${e.land ? ", joins once green" : ", PR only"}`);
+    for (const a of v.after) ctx.say(`  after landing: #${a.pr} ${a.branch} - ${a.stage === "release" ? `release step ${a.step}` : "watching what the merge started"}, since ${ago(a.at, now)}`);
     for (const o of v.recent.slice(-5)) {
       const took = o.kind === "landed" ? [o.joined && `${span(o.at - o.joined)} after it joined`, o.shipIt && `${span(o.at - o.shipIt)} after "ship it"`].filter(Boolean) : [];
       ctx.say(`  ${ago(o.at, now)}: #${o.pr} ${o.kind}${o.sha ? ` (${short(o.sha)})` : ""}${took.length ? `, ${took.join(", ")}` : ""}`);

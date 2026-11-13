@@ -2198,7 +2198,8 @@ test("the brief: owner files outside the worktree, the header's budget, the owne
   assert.ok(brief.includes(`goes in ${files}, never in the worktree`));
   assert.match(brief, /\(Ship, Scope, Design\), 7 characters at most: the picker puts this task's name in front of it/);
   assert.match(brief, /^\[\d{4}-\d\d-\d\d \d\d:\d\d [A-Z]{2,5}[+\-\d:]*\]\nmake the header professional$/m);
-  assert.match(brief, /finished: first save your report with `.*task output t1 --file <file>`.*Then `.*task set t1 --state landed` once the ship is done/);
+  assert.match(brief, /finished: first save your report with `.*task output t1 --file <file>`.*Then end your turn: once the PR is open, rollcall's ship script has the rest .* marks the task landed when it is done/);
+  assert.match(brief, /a `\[rollcall\] ship:` notice into this window only when something needs you .*after release steps you ran yourself, `.*task set t1 --state landed`/, "the worker lands it only after steps it ran itself");
   assert.doesNotMatch(brief, /--pr <url>|When an answer arrives/, "rollcall sets these itself, so the brief leaves them out");
   assert.match(brief, /question with no options to pick from.*`.*task set t1 --state needs-you --question "<the question, one sentence>"`/, "a whole command line, nothing to probe for");
   assert.match(brief, /Look at a web page through \/frontend-test and an iOS screen through \/ios-sim/);

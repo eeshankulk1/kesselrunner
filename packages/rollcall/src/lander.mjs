@@ -14,7 +14,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fetchSync, gitSync, mainCheckout, mergeConflicts, resolveRef, safeName } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
 import { checkOf, keyOf, passOf, pathspecs, recordPass } from "./results.mjs";
-import { changedFiles, checksOf, entryNews, finishEntry, gh, isAncestor, isStatus, manifestAt, mergeMethod, prLook, prView, serialGroups, span } from "./queue.mjs";
+import { changedFiles, checksOf, entryNews, finishEntry, gh, isAncestor, isStatus, landedNext, manifestAt, mergeMethod, prLook, prView, rejoin, serialGroups, span } from "./queue.mjs";
+import { checkShips } from "./ship.mjs";
 import { fileList, short } from "./session.mjs";
 import * as store from "./store.mjs";
 import { prThreads, threadLine } from "./threads.mjs";
@@ -76,10 +77,12 @@ export async function lander(h, { once = false } = {}) {
     for (;;) {
       store.claimLander(key, process.pid);
       let did = false;
-      try { did = await round(c); } catch (e) { c.log(`round failed: ${e?.stack ?? e}`); }
+      // Ships whose checks still run (ship.mjs): green ones join the line before this round forms a train.
+      try { did = checkShips(c); } catch (e) { c.log(`ship look failed: ${e?.stack ?? e}`); }
+      try { did = (await round(c)) || did; } catch (e) { c.log(`round failed: ${e?.stack ?? e}`); }
       if (did) idle = Date.now();
-      // Rounds that do nothing with entries waiting are a failure to get through, not an empty queue.
-      else if (once || (Date.now() - idle > IDLE_MS() && !Object.values(store.readQueue(key).entries).some((e) => e.state === "waiting"))) break;
+      // Rounds that do nothing with entries waiting or checking are a failure to get through, not an empty queue.
+      else if (once || (Date.now() - idle > IDLE_MS() && !Object.values(store.readQueue(key).entries).some((e) => e.state === "waiting" || e.state === "checking"))) break;
       else await sleep(Math.min(POLL_MS(), 5000));
     }
   } finally {
@@ -113,6 +116,13 @@ async function round(c) {
     if (pr.state !== "OPEN" || pr.headRefOid !== e.head) clear(c, [e]);
     if (pr.state === "MERGED") { finishEntry(key, e, "landed", `#${e.pr} was merged outside the queue.`); settled = true; continue; }
     if (pr.state === "CLOSED") { finishEntry(key, e, "left", `#${e.pr} was closed, so it left the merge queue.`); settled = true; continue; }
+    if (pr.headRefOid !== e.head && e.ship) {
+      // A ship's new head goes back to having its checks watched (ship.mjs), and joins again once they are green.
+      store.updateQueue(key, (q) => { if (q.entries[e.pr]?.state === "waiting") Object.assign(q.entries[e.pr], { state: "checking", head: pr.headRefOid, since: Date.now(), rerun: null }); });
+      c.log(`#${e.pr}: new head ${short(pr.headRefOid)} while in line; back to watching its checks`);
+      settled = true;
+      continue;
+    }
     if (pr.headRefOid !== e.head) {
       finishEntry(key, e, "left", `#${e.pr} gained a new head (${short(pr.headRefOid)}) after it joined, so it left the merge queue: once its checks are green, run rollcall queue add again.`);
       settled = true;
@@ -229,7 +239,7 @@ async function landGreen(c, e, method, base) {
       return true;
     }
     clear(c, [e]);
-    finishEntry(key, e, "landed", `#${e.pr} landed on ${b} as ${short(sha ?? "")}: its own checks were green, so it went straight in, and ${b}'s checks after the merge test it with everything else. Next: the release steps (/pr-create Step 7), then the report.`, { sha, train: n ?? null });
+    finishEntry(key, e, "landed", `#${e.pr} landed on ${b} as ${short(sha ?? "")}: its own checks were green, so it went straight in, and ${b}'s checks after the merge test it with everything else. ${landedNext(e)}`, { sha, train: n ?? null });
     c.log(`#${e.pr}: green, landed as it is as ${short(sha ?? "")}${n ? ` (round ${n})` : ""}`);
     return true;
   } finally {
@@ -243,7 +253,7 @@ const BILLING_LINE = "waits on GitHub billing";
  * GitHub refused a train's jobs: nothing about its members failed and no one asks the owner per PR. One blocker
  * says so once (trouble.mjs), they keep their place, and their task's tab says why.
  */
-function blockOnBilling(c, members, { billing, link }) {
+export function blockOnBilling(c, members, { billing, link }) {
   openBlocker("billing", { text: billing, main: c.main, run: /\/actions\/runs\/(\d+)/.exec(link ?? "")?.[1] ?? null });
   store.updateQueue(c.key, (q) => { for (const e of members) if (q.entries[e.pr]) q.entries[e.pr].blocked = "billing"; });
   for (const e of members) entryNews(c.key, e, "moving", `#${e.pr} ${BILLING_LINE}: nothing about it failed, and rollcall told the owner. It keeps its place and goes on once GitHub starts jobs again.`, { line: BILLING_LINE });
@@ -270,7 +280,7 @@ function nextStep(why) {
  * An entry that cannot move this round, for a reason that may clear (`where`: "settle", before a train; "train", in
  * one). It stays in the queue and the lander keeps trying; past STUCK_MS its session and task hear why, once.
  */
-function trouble(c, entries, why, where = "train") {
+export function trouble(c, entries, why, where = "train") {
   const now = Date.now();
   for (const e of entries) {
     const r = store.updateQueue(c.key, (q) => {
@@ -291,7 +301,7 @@ function trouble(c, entries, why, where = "train") {
 }
 
 /** What trouble() recorded is over (`where`: only that kind). A task it told hears that too. */
-function clear(c, entries, where = null) {
+export function clear(c, entries, where = null) {
   for (const e of entries) {
     const s = store.readQueue(c.key).entries[e.pr]?.stuck;
     if (!s || (where && s.where !== where)) continue;
@@ -318,7 +328,7 @@ function reviewBack(c, e, { maxAge = 0 } = {}) {
   c.threadsSeen.delete(e.pr);
   const lines = fresh.slice(0, 6).map((t) => threadLine(t, 160)).join("; ");
   c.log(`#${e.pr}: ${fresh.length} new review thread${fresh.length === 1 ? "" : "s"}; back to its worker`);
-  finishEntry(c.key, e, "review", `#${e.pr} got ${fresh.length} review thread${fresh.length === 1 ? "" : "s"} after it joined, so it left the merge queue: ${lines}${fresh.length > 6 ? `; and ${fresh.length - 6} more` : ""}. Next: rollcall pr threads, fix or answer each and resolve the fixed ones (rollcall pr reply, rollcall pr resolve), push, wait for green checks, then rollcall queue add.`);
+  finishEntry(c.key, e, "review", `#${e.pr} got ${fresh.length} review thread${fresh.length === 1 ? "" : "s"} after it joined, so it left the merge queue: ${lines}${fresh.length > 6 ? `; and ${fresh.length - 6} more` : ""}. Next: rollcall pr threads, fix or answer each and resolve the fixed ones (rollcall pr reply, rollcall pr resolve), push, ${rejoin(e)}.`);
   return { back: true };
 }
 
@@ -338,7 +348,7 @@ async function land(c, t) {
   // Build: each head merged onto the default branch in order (Mergiraf on conflicted files).
   const built = build(c, dir, base, train, n);
   for (const { e, files } of built.conflicts) {
-    bounce(c, e, "conflict", `#${e.pr} conflicts with ${b} in: ${fileList(files.map(safeName), 8)}. Next: git fetch origin && git merge origin/${b}, resolve with your change on top, run the quick checks, push, wait for green checks, then rollcall queue add.`);
+    bounce(c, e, "conflict", `#${e.pr} conflicts with ${b} in: ${fileList(files.map(safeName), 8)}. Next: git fetch origin && git merge origin/${b}, resolve with your change on top, run the quick checks, push, ${rejoin(e)}.`);
   }
   for (const { e, with: x } of built.deferred) c.log(`train ${n}: #${e.pr} conflicts with #${x?.pr ?? "?"}, which lands first; it waits for a later train`);
   const members = built.members;
@@ -368,7 +378,7 @@ async function land(c, t) {
       gitSync(dir, ["clean", "-fdq"]);
     }
     ran.push(p);
-    if (!setup && typeof m.worktree?.setup === "string") { await run(c, dir, m.worktree.setup, `train-${n}-setup`); setup = true; }
+    if (!setup && typeof m.worktree?.setup === "string") { await runIn(c, dir, m.worktree.setup, `train-${n}-setup`); setup = true; }
     const cmd = String(p.command ?? "").replace(/<[a-z][\w-]*>/gi, "");
     const failures = join(dirname(dir), `train-${n}-${p.name}.failures`);
     writeFileSync(failures, "");
@@ -376,7 +386,7 @@ async function land(c, t) {
     stage(`pre-push ${p.name}`, { suite: p.name, log: logOf(dir, `train-${n}-${p.name}`), started });
     const known = knownFlakes(dir, base, p);
     const limit = suiteLimit(store.readQueue(key).times[p.name]);
-    const r = await run(c, dir, cmd, `train-${n}-${p.name}`, { ROLLCALL_FAILURES: failures }, { limit, quiet: QUIET_MS(), failures, known });
+    const r = await runIn(c, dir, cmd, `train-${n}-${p.name}`, { ROLLCALL_FAILURES: failures }, { limit, quiet: QUIET_MS(), failures, known });
     const took = Date.now() - started;
     // Killed (a limit, a signal) or stopped at a failure: the suite never finished, whatever it wrote.
     const f = r.status === 0 || r.signal || r.stopped ? {} : await rerunFlakes(c, dir, base, p, n, failures, known);
@@ -504,7 +514,7 @@ async function land(c, t) {
     const others = members.filter((x) => x !== e);
     const fl = still[e.pr]?.flakes ?? [];
     const named = fl.length ? ` Known flake: ${fl.join("; ")}. Name it in the report.` : "";
-    finishEntry(key, e, "landed", `#${e.pr} landed on ${b} as ${short(sha ?? "")}${others.length ? ` in merge train ${n} (PR #${prn}, with ${prs(others)})` : ""}.${named} Next: the release steps (/pr-create Step 7), then the report.`, { sha, train: n, ...(fl.length ? { flakes: fl } : {}) });
+    finishEntry(key, e, "landed", `#${e.pr} landed on ${b} as ${short(sha ?? "")}${others.length ? ` in merge train ${n} (PR #${prn}, with ${prs(others)})` : ""}.${named} ${landedNext(e)}`, { sha, train: n, ...(fl.length ? { flakes: fl } : {}) });
   }
   c.log(`train ${n}: landed ${prs(members)} as ${short(sha ?? "")}`);
   return true;
@@ -552,6 +562,25 @@ function scratchTree(c, base) {
   return dir;
 }
 
+/**
+ * Another worktree of rollcall's beside the lander's (`name`: "release", where the ship script runs release
+ * commands), checked out clean at `rev`; kept between uses, so its setup's caches stay. Null when git failed.
+ */
+export function ensureTree(c, rev, name) {
+  const dir = join(dirname(store.queueTree(c.key)), name);
+  if (!existsSync(join(dir, ".git"))) {
+    rmSync(dir, { recursive: true, force: true });
+    gitSync(c.main, ["worktree", "prune"]);
+    const add = gitSync(c.main, ["worktree", "add", "--quiet", "--detach", "--force", dir, rev], { timeout: 300_000 });
+    if (add.status !== 0) { c.log(`git worktree add failed: ${add.stderr.trim()}`); return null; }
+    return dir;
+  }
+  const co = gitSync(dir, ["checkout", "--quiet", "--detach", "--force", rev], { timeout: 120_000 });
+  if (co.status !== 0) { c.log(`git checkout of ${short(rev)} failed: ${(co.stderr ?? "").trim()}`); return null; }
+  gitSync(dir, ["clean", "-fdq"]);
+  return dir;
+}
+
 const logOf = (dir, name) => join(dirname(dir), `${name}.log`);
 
 /** Anything written in `dir` since `stamp`. A find that fails says yes: a doubt never ends a suite. */
@@ -573,7 +602,7 @@ function realFailures(failures, known) {
  * { status, log, signal, stopped, hung, failed }. It runs at most `limit`. With `quiet`, it ends as hung once nothing
  * was written to its log or the tree for that long; with `failures`, at its first line there that `known` does not hold.
  */
-async function run(c, dir, cmd, name, env = {}, { limit = RUN_MS, quiet = 0, failures = null, known = new Set() } = {}) {
+export async function runIn(c, dir, cmd, name, env = {}, { limit = RUN_MS, quiet = 0, failures = null, known = new Set() } = {}) {
   const log = logOf(dir, name);
   const fd = openSync(log, "w");
   c.log(`run ${name}: ${cmd}`);
@@ -627,7 +656,7 @@ async function rerunFlakes(c, dir, base, p, n, failures, known) {
   const other = failed.filter((x) => !known.has(x));
   if (other.length) { c.log(`train ${n}: ${p.name} failed on ${fileList(other, 6)}, not a known flake`); return {}; }
   for (const [i, test] of failed.entries()) {
-    const r = await run(c, dir, p.rerun.replaceAll("<test>", () => sq(test)), `train-${n}-${p.name}-rerun-${i + 1}`, {}, { limit: SUITE_MIN_MS(), quiet: QUIET_MS() });
+    const r = await runIn(c, dir, p.rerun.replaceAll("<test>", () => sq(test)), `train-${n}-${p.name}-rerun-${i + 1}`, {}, { limit: SUITE_MIN_MS(), quiet: QUIET_MS() });
     if (r.hung) return { hung: `its re-run of ${test} stopped: ${r.hung}` };
     if (r.status !== 0) return { log: r.log, note: `It failed only on ${test}, a known flake (${p.flakes}), and failed again when run alone.` };
     c.log(`train ${n}: ${p.name}: known flake ${test} passed alone`);
@@ -645,7 +674,7 @@ async function attest(c, dir, prePush, n, flaked = []) {
   for (const p of prePush) {
     if (typeof p.attest !== "string" || !p.attest) continue;
     const tests = flaked.filter((f) => f.suite === p.name).flatMap((f) => f.tests);
-    const r = await run(c, dir, p.attest, `train-${n}-${p.name}-attest`, tests.length ? { ROLLCALL_FLAKES: tests.join(" ") } : {});
+    const r = await runIn(c, dir, p.attest, `train-${n}-${p.name}-attest`, tests.length ? { ROLLCALL_FLAKES: tests.join(" ") } : {});
     c.log(`train ${n}: ${p.name} attest exited ${r.status}`);
   }
 }
@@ -654,7 +683,7 @@ async function attest(c, dir, prePush, n, flaked = []) {
  * What GitHub says when it refused to start a job over billing: such a job fails in seconds with no steps, and only
  * its check run's annotation tells why. Each job is asked once (`seen`). Null when none says so.
  */
-function billingRefusal(c, failed, seen) {
+export function billingRefusal(c, failed, seen) {
   for (const { link } of failed) {
     const job = /\/job\/(\d+)/.exec(link ?? "")?.[1];
     if (!job || seen.has(job)) continue;
@@ -723,7 +752,7 @@ function suspects(c, m, base, members, failed) {
 }
 
 /** Re-runs the failed jobs of the runs behind `failed` (their links name them). True when one started. */
-function rerun(c, failed) {
+export function rerun(c, failed) {
   const ids = [...new Set(failed.map((f) => /\/actions\/runs\/(\d+)/.exec(f.link ?? "")?.[1]).filter(Boolean))];
   return ids.map((id) => gh(c.main, ["run", "rerun", id, "--failed"]).ok).some(Boolean);
 }
@@ -740,7 +769,7 @@ async function red(c, t, members, failed, { commit, prn, pushed, rerun: reran = 
     const e = sus[0];
     const alone = members.length === 1;
     const where = alone ? `#${e.pr} with origin/${c.b} merged in` : `merge train ${n} (${prs(members)}), and only your change touches what it tests`;
-    bounce(c, e, "failed", `#${e.pr}: ${what} failed on ${where}.${note} Fix it on your branch${pushed ? ` (git pull --ff-only first: the lander merged origin/${c.b} into it as ${short(commit)})` : ""}, push, wait for green checks, then rollcall queue add.`);
+    bounce(c, e, "failed", `#${e.pr}: ${what} failed on ${where}.${note} Fix it on your branch${pushed ? ` (git pull --ff-only first: the lander merged origin/${c.b} into it as ${short(commit)})` : ""}, push, ${rejoin(e)}.`);
     for (const x of members) if (x !== e) goesAgain(c, x, `#${e.pr} failed train ${n}, going again`);
     return true;
   }
