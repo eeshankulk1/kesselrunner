@@ -71,11 +71,13 @@ export const isCorrection = (text) => text.length > 0 && text.length <= 700 && C
 /**
  * A subagent's class from its first prompt. A caller's marker wins: `[role: <name>]` in the prompt's first 500
  * characters (pr-create's shipper prompt carries `[role: shipper]`). Without one, the study's keyword tests.
+ * `[step-up]` beside the marker flags a run that took over from a cheaper model's run (pr-create's Opus shipper
+ * after a Sonnet one stopped).
  */
 export function agentClass(agentType, prompt) {
   const t = String(prompt ?? "").slice(0, 30000).toLowerCase();
-  const marked = t.slice(0, 500).match(/\[role:\s*([a-z0-9_-]+)\s*\]/);
-  if (marked) return { cls: marked[1], marked: true };
+  const head = t.slice(0, 500), marked = head.match(/\[role:\s*([a-z0-9_-]+)\s*\]/);
+  if (marked) return { cls: marked[1], marked: true, ...(head.includes("[step-up]") && { stepUp: true }) };
   if (agentType && agentType !== "general-purpose") return { cls: agentType, marked: false };
   if (t.includes("you are the shipper") || t.includes("pr-create")) return { cls: "shipper", marked: false };
   const edits = /\b(edit|write|implement|fix|modify|create|change|update|commit)/.test(t);

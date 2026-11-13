@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BIN, cleanEnv } from "./helpers.mjs";
 import { agentClass, bashHead, isCorrection } from "../src/usage-scan.mjs";
-import { build, compare, rangeOf, report, scanAll } from "../src/usage-report.mjs";
+import { build, compare, format, rangeOf, report, scanAll } from "../src/usage-report.mjs";
 
 const SECRET = "zebra-quartz-lighthouse"; // in every prompt: must never show in any output
 const T0 = Date.parse("2026-11-03T10:00:00Z");
@@ -115,6 +115,39 @@ test("the report: spend, dedupe, cost-state output, classes, shapes, ships, qual
   const later = structuredClone(rep);
   later.quality.pushesPerShip = 1;
   assert.equal(compare(rep, later).find((r) => r.key === "quality.pushesPerShip").delta, -1);
+});
+
+test("ships by shipper model: quality, the spend before the first push, and step-ups", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "usage-report-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const wt = "/Users/someone/code/shop/.claude/worktrees/feat-y";
+  const dir = join(root, "-Users-someone-code-shop", "s2", "subagents");
+  mkdirSync(dir, { recursive: true });
+  const agent = (id, recs) => {
+    writeFileSync(join(dir, `agent-${id}.meta.json`), JSON.stringify({ agentType: "general-purpose" }));
+    writeFileSync(join(dir, `agent-${id}.jsonl`), recs.map((r) => JSON.stringify({ ...r, cwd: wt, entrypoint: "cli", sessionId: "s2" })).join("\n") + "\n");
+  };
+  const sonnet = "claude-sonnet-5-5";
+  // An Opus shipper that pushes once and passes; a Sonnet one that stops before any push; the Opus step-up after it.
+  agent("o1", [user(0, `[role: shipper] ship ${SECRET}`), asst(1, { tools: [["Agent", { subagent_type: "code-reviewer" }]] }), asst(2), asst(3, { tools: [["Bash", { command: "git push -u origin HEAD" }]] }), asst(4)]);
+  agent("s1", [user(10, `[role: shipper] ship ${SECRET}`), asst(11, { model: sonnet }), asst(12, { model: sonnet }), asst(13, { model: sonnet })]);
+  agent("o2", [user(20, `[role: shipper] [step-up] ship ${SECRET}`), asst(21), asst(22, { tools: [["Bash", { command: "git push" }]] })]);
+  const rep = await report({ root, from: "2026-11-01", to: "2026-11-05", threads: 1 });
+  const bm = rep.quality.byShipperModel;
+  assert.deepEqual(Object.keys(bm), ["opus-5-5", "sonnet-5-5"], "most ships first");
+  assert.equal(bm["opus-5-5"].ships, 2);
+  assert.equal(bm["opus-5-5"].stepUps, 1);
+  assert.equal(bm["opus-5-5"].firstRunCiPass, 100);
+  assert.equal(bm["opus-5-5"].reviewsPerShip, 0.5);
+  assert.equal(bm["opus-5-5"].prePushRequestsMedian, 1.5, "2 requests before the push, then 1");
+  assert.equal(bm["sonnet-5-5"].ships, 1);
+  assert.equal(bm["sonnet-5-5"].firstRunCiPass, null, "it never pushed");
+  assert.equal(bm["sonnet-5-5"].prePushRequestsMedian, 3, "no push: every request counts");
+  assert.ok(bm["sonnet-5-5"].prePushMedianM > 0 && bm["sonnet-5-5"].prePushMedianM < bm["opus-5-5"].prePushMeanM * 3);
+  const text = format(rep);
+  assert.match(text, /Ships by shipper model/);
+  assert.ok(!text.includes(SECRET) && !JSON.stringify(rep).includes(SECRET));
+  assert.equal(compare(rep, rep).find((r) => r.key === "quality.byShipperModel.sonnet-5-5.ships").delta, 0);
 });
 
 test("scanning in worker threads gives what scanning inline gives", async (t) => {
