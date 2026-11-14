@@ -129,6 +129,20 @@ export function openBlocker(kind, fields = {}, now = Date.now()) {
   });
 }
 
+// A turn that ends this long after its plan's limit opened was answered after it, not before.
+const WORKED_MS = 2 * 60_000;
+
+/**
+ * A turn on `kind`'s plan ended without an error: the plan takes work again (extra usage turned on, an early
+ * reset), so its blocker closes now rather than at its reset time, and the supervisor news and workers it held go on.
+ * A turn that ends within WORKED_MS of the limit may have had its answer before it, so it proves nothing. Returns
+ * whether it closed.
+ */
+export function workedAgain(kind, now = Date.now()) {
+  const b = openBlockers()[kind];
+  return !!b && now - (b.since ?? now) >= WORKED_MS && closeBlocker(kind);
+}
+
 /** Closes the `kind` blocker. Returns whether it was open. */
 export function closeBlocker(kind) {
   return store.updateTrouble((t) => { const was = !!t.open[kind]; delete t.open[kind]; return was; }) === true;

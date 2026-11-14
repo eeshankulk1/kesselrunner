@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { deleteList, sweepLeftovers } from "../src/leftovers.mjs";
 import * as store from "../src/store.mjs";
-import { SPOTLIGHT_FIX, assess, clock, closeBlocker, lines, look, openBlocker, openBlockers, resetAt, waitLabel } from "../src/trouble.mjs";
+import { SPOTLIGHT_FIX, assess, clock, closeBlocker, lines, look, openBlocker, openBlockers, paused, resetAt, waitLabel, workedAgain } from "../src/trouble.mjs";
+import { heldWhy } from "../src/watch.mjs";
 import { BIN, cleanEnv, sandbox, until, write } from "./helpers.mjs";
 
 const PDT = (d, h, m = 0) => Date.UTC(2026, 9, d, h + 7, m);
@@ -145,6 +146,43 @@ test("a usage limit's notice names the reset and how to clear it, once over both
   assert.match(m.notes()[0].text, /session limit · resets 2:19pm \(America\/Los_Angeles\)\. rollcall resumes them after .*rollcall blockers clear usage/);
   assert.equal(closeBlocker("usage"), true);
   assert.equal(closeBlocker("usage"), false);
+});
+
+// 2026-11-14: a 5-hour limit opened the usage blocker at noon; the owner turned on extra usage and every session
+// kept working, yet the blocker held all supervisor news until the 2:10 reset, so questions reached the owner only
+// with his next typed line. A clean turn now closes it, and news held for any reason is a notice, never silence.
+test("a turn that ends cleanly after a usage limit closes that plan's blocker, and only that plan's", (t) => {
+  machine(t);
+  const now = Date.now();
+  openBlocker("usage", { until: now + 3 * 3600_000, text: "You've hit your 5-hour limit" }, now - 30_000);
+  openBlocker("usage-codex", { until: now + 3600_000 }, now - 10 * 60_000);
+  assert.equal(workedAgain("usage", now), false, "a turn ending just after the limit may have had its answer before it");
+  assert.ok(paused());
+  assert.equal(workedAgain("usage", now + 3 * 60_000), true, "minutes later, Claude works again: the hold ends");
+  assert.equal(paused(), false);
+  assert.ok(openBlockers()["usage-codex"], "Codex's limit is its own");
+  assert.equal(workedAgain("usage", now + 4 * 60_000), false, "nothing open, nothing to close");
+});
+
+test("a Claude Code turn's Stop hook ends a usage hold that extra usage made stale", (t) => {
+  const m = machine(t);
+  openBlocker("usage", { until: Date.now() + 3 * 3600_000 }, Date.now() - 5 * 60_000);
+  const s = m.sb.session(m.sb.main);
+  s.start();
+  s.stop();
+  assert.equal(openBlockers().usage, undefined, "the clean turn closed it");
+  assert.equal(paused(), false, "supervisor news goes in again");
+});
+
+test("news held by anything but a running turn names its cause for the owner", (t) => {
+  machine(t);
+  const h = "falcon-test";
+  const now = Date.now();
+  assert.equal(heldWhy(h, { at: "busy" }, now), null, "a running turn: it goes in as the turn ends");
+  assert.equal(heldWhy(h, { at: "idle" }, now), null, "free to type: nothing holds it");
+  assert.match(heldWhy(h, { at: "terminal" }, now), /your next line/);
+  openBlocker("usage", { until: now + 3600_000 }, now);
+  assert.match(heldWhy(h, { at: "idle" }, now), /usage limit is open.*rollcall blockers clear usage/);
 });
 
 test("billing with no run to try again leaves the clearing to the owner, and says so", (t) => {
