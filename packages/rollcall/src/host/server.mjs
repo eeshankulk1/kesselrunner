@@ -27,6 +27,8 @@ import { History, addNew, backfill, catchUp, historyFile } from "./history.mjs";
 import { archiveChat, archiveDue, bindChat, ensureChatWorktree, isChat, modesOf, openTasks, readChat, refreshCodexModels, setTitle, takesChatActions, taskItem, touchChat, unarchiveChat, updateChat, writeTitle } from "./chat.mjs";
 import { chatHook } from "./chat-hooks.mjs";
 import { BIN, P } from "../session.mjs";
+import { nameOf } from "../supervisor.mjs";
+import { codexConfig, codexOverrides, serversFor, writeClaudeConfig } from "../worker-mcp.mjs";
 import { spawn } from "node:child_process";
 
 export const INTERFACE = 1;
@@ -115,8 +117,38 @@ class Agent {
   /** Whether this is a chat's own session (host/chat.mjs): a hosted home of kind chat, and no task. */
   get chat() { return !this.id && isChat(this.h); }
 
-  /** The history, read from its file on first use. */
-  get hist() { return (this._hist ??= new History(historyFile(this.h, this.id))); }
+  /** The name the owner knows this agent by: a task's character ("luke"), a chat's title, a supervisor's home. */
+  get displayName() { return this.id ? nameOf(this.id) : (this.chat ? readChat(this.h)?.title : null) || this.h; }
+
+  /**
+   * This start's extra MCP servers (worker-mcp.mjs), read at each start so one registered or changed since reaches it:
+   * Claude Code's --mcp-config file (null when none), or Codex's config keys.
+   */
+  mcpFor(harness) {
+    const agent = { ref: this.ref, name: this.displayName };
+    return harness === "codex" ? codexConfig(serversFor({ ...agent, harness })) : writeClaudeConfig(join(this.dir, "mcp.json"), agent);
+  }
+
+  /**
+   * The history, read from its file on first use. A front end's question (askOwner) a host before this one opened has
+   * no asker left to hear the answer: it closes as the history loads.
+   */
+  get hist() {
+    if (this._hist) return this._hist;
+    this._hist = new History(historyFile(this.h, this.id));
+    for (const r of [...this._hist.open.values()]) {
+      if (r.from !== FRONT_END || asks.has(r.id)) continue;
+      this._hist.append({ ev: "closed", id: r.id, how: "cancelled", by: "host restart", answer: null });
+      broadcast(this.ref, "closed", { id: r.id, how: "cancelled", by: "host restart", reply: { answer: null, reason: "closed" } });
+    }
+    return this._hist;
+  }
+
+  /**
+   * The requests the agent itself waits on: a front end's question (askOwner) never blocks the agent, so it neither
+   * holds an archive nor marks the agent as waiting on the owner.
+   */
+  ownRequests() { return [...this.hist.open.values()].filter((r) => r.from !== FRONT_END); }
 
   state() {
     const s = this.rec.state ?? "stopped";
@@ -134,12 +166,12 @@ class Agent {
     this.rec.serverSock = this.proc?.harness === "codex" ? this.proc.sock : null;
     this.rec.host = process.pid;
     this.rec.at = Date.now();
-    this.rec.requests = this.hist.open.size; // for readers of the record: a chat's `busy` in the snapshot
+    this.rec.requests = this.ownRequests().length; // for readers of the record: a chat's `busy` in the snapshot
     writeJson(this.file, this.rec);
     const recFile = this.rec.harness === "codex" ? codexRecordFile(this.h, this.id) : recordFile(this.h, this.id);
     if (this.rec.state === "stopped" || !this.ctl) rmSync(recFile, { force: true });
     else {
-      const prompt = [...this.hist.open.values()][0] ?? null;
+      const prompt = this.ownRequests()[0] ?? null;
       const compat = { pid: process.pid, child: this.proc?.pid ?? null, sock: this.ctl, ctl: this.ctl, home: this.h, task: this.id, session: this.rec.session, view: "chat", switching: null, busy: this.rec.state === "running", turnAt: this.rec.turnAt, prompt, at: Date.now(), hosted: true, state: this.rec.state, ...(this.rec.harness === "codex" ? { thread: this.rec.thread ?? null, turn: this.proc?.turn ?? null } : {}) };
       writeJson(recFile, compat);
     }
@@ -263,7 +295,7 @@ class Agent {
       // A Codex chat runs no rollcall hooks: the host does their part (chat-hooks.mjs), and its shell names its session,
       // so its own `rollcall task` commands find its home as a Claude chat's do.
       const chat = this.chat ? { hook: (event, p) => chatHook(this.h, event, p), env: { ...childEnv(), ROLLCALL_SESSION: cfg.session } } : null;
-      try { proc = await startCodexAgent({ h: this.h, id: this.id, cfg: launch, envFile, env: chat?.env ?? childEnv(), hook: chat?.hook ?? null, on, log: (l) => log(`${this.ref}: ${l}`) }); }
+      try { proc = await startCodexAgent({ h: this.h, id: this.id, cfg: launch, mcp: this.mcpFor("codex"), envFile, env: chat?.env ?? childEnv(), hook: chat?.hook ?? null, on, log: (l) => log(`${this.ref}: ${l}`) }); }
       catch (e) {
         this.item({ id: `host-exit:${hex(6)}`, at: Date.now(), kind: "system", text: `Codex did not start. A message tries again.\n${e.message}` });
         if (this.rec.state !== "stopped") this.setState("parked");
@@ -272,7 +304,7 @@ class Agent {
       this.rec.thread = proc.thread;
       if (first.trim()) await proc.baseline; // so a quick first turn's files are that turn's, not turn 0's
     } else {
-      proc = startClaude({ cfg, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
+      proc = startClaude({ cfg: { ...cfg, mcpConfig: this.mcpFor("claude") }, resume, envFile, env: childEnv(), on, log: (l) => log(`${this.ref}: ${l}`) });
       readClaudeModels(proc);
     }
     this.proc = proc;
@@ -439,11 +471,18 @@ class Agent {
     return { ok: true, set: done };
   }
 
-  closeRequest(id, how, by, answer = null) {
+  /**
+   * Closes request `id`. A front end's question (askOwner) also hears `reply` ({ answer } or { answer: null, reason };
+   * reason "closed" when the caller gives none), and the `closed` event carries it for an asker that matches it by id.
+   */
+  closeRequest(id, how, by, answer = null, reply = null) {
     this.pending.delete(id);
+    const ask = asks.get(id);
+    const asked = ask ? reply ?? { answer: null, reason: "closed" } : null;
     this.hist.append({ ev: "closed", id, how, by: by ?? null, answer });
-    broadcast(this.ref, "closed", { id, how, by: by ?? null });
-    if (!this.hist.open.size) rmSync(dialogFlag(this.h, this.wid), { force: true });
+    broadcast(this.ref, "closed", { id, how, by: by ?? null, ...(asked ? { reply: asked } : {}) });
+    if (ask) { asks.delete(id); clearTimeout(ask.timer); ask.resolve({ request: id, ...asked }); }
+    if (!this.ownRequests().length) rmSync(dialogFlag(this.h, this.wid), { force: true });
     this.persist();
   }
 
@@ -455,6 +494,14 @@ class Agent {
     const req = this.hist.open.get(id);
     if (!req) return err("not-found", `no request ${id}`);
     if (req.kind === "question" && !(a.answers && typeof a.answers === "object") && a.allow !== false) return err("bad-payload", "a question takes answers");
+    // A front end's question: the answer goes back to the front end that asked, never to the agent.
+    if (req.from === FRONT_END) {
+      const answers = a.allow !== false && a.answers && typeof a.answers === "object" ? a.answers : null;
+      const q = req.questions?.[0]?.question;
+      const picked = answers ? (typeof answers[q] === "string" ? answers[q] : Object.values(answers).find((x) => typeof x === "string")) ?? null : null;
+      this.closeRequest(id, "answered", by, { allow: a.allow ?? null, why: a.why ?? null, answers }, picked ? { answer: picked } : { answer: null, reason: "declined" });
+      return { ok: true, answered: true, how: "answered" };
+    }
     if (a.mode != null && !PLAN_MODES.has(a.mode)) return err("bad-payload", `mode is one of ${[...PLAN_MODES].join(", ")}`);
     // A supervisor's question that relays a task's question is that task's request: the answer goes to the task as a
     // front end's does (answer.mjs, first answer wins), and closing its picker answers this one (closeFalconPicker).
@@ -546,12 +593,15 @@ class Agent {
     }
     if (!this.hist.exists || !this.hist.hasSession(cfg.session)) await this.backfill(started ? null : cfg.session, started ? cfg.session : null);
     let args;
-    if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : []), ...(cfg.effort ? ["-c", `model_reasoning_effort="${cfg.effort}"`] : [])];
+    if (harness === "codex") args = ["resume", this.rec.thread ?? cfg.thread, ...(cfg.model ? ["-m", cfg.model] : []), ...(cfg.effort ? ["-c", `model_reasoning_effort="${cfg.effort}"`] : []), ...codexOverrides(this.mcpFor("codex"))];
     else {
       // A session that never ran starts with its name and first prompt.
       let first = "";
       if (!started && cfg.prompt) { try { first = readFileSync(cfg.prompt, "utf8"); } catch {} }
+      const mcp = this.mcpFor("claude");
       args = [
+        // --mcp-config takes every word up to the next flag: the session's flag follows it.
+        ...(mcp ? ["--mcp-config", mcp] : []),
         ...(started ? ["--resume", cfg.session] : ["--session-id", cfg.session]),
         ...(cfg.addDir?.length ? ["--add-dir", ...cfg.addDir] : []),
         ...(cfg.settings ? ["--settings", cfg.settings] : []),
@@ -742,6 +792,71 @@ class Agent {
       default:
     }
   }
+}
+
+// ---------------------------------------------------------------- a front end's questions
+
+/** What marks a request a front end opened on an agent's behalf (askOwner): the agent never sees it. */
+const FRONT_END = "front end";
+const asks = new Map(); // request id -> { resolve, timer }
+const ASK_MAX_MS = 86400_000;
+
+/**
+ * `ask`: a front end asks the owner on an agent's behalf. The question opens on the agent's feed as one of its own
+ * (kind question, an `rq-` id, saved in its history), marked `from: "front end"`: nothing goes to the agent's process,
+ * which never waits on it. Any front end answers it with `answer`. The call answers when the request closes:
+ * { request, answer: "<label>" }, or { request, answer: null, reason: "timeout" | "withdrawn" | "declined" | "closed" }
+ * (`request`, not `id`: a call's `id` is its framing); with `wait: false` it answers { request } at once and the asker
+ * matches the `closed` event's `reply` by its id. A waiting call's connection that closes withdraws the question.
+ */
+async function askOwner(req, c) {
+  const a = agentFor(req.ref);
+  if (!a) return err("not-found", `no agent ${req.ref}`);
+  const p = req.prompt;
+  if (!p || typeof p !== "object") return err("bad-payload", "prompt is { header?, text, options }");
+  const text = typeof p.text === "string" ? p.text.trim() : "";
+  if (!text || text.length > 2000) return err("bad-payload", "prompt.text is 1 to 2000 characters");
+  const header = typeof p.header === "string" ? p.header.trim().slice(0, 40) : "";
+  const opts = Array.isArray(p.options) ? p.options : [];
+  if (!opts.length || opts.length > 10) return err("bad-payload", "prompt.options has 1 to 10 options");
+  const options = [];
+  for (const o of opts) {
+    const label = typeof o?.label === "string" ? o.label.trim() : "";
+    if (!label || label.length > 100 || options.some((x) => x.label === label)) return err("bad-payload", "each option has its own label, up to 100 characters");
+    options.push({ label, description: typeof o.description === "string" ? o.description.slice(0, 500) : "" });
+  }
+  const ms = Number(req.timeoutMs);
+  if (!Number.isFinite(ms) || ms < 1000 || ms > ASK_MAX_MS) return err("bad-payload", "timeoutMs is 1000 to 86400000");
+  const id = `rq-${hex(6)}`;
+  const request = {
+    id, at: Date.now(), kind: "question", tool: null, input: {}, summary: header || text, reason: null,
+    questions: [{ question: text, header, multiSelect: false, options }], plan: null, relays: null, suggestions: null,
+    from: FRONT_END, ref: a.ref, session: a.rec.session,
+  };
+  const reply = new Promise((resolve) => {
+    const timer = setTimeout(() => { if (asks.has(id)) a.closeRequest(id, "cancelled", "timeout", null, { answer: null, reason: "timeout" }); }, ms);
+    timer.unref?.();
+    asks.set(id, { resolve, timer });
+  });
+  a.hist.append({ ev: "request", request });
+  broadcast(a.ref, "request", { request });
+  a.persist();
+  log(`${a.ref}: a front end asks the owner (${id})`);
+  if (req.wait === false) return { ok: true, request: id };
+  const dropped = () => { if (asks.has(id)) a.closeRequest(id, "cancelled", "withdrawn", null, { answer: null, reason: "withdrawn" }); };
+  c?.once?.("close", dropped);
+  const r = await reply;
+  c?.off?.("close", dropped); // a long-lived connection must not collect one listener per question
+  return { ok: true, ...r };
+}
+
+/** `ask.withdraw` { request }: closes a front end's open question early; its asker hears reason "withdrawn". */
+function withdrawAsk(id) {
+  if (typeof id !== "string" || !asks.has(id)) return err("not-found", `no open question ${id}`);
+  const a = [...agents.values()].find((x) => x._hist?.open.has(id));
+  if (!a) return err("not-found", `no open question ${id}`);
+  a.closeRequest(id, "cancelled", "withdrawn", null, { answer: null, reason: "withdrawn" });
+  return { ok: true, request: id, withdrawn: true };
 }
 
 /** Words sent and not taken yet, as an item: `queued` only while they wait (behind a running turn, or a terminal). */
@@ -976,6 +1091,9 @@ async function handle(req, c) {
         a.item({ id: `system:${hex(6)}`, at: Date.now(), kind: "system", text: req.text });
         return { ok: true };
       }
+      // A front end asks the owner on an agent's behalf (askOwner), and may take the question back.
+      case "ask": return await askOwner(req, c);
+      case "ask.withdraw": return withdrawAsk(req.request);
       case "shutdown": setTimeout(() => shutdown?.(0), 20); return { ok: true };
       default: return err("bad-payload", `no op ${req.op}`);
     }
@@ -1013,7 +1131,7 @@ const chatRunning = (a) => a.rec.state === "running" || a.rec.state === "termina
  * saved, and words bring it back.
  */
 function archiveAgent(a, by) {
-  const r = archiveChat(a.h, by, Date.now(), { running: chatRunning(a), requests: a.hist.open.size });
+  const r = archiveChat(a.h, by, Date.now(), { running: chatRunning(a), requests: a.ownRequests().length });
   if (!r.ok) return err(r.code, r.err);
   if (a.rec.state && a.rec.state !== "stopped") a.stop(); // never "terminal": chatRunning refused it above
   log(`${a.ref}: archived (${by})`);
@@ -1030,7 +1148,7 @@ export function archiveIdleChats(now = Date.now()) {
     const c = readChat(h);
     if (!c || c.archivedAt || c.movedTo) continue;
     const a = agentFor(h);
-    if (!archiveDue(c, { open: openTasks(h).length, running: a ? chatRunning(a) : false, requests: a ? a.hist.open.size : 0 }, now)) continue;
+    if (!archiveDue(c, { open: openTasks(h).length, running: a ? chatRunning(a) : false, requests: a ? a.ownRequests().length : 0 }, now)) continue;
     if (a) archiveAgent(a, "auto");
   }
 }

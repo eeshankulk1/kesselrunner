@@ -18,7 +18,7 @@ const live = real && process.env.ROLLCALL_CLAUDE_CONTRACT === "live";
 
 test("the installed Claude Code still takes the stream-mode flags the agent host starts it with", { skip: !real && "no claude CLI installed", timeout: 60_000 }, () => {
   const help = spawnSync(claude, ["--help"], { encoding: "utf8", timeout: 30_000 }).stdout ?? "";
-  for (const f of ["--print", "--input-format", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--replay-user-messages", "--permission-prompt-tool", "--session-id", "--resume", "--settings", "--permission-mode", "--model", "--effort", "--add-dir"]) {
+  for (const f of ["--print", "--input-format", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--replay-user-messages", "--permission-prompt-tool", "--session-id", "--resume", "--settings", "--permission-mode", "--model", "--effort", "--add-dir", "--mcp-config"]) {
     assert.ok(help.includes(f), `claude --help no longer mentions ${f}`);
   }
 });

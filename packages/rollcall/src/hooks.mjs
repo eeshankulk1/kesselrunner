@@ -205,6 +205,8 @@ function sessionStart(p, now) {
 
 function preToolUse(p, now) {
   if (p.tool_name === "Bash") return bashGuard(p, now);
+  const ti = p.tool_input ?? {};
+  if (EDIT_TOOLS.has(p.tool_name) && WORKER_MCP_FILE.test(ti.file_path ?? ti.notebook_path ?? ti.path ?? "")) return { deny: WORKER_MCP_DENIAL };
   const focus = editFocus(p);
   if (!focus) return null;
   const { info, repo } = focus;
@@ -253,6 +255,12 @@ const API_DO = /\bapi[\s'\"\\]+do\b/;
 const AWAY_ANSWER = /\baway[\s'\"\\]+(allow|deny|allow-all)\b/;
 const AWAY_SWITCH = /\baway[\s'\"\\]+(on|off)\b/;
 const AWAY_RECORD = /_machine\b[^\s;|&]*[\\/](grants|held|away)\.json\b/;
+// The extra MCP servers every worker starts (worker-mcp.mjs) are the owner's, set through a front end: an agent that
+// wrote the list would have its command run in every later worker. Same guard rail: its shell and its edit tools
+// leave the file alone.
+const WORKER_MCP_FILE = /[\\/]_machine[\\/]worker-mcp\.json$/;
+const workerMcpRecord = (cmd) => /\bworker-mcp\.json\b/.test(cmd) && (/_machine\b/.test(cmd) || HOME_PATH.test(cmd));
+const WORKER_MCP_DENIAL = `${P} Blocked: the MCP servers every worker starts are the owner's, set from a front end's settings. Leave their list alone; mention what you need in your report.`;
 
 function saidDenial(cmd) {
   if (SAID_FILE.test(cmd) && HOME_PATH.test(cmd)) {
@@ -270,6 +278,7 @@ function saidDenial(cmd) {
   if (AWAY_RECORD.test(cmd)) {
     return `${P} Blocked: rollcall's away-mode records (held, grants, away) are its own. Read them with \`${cli()} away status\`; answering what it held is the owner's.`;
   }
+  if (workerMcpRecord(cmd)) return WORKER_MCP_DENIAL;
   if (RELAY.test(cmd) && taskEnv()) {
     return `${P} Blocked: \`task relay\` is the supervisor's, and types the owner's words into a worker. Put what you need from the owner in a question or your report (\`${cli()} task output\`).`;
   }
