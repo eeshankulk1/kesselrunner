@@ -24,7 +24,7 @@ import * as tmux from "./tmux.mjs";
 import { ACCOUNT_ERRORS, deliverWords, ensureWatcher, homeOf, idOf, inheritHome, label, nameOf, pruneHomes, taskEnv, taskOfQuestion } from "./supervisor.mjs";
 import { isOpen } from "./state.mjs";
 import { SKILL, ownerNews, prOpened, recordWords, skillStamp, taskAt } from "./task.mjs";
-import { openBlocker, resetAt } from "./trouble.mjs";
+import { openBlocker, resetAt, workedAgain } from "./trouble.mjs";
 import { turnEnded, turnFailed, turnReady, turnStarted } from "./watch.mjs";
 
 const HOOKS = {
@@ -508,6 +508,8 @@ function picks(g, p) {
 
 function stop(p, now) {
   const g = ensureSession(p);
+  // A Claude Code turn that ended without an error: Claude takes work again, so a usage limit stops holding news.
+  workedAgain("usage", now);
   const focus = cwdFocus(p);
   refresh(g, now, focus, { idle: true });
   if (!g.supervisor) snapshotDetached(focus?.info, ["--session", g.id]);

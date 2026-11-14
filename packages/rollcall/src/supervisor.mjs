@@ -17,7 +17,7 @@ import { BIN, P, currentSession, isHolding, short } from "./session.mjs";
 import { isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import * as tmux from "./tmux.mjs";
-import { openBlocker, resetAt } from "./trouble.mjs";
+import { openBlocker, resetAt, workedAgain } from "./trouble.mjs";
 import { adapter, effortOk, harnessOf, sessionHarness, workerAdapter } from "./harness/index.mjs";
 import { MODES, modelOk } from "./harness/claude.mjs";
 import { agentRecord, callSync, hostedHome } from "./host/client.mjs";
@@ -891,6 +891,8 @@ export function workerHook(h, id, event, p, { recordAsk }) {
     case "stop": {
       clearFlag();
       ensureWatcher(h);
+      // A turn that ended without an error: its plan takes work again, so that plan's usage limit stops holding work.
+      workedAgain(harnessOf(t) === "codex" ? "usage-codex" : "usage");
       // A worker at the cap does not end its turn before it hands off; once is enough (stop_hook_active: it was told).
       const cap = !p.stop_hook_active && capDue(h, id, p.session_id);
       if (cap && cap.level !== "soft") return JSON.stringify({ decision: "block", reason: capText(t, cap.pct) });

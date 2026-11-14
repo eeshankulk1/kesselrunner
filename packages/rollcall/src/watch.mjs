@@ -1144,6 +1144,34 @@ function bringBack(h, queued, why, now) {
   });
 }
 
+// News for the supervisor held this long by anything but a running turn reaches the owner once as a notice, whatever
+// holds it: a question no one hears of is the failure this guards against.
+const heldNoticeMs = () => ms("ROLLCALL_HELD_NOTICE_MS", 5 * 60_000);
+/** News items the owner heard were held, by name without its queue prefix (a requeue renames it). */
+const heldTold = new Set();
+
+/**
+ * Why news for `h`'s supervisor cannot go in now, or null when nothing holds it but a running turn (it goes in as
+ * that turn ends) or what already tells the owner itself (typing that did not get through).
+ */
+export function heldWhy(h, s, now) {
+  if (trouble.paused()) return "rollcall holds it while Claude's usage limit is open. If Claude works again, `rollcall blockers clear usage` lets it through";
+  if (s.at === "terminal") return "its supervisor runs outside falcon, so it goes in with your next line to that supervisor";
+  if (s.at === "idle" && !hostedHome(h) && now - tmux.lastUsed(h, h) >= keyQuietMs() && tmux.draft(h, h)) return "words left in the supervisor's prompt box keep rollcall from typing. Send or clear them";
+  return null;
+}
+
+/** Tells the owner once of news held past heldNoticeMs, with why. */
+function heldNotice(h, s, news, now) {
+  const late = news.filter((e) => now - (e.at ?? now) >= heldNoticeMs() && !heldTold.has(e.name.slice(2)));
+  if (!late.length) return;
+  const why = heldWhy(h, s, now);
+  if (!why) return;
+  for (const e of late) heldTold.add(e.name.slice(2));
+  const who = [...new Set(late.map((e) => { const t = store.readTask(h, e.task); return t ? label(t) : e.task; }))].join(", ");
+  notify(`News waits (${h})`, `${who}: news for you has waited ${duration(now - Math.min(...late.map((e) => e.at)))}. ${why}.`);
+}
+
 /** News that needs a judgment goes to the model: typed at the end of its turn, or as the prompt that brings it back. */
 function deliver(h, s, news, now) {
   // Past a usage limit a model turn would end at once on the same error: the news stays queued until it is over.
@@ -1182,7 +1210,7 @@ function drain(h, s, now) {
     } else news.push(e);
   }
   store.ackWakes(h, gone);
-  if (news.length) deliver(h, s, news, now);
+  if (news.length) { heldNotice(h, s, news, now); deliver(h, s, news, now); }
 }
 
 /**
