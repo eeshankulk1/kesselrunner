@@ -1,6 +1,6 @@
 # /pr-create reference: after the PR opens
 
-Once the PR is open, `rollcall ship start` hands the rest to rollcall's scripts ([SKILL.md](../SKILL.md) Step 5): the lander watches the PR's checks, re-runs a red check's failed jobs once, joins the merge queue when the checks are green and no review thread is open (`--land`), lands it, and the after-merge runner watches what the merge started on GitHub (check runs, commit statuses, deployments) and then runs the manifest's `release.afterMerge` commands from merged main. No agent waits on any of it. `rollcall ship status` (in the worktree) shows where it is; `rollcall queue status` shows every ship in the repo.
+Once the PR is open, `rollcall ship start` hands the rest to rollcall's scripts ([SKILL.md](../SKILL.md) Step 5): the lander watches the PR's checks, re-runs a red check's failed jobs once, joins the merge queue when the checks are green and no review thread is open (`--land`), lands it, and the after-merge runner waits for what the release needs from what the merge started on GitHub (the manifest's `release.waitFor`: by default the deployments and the default branch's required checks; other runs are named, not waited on) and then runs the manifest's `release.afterMerge` commands from merged main. No agent waits on any of it. `rollcall ship status` (in the worktree) shows where it is; `rollcall queue status` shows every ship in the repo.
 
 A model hears only what needs one, as a `[rollcall] ship: <kind> - <text>` line: in a task, typed into its worker as a notice; in a session with no task, as the exit line of `rollcall ship wait` (run in the background). The text names what failed and the next step. Read this page when such a line comes, act on it, and start the ship again (`rollcall ship start --land`, or without `--land` for a PR-only ship): it watches the new head from there. Push nothing else while it is in line: a new head takes it back to having its checks watched.
 
@@ -34,7 +34,7 @@ If the ship stops after joining (a blocker, or the user calls it off), `rollcall
 
 ## after-failed: the merge's deploys or a release command failed
 
-The PR is on main. The text names what failed (a workflow on the merge commit, a deployment, or a release command and its log). Read the failure; a fix goes in a new PR from main, shipped the same way. A release command that failed for a reason outside the code (a sign-in, a store's outage) is reported, with the command to run again once it clears. Nothing after the failed step ran: the text lists what is left.
+The PR is on main. The text names what failed (a workflow on the merge commit, a deployment, a run `release.waitFor` names that was still going after 30 minutes, or a release command and its log). Read the failure; a fix goes in a new PR from main, shipped the same way. A release command that failed for a reason outside the code (a sign-in, a store's outage) is reported, with the command to run again once it clears. Nothing after the failed step ran: the text lists what is left.
 
 ## release-step: a release step that is a skill
 
@@ -44,7 +44,7 @@ The deploys were green and the release commands before it ran; the text lists, i
 
 ## shipped
 
-The script finished: the PR landed, what the merge started was green, and the release commands ran. In a task, rollcall marks it landed and adds the script's line below the worker's report; nothing to do. In a session with no task, `ship wait` prints it: relay it to the user as the end of the ship (merge commit, deploys, release steps; with `release.production`, that production is unchanged and the word that releases it).
+The script finished: the PR landed, what the release waits for was green, and the release commands ran. Runs it did not wait on (a long suite on main) are named as still running: the project's own red-main handling covers them, nothing to do. In a task, rollcall marks it landed and adds the script's line below the worker's report; nothing to do. In a session with no task, `ship wait` prints it: relay it to the user as the end of the ship (merge commit, deploys, release steps; with `release.production`, that production is unchanged and the word that releases it).
 
 ## Merges the script did not run
 
