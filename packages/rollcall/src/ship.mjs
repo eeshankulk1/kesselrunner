@@ -259,8 +259,9 @@ const escapeRe = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
  * `deployments` (every deployment the merge started) and `required` (the default branch's required checks, `required`
  * here). Absent: ["deployments", "required"].
  */
+const waitList = (release) => (Array.isArray(release?.waitFor) ? release.waitFor.filter((x) => typeof x === "string" && x) : ["deployments", "required"]);
 export function waitsFor(release, required = []) {
-  const list = Array.isArray(release?.waitFor) ? release.waitFor.filter((x) => typeof x === "string" && x) : ["deployments", "required"];
+  const list = waitList(release);
   const deploys = list.includes("deployments");
   const req = new Set(list.includes("required") ? required ?? [] : []);
   const pats = list.filter((x) => x !== "deployments" && x !== "required").map((x) => new RegExp(`^${x.split("*").map(escapeRe).join(".*")}$`));
@@ -326,8 +327,7 @@ export async function after(h, prn) {
   // 1. What the release needs from what the merge started on GitHub.
   const m = manifestAt(main, a.sha);
   const prod = m.release?.production;
-  const wants = Array.isArray(m.release?.waitFor) ? m.release.waitFor : ["deployments", "required"];
-  const required = wants.includes("required") ? requiredChecks(main, h.b) : [];
+  const required = waitList(m.release).includes("required") ? requiredChecks(main, h.b) : [];
   if (required === null) c.log(`after: GitHub would not say which checks ${h.b} requires; waiting on the rest of release.waitFor`);
   const needed = waitsFor(m.release, required ?? []);
   const w = await watchMerge(c, a.sha, needed, required ?? []);
@@ -499,12 +499,14 @@ async function workflow(args, ctx) {
   }
   const cwd = process.cwd();
   const list = () => ghJson(cwd, ["run", "list", "--workflow", file, "--event", "workflow_dispatch", "--limit", "20", "--json", "databaseId", ...(ref ? ["--branch", ref] : [])]);
-  const before = new Set((list() ?? []).map((x) => x.databaseId));
+  const prior = list();
+  const before = new Set((prior ?? []).map((x) => x.databaseId));
   const r = gh(cwd, ["workflow", "run", file, ...(ref ? ["--ref", ref] : []), ...fields.flatMap((f) => ["-f", f])]);
   if (!r.ok) ctx.fail(`ship workflow: gh workflow run ${file} failed: ${store.clip(r.err || r.out, 400)}`);
   let id = /\/actions\/runs\/(\d+)/.exec(`${r.out}\n${r.err}`)?.[1] ?? null;
   // An older gh prints no link: the run is the one that was not there before the start (GitHub lists it within seconds).
-  for (const end = Date.now() + 120_000; !id && Date.now() < end; ) {
+  // Without a list from before the start, every old run would look new, so there is nothing to tell them apart by.
+  for (const end = Date.now() + 120_000; !id && prior && Date.now() < end; ) {
     await sleep(Math.min(AFTER_POLL_MS(), 5000));
     id = (list() ?? []).filter((x) => !before.has(x.databaseId)).map((x) => x.databaseId).sort((a, b) => a - b)[0] ?? null;
   }
