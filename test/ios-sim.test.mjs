@@ -1,15 +1,15 @@
-// iosim's pure half: the accessibility-tree listing, element matching, and the
-// naming that keeps it from deleting a simulator it did not create. No
-// simulator, no AXe.
+// iosim's pure half: the accessibility-tree listing, element matching, the
+// naming that keeps it from deleting a simulator it did not create, and the
+// look records a ship reads to skip a look it already took. No simulator, no AXe.
 //   node --test test/ios-sim.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compact, devicesOf, find, isOurSim, pickDevice, simName, staleSims } from "../scripts/ios-sim/core.mjs";
+import { compact, devicesOf, find, isOurSim, newestLook, pickDevice, simName, staleSims, unseen } from "../scripts/ios-sim/core.mjs";
 
 const SIM = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ios-sim", "sim.mjs");
 const node = (type, frame, extra = {}, children = []) => ({ type, frame: { x: frame[0], y: frame[1], width: frame[2], height: frame[3] }, enabled: true, AXLabel: null, AXUniqueId: null, AXValue: null, ...extra, children });
@@ -126,5 +126,55 @@ test("install: a download that fails the checksum installs nothing and leaves no
     assert.equal(r.status, 1);
     assert.match(r.stderr, /checksum mismatch/);
     assert.deepEqual(readdirSync(join(home, ".local", "share", "kesselrunner", "axe")), []);
+  } finally { rmSync(box, { recursive: true, force: true }); }
+});
+
+test("unseen: a file the look saw as it is now is seen; a changed, new or re-added file is not", () => {
+  const seen = { "a.swift": "1", "b.swift": "2", "gone.swift": null };
+  assert.deepEqual(unseen(seen, { "a.swift": "1", "gone.swift": null }), []);
+  assert.deepEqual(unseen(seen, { "a.swift": "9", "c.swift": "3", "gone.swift": "4" }), ["a.swift", "c.swift", "gone.swift"]);
+  assert.deepEqual(unseen(undefined, { "a.swift": "1" }), ["a.swift"]);
+});
+
+test("newestLook: the newest record of this checkout, never another's", () => {
+  const rec = (dir, repo, at) => ({ dir, look: { repo, at, files: {} } });
+  const records = [rec("old", "/r", "2026-11-01T00:00:00Z"), rec("new", "/r", "2026-11-02T00:00:00Z"), rec("other", "/s", "2026-11-03T00:00:00Z"), { dir: "broken", look: { repo: "/r" } }];
+  assert.equal(newestLook(records, "/r").dir, "new");
+  assert.equal(newestLook(records, "/t"), null);
+});
+
+test("look record + check: skips only while every file is as the look saw it", () => {
+  const box = realpathSync(mkdtempSync(join(tmpdir(), "iosim-look-")));
+  try {
+    const repo = join(box, "repo");
+    mkdirSync(join(repo, "App"), { recursive: true });
+    execFileSync("git", ["init", "-q", repo]);
+    writeFileSync(join(repo, "App", "Home View.swift"), "struct Home {}\n");
+    writeFileSync(join(repo, "App", "Card.swift"), "struct Card {}\n");
+    const env = { ...process.env, TMPDIR: join(box, "tmp") };
+    const look = (...args) => spawnSync("node", [SIM, "look", ...args], { cwd: repo, encoding: "utf8", env });
+    const files = ["App/Home View.swift", "App/Card.swift"];
+
+    assert.equal(look("check", ...files).status, 1, "no look yet");
+    assert.equal(look("record", ...files).status, 3, "record needs --dir");
+    const dir = join(repo, ".claude", "artifacts", "ios-sim", "2026-11-14T10-00-00");
+    const rec = look("record", "--dir", dir, "--note", "flow 1, light: PASS", ...files);
+    assert.equal(rec.status, 0, rec.stderr);
+
+    const same = look("check", ...files);
+    assert.equal(same.status, 0, same.stderr);
+    assert.match(same.stdout, /flow 1, light: PASS/);
+
+    writeFileSync(join(repo, "App", "Card.swift"), "struct Card { let title = \"x\" }\n");
+    const changed = look("check", ...files);
+    assert.equal(changed.status, 1);
+    assert.match(changed.stdout, /not seen as it is now: App\/Card\.swift/);
+    assert.doesNotMatch(changed.stdout, /Home View/);
+
+    writeFileSync(join(repo, "App", "Card.swift"), "struct Card {}\n"); // undone: as the look saw it again
+    assert.equal(look("check", ...files).status, 0);
+    const added = look("check", ...files, "App/New.swift");
+    assert.equal(added.status, 1);
+    assert.match(added.stdout, /not seen as it is now: App\/New\.swift/);
   } finally { rmSync(box, { recursive: true, force: true }); }
 });

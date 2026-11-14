@@ -12,7 +12,7 @@ Watching five terminals is the work this removes. The supervisor, the Falcon, is
 
 ## Build phase, then ship phase
 
-Most asks come in a series: more features land on a branch before anything ships. So the build phase verifies in proportion: compile, unit tests, type-check, and one targeted look at a changed screen when tests cannot show it works. The full test matrix, the review, docs and the PR wait for the word "ship it". Then the whole pipeline runs to the end in one pass, with no check-ins unless a gate fails and cannot be fixed.
+Most asks come in a series: more features land on a branch before anything ships. So the build phase verifies in proportion: compile, unit tests, type-check, and one targeted look at a changed screen when tests cannot show it works. UI suites wait for the ship, which runs them once, and the ship does not look again at a screen whose files the build phase's look already saw. The full test matrix, the review, docs and the PR wait for the word "ship it". Then the whole pipeline runs to the end in one pass, with no check-ins unless a gate fails and cannot be fixed.
 
 ## CI owns determinism, the session owns judgment
 

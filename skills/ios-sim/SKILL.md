@@ -1,6 +1,6 @@
 ---
 name: ios-sim
-description: "Look at or drive an iOS app in the simulator: verify a changed screen or flow the way a user would meet it, reproduce a UI bug, find your way through an unfamiliar flow, or capture screenshots. This skill does the thinking (what to check, the app, simulator and launch state, a complete brief) and spawns the ios-driver agent (Sonnet), which taps, types and screenshots with `iosim` - build logs, UI listings and intermediate screenshots stay out of the main context; a report and a few screenshots come back. Use it whenever iOS UI code changed and compiling plus unit tests cannot show it works (the build phase's one targeted check; the ship phase's visual verification, from /pr-create and the iOS ship skills), and whenever you are about to run `xcrun simctl` or `xcodebuild test` just to see a screen, or to write a throwaway XCUITest to look at one. Trigger when: user says 'check it in the simulator', 'test this on iOS', 'does it work in the app', 'screenshot the app', 'reproduce this in the sim', '/ios-sim'. NOT for running a project's unit or XCUITest suites (test-runner, or CI) and NOT for uploading builds (the ship skill)."
+description: "Look at or drive an iOS app in the simulator: verify a changed screen or flow the way a user would meet it, reproduce a UI bug, find your way through an unfamiliar flow, or capture screenshots. This skill does the thinking (what to check, the app, simulator and launch state, a complete brief) and spawns the ios-driver agent (Sonnet), which taps, types and screenshots with `iosim` - build logs, UI listings and intermediate screenshots stay out of the main context; a report and a few screenshots come back. Use it whenever iOS UI code changed and compiling plus unit tests cannot show it works (the build phase's one targeted check; the ship phase's visual verification, from /pr-create and the iOS ship skills, which skips a look already taken on the same files), and whenever you are about to run `xcrun simctl` or `xcodebuild test` just to see a screen, or to write a throwaway XCUITest to look at one. Trigger when: user says 'check it in the simulator', 'test this on iOS', 'does it work in the app', 'screenshot the app', 'reproduce this in the sim', '/ios-sim'. NOT for running a project's unit or XCUITest suites (test-runner, or CI) and NOT for uploading builds (the ship skill)."
 argument-hint: <what changed, or what to look at - screens, flows, the bug>
 ---
 
@@ -28,6 +28,8 @@ Scale to the phase, and say in one line what you chose:
 - **A bug or a question** ("why does the sheet not open"): mode `explore` - the goal and what is known, instead of fixed steps.
 
 Nothing a simulator would show (a refactor, a background job): report "no simulator-visible change" and stop.
+
+**One look per change.** The change's files are its app source files (not tests): `git diff --name-only $(git merge-base HEAD origin/<default>)` plus untracked ones (`git ls-files --others --exclude-standard`), under the app's folder. In the ship phase, first run `iosim look check <the change's files>` from the checkout root. Exit 0: the last look that passed saw every one of them as it is now. If its note covers every flow, state and appearance the ship's scale above asks for, report "already looked at: <its note>" and stop, with no driver; if not (the build phase looked at one appearance and the ship asks for both), look only at what the note does not cover. Exit 1 names the files no passed look saw as they are now (or says there was no look): look at the flows those files reach, plus whatever the note does not cover; never repeat a flow on files a look already saw. A look that never passed records nothing, so it does not count.
 
 Collect the accessibility ids the flows touch while you are in the diff: grep the changed views for `.accessibilityIdentifier(` / `.accessibilityLabel(` and the project's UI tests for the same screens. An id in the brief saves the driver a discovery round per control. A label is only a target when it is unique on screen: where the same control also exists on a screen that stays underneath (a composer in the chat and in the thread pushed over it), say so.
 
@@ -79,12 +81,13 @@ Ask for the screenshots you will actually look at - the end state of each flow, 
 - **Look at the screenshots under "Look at"** (the small copies; a full-size file only to inspect a detail) and judge them against the project's design system. The driver reports what it saw; whether it looks right is your call, and the reason those few images come back here.
 - **PASS** -> relay one line and proceed. **WARN** -> show the user the specific items; their call. **FAIL / BLOCKED** -> nothing downstream proceeds (in /pr-create this re-enters the fix loop).
 - **After a fix**, re-check only the failed flows: continue the same driver (SendMessage to it - it already knows the screens) when it is still available, otherwise a fresh spawn with the failed flows plus the ids its report listed.
+- **Record a look that passed** (PASS, or a WARN the user accepted), once its last re-check is in: `iosim look record --dir <artifact dir> --note "<flows and appearances that passed>" <the change's files>` from the checkout root. It writes `look.json` beside the screenshots with each file's content hash, which is what `iosim look check` reads in the ship.
 - **Fold "Learned" into the manifest's `ios` block** now: new fixtures, ids worth knowing, driving quirks (`ios.notes`). The next brief starts from them.
 - **Clean up** what this skill set up: a kept simulator, a swapped config, a backend you started.
 
 ## What this skill does NOT do
 
-- Drive the simulator from the main context. No `iosim tap`, `xcrun simctl launch` or screenshot loop here - only `iosim doctor`, `iosim install` and `iosim delete`.
+- Drive the simulator from the main context. No `iosim tap`, `xcrun simctl launch` or screenshot loop here - only `iosim doctor`, `iosim install`, `iosim delete` and `iosim look`.
 - Write a throwaway XCUITest to look at a screen. (The driver may, as a fallback, when the brief allows it for something taps cannot express.)
 - Run test suites, or upload builds.
 - Touch a production backend or a real account.
