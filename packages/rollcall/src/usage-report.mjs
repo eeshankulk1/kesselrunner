@@ -224,6 +224,18 @@ export function build(files, { from, to }) {
   const walls = [], stageMins = STAGES.map(() => []), stageTotals = STAGES.map(() => 0);
   const q = { pushed: 0, firstPass: 0, reviews: 0, pushes: 0, ciFails: 0 };
   const byModel = {}; // per shipper model: the same signals, plus the spend and requests before the first push
+  // Each part of a ship's own work before its first push, in minutes (the parts overlap: review and docs run side by
+  // side): its foreground commands (checks, git, gh) and the helpers it spawned, each from first request to last.
+  const PHASES = { checks: null, review: ["code-reviewer"], docs: ["docs-updater"], tests: ["test-runner", "test-updater"], ui: ["frontend-tester", "ios-driver"] };
+  const phaseMins = Object.fromEntries(["to first push", ...Object.keys(PHASES)].map((p) => [p, []]));
+  const kids = new Map(), byUse = new Map();
+  for (const p of files) for (const u of p.agentUses ?? []) byUse.set(`${p.sid}\t${u}`, p.agentId);
+  for (const g of files) {
+    if (!g.sub) continue;
+    // The parent from the subagent's own record; older records name only the call that started it.
+    const parent = g.parentAgentId ?? byUse.get(`${g.sid}\t${g.parentToolUse}`);
+    if (parent) kids.set(`${g.sid}\t${parent}`, [...(kids.get(`${g.sid}\t${parent}`) ?? []), g]);
+  }
   for (const f of ships) {
     const R = f.win, t0 = R[0].ts, t1 = R[R.length - 1].ts;
     walls.push((t1 - t0) / 60_000);
@@ -244,6 +256,13 @@ export function build(files, { from, to }) {
     q.reviews += reviews;
     if (pushes) { q.pushed++; if (!fails) q.firstPass++; }
     const pre = tPush ? R.filter((r) => r.ts < tPush) : R;
+    if (tPush) phaseMins["to first push"].push((tPush - t0) / 60_000);
+    phaseMins.checks.push(pre.reduce((s, r) => s + (r.cmdMs ?? 0), 0) / 60_000);
+    const mine = (kids.get(`${f.sid}\t${f.agentId}`) ?? []).filter((g) => g.reqs.length && (!tPush || g.reqs[0].ts < tPush));
+    for (const [p, types] of Object.entries(PHASES)) {
+      const runs = types ? mine.filter((g) => types.includes(g.agentType)) : [];
+      if (runs.length) phaseMins[p].push(runs.reduce((s, g) => s + (g.reqs.at(-1).ts - Math.min(g.start || Infinity, g.reqs[0].ts)), 0) / 60_000);
+    }
     const spendBy = {};
     for (const r of R) if (modelWeight(r.model)) spendBy[r.model] = (spendBy[r.model] ?? 0) + r.w;
     const model = (Object.entries(spendBy).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "?").replace(/^claude-/, "");
@@ -280,6 +299,7 @@ export function build(files, { from, to }) {
       ships: {
         count: ships.length, wallMedian: round(median(walls)), wallP75: round(pctile(walls, 0.75)), wallP90: round(pctile(walls, 0.9)),
         stages: Object.fromEntries(STAGES.map((s, i) => [s, { ships: stageMins[i].length, median: round(median(stageMins[i])), share: pct(stageTotals[i], wallTotal) }])),
+        phases: Object.fromEntries(Object.entries(phaseMins).map(([p, v]) => [p, { ships: v.length, median: round(median(v)), p90: round(pctile(v, 0.9)) }])),
       },
     },
     quality: {
@@ -374,7 +394,10 @@ export function format(rep) {
     ...Object.entries(s.firstContext).map(([kk, v]) => `  ${kk}: median ${k(v.median)} over ${n(v.sessions)} sessions`));
   out.push("", `Ships (shipper runs): ${s.ships.count}, wall minutes median ${s.ships.wallMedian}, p75 ${s.ships.wallP75}, p90 ${s.ships.wallP90}`,
     table(["stage", "ships", "median min", "share of time %"], Object.entries(s.ships.stages).map(([st, v]) => [st, v.ships, v.median, v.share])),
-    "  (stages are cut at the first docs run, push, merge-queue command and release step)");
+    "  (stages are cut at the first docs run, push, merge-queue command and release step)",
+    "", "Ship phases before the first push (minutes; review and docs run side by side, so they overlap)",
+    table(["phase", "ships", "median min", "p90 min"], Object.entries(s.ships.phases ?? {}).map(([p, v]) => [p, v.ships, v.median, v.p90])),
+    "  (checks: the shipper's own foreground commands; the rest: its helpers, each from its prompt to its last request)");
   out.push("", "Quality signals",
     `  first-run CI pass: ${q.firstRunCiPass ?? "-"}% of ships that pushed; per ship: ${n(q.reviewsPerShip)} reviews, ${n(q.pushesPerShip)} pushes, ${n(q.ciFailuresPerShip)} CI failure reads`,
     `  owner corrections: ${n(q.corrections)} of ${n(q.ownerPrompts)} prompts, ${n(q.correctionsPerSession)} per session, in ${q.sessionsWithCorrection}% of sessions`);

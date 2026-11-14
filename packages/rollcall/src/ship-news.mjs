@@ -17,7 +17,11 @@ export const SHIP_USAGE = `  rollcall ship start [--land] [--owner-ok "<their wo
                                          release step comes back to the task's worker (or ship wait) with what failed
   rollcall ship wait [--timeout <min>]   block until this branch's ship needs you or is done, then print the line;
                                          run it in the background in a session with no task
-  rollcall ship status [--json]          this branch's ship: its stage, how long, the last news`;
+  rollcall ship status [--json]          this branch's ship: its stage, how long, the last news
+  rollcall ship workflow <workflow> [--ref <branch>] [-f key=value]...
+                                         start a GitHub Actions workflow, wait for the run it started and exit 0
+                                         when it passed (1 with its link and failing log otherwise): a release
+                                         step that is only a trigger and a watch, as a command`;
 
 /** What a ship's session does next after it was sent back: the fix, then the ship again. */
 export const AGAIN = "then rollcall ship start --land again (it watches the checks and joins the queue once they are green)";
