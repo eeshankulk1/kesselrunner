@@ -136,13 +136,21 @@ function hash(str) {
  */
 export function repoKey(info) {
   const remote = remoteUrl(info);
-  const id = remote ? normalizeRemote(remote) : `local:${info.commonDir}`;
-  const name = remote
-    ? id.split("/").pop()
-    : (basename(info.commonDir) === ".git" ? basename(dirname(info.commonDir)) : basename(info.commonDir).replace(/\.git$/, ""));
+  if (remote) return originKey(remote);
+  const name = basename(info.commonDir) === ".git" ? basename(dirname(info.commonDir)) : basename(info.commonDir).replace(/\.git$/, "");
+  return keyFor(`local:${info.commonDir}`, name);
+}
+
+/** The store key and repo name of a repo with origin `url` (what repoKey gives any checkout of it). */
+export function originKey(url) {
+  const id = normalizeRemote(url);
+  return keyFor(id, id.split("/").pop());
+}
+
+const keyFor = (id, name) => {
   const slug = (name || "repo").replace(/[^a-z0-9._-]+/gi, "-").toLowerCase();
   return { key: `${slug}-${hash(id)}`, name: name || "repo" };
-}
+};
 
 /** The main worktree of this repo (where `git worktree add` is best run from). */
 export function mainCheckout(info) {

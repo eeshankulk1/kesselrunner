@@ -242,10 +242,11 @@ const reason = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "") ||
 
 /**
  * The chat's worktree: `<repo>/.claude/worktrees/<h>` on branch `branch` from origin's default branch, after a fetch
- * of at most 3 s (a failed one uses the local ref). { worktree, branch, repo, note }: worktree and branch null, and
- * `note` set, when git refuses (not a repo, a broken one): the chat then works in the folder itself.
+ * of at most 3 s (a failed one uses the local ref), or from commit `base` when given (a seed's tip: no fetch).
+ * { worktree, branch, repo, note }: worktree and branch null, and `note` set, when git refuses (not a repo, a broken
+ * one): the chat then works in the folder itself.
  */
-export function makeWorktree(h, folder, { branch = `chat/${h}` } = {}) {
+export function makeWorktree(h, folder, { branch = `chat/${h}`, base: from = null } = {}) {
   const info = locate(folder);
   if (!info) {
     const r = gitSync(folder, ["rev-parse", "--show-toplevel"]);
@@ -255,11 +256,14 @@ export function makeWorktree(h, folder, { branch = `chat/${h}` } = {}) {
   const { key, name } = repoKey(info);
   const repo = { key, name, main };
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || "ssh -o BatchMode=yes" };
-  let b = defaultBranch(info);
-  gitSync(main, ["fetch", "--quiet", "--no-tags", "origin", ...(b ? [b] : [])], { env, timeout: 3000 });
-  b ??= defaultBranch(info);
-  const ok = (ref) => gitSync(main, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).status === 0;
-  const base = b && ok(`origin/${b}`) ? `origin/${b}` : b && ok(b) ? b : "HEAD";
+  let base = from;
+  if (!base) {
+    let b = defaultBranch(info);
+    gitSync(main, ["fetch", "--quiet", "--no-tags", "origin", ...(b ? [b] : [])], { env, timeout: 3000 });
+    b ??= defaultBranch(info);
+    const ok = (ref) => gitSync(main, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).status === 0;
+    base = b && ok(`origin/${b}`) ? `origin/${b}` : b && ok(b) ? b : "HEAD";
+  }
   const path = join(main, ".claude", "worktrees", h);
   mkdirSync(dirname(path), { recursive: true });
   // --no-track: the branch has no upstream until the session pushes it (renameBranch reads that).
@@ -351,13 +355,31 @@ export function bindChat(h, session) {
  * A new chat in `folder` (`chat.new`): its home, its worktree (or the folder itself, with `note`), its record, its
  * launch with the chat contract appended, and its session started in the host on the owner's own words. Returns once
  * the agent is started, never waiting on the first turn: { ok, home, chat, session } or { ok: false, code, err }.
+ * `seed` (from `chat.seed.unpack`): the worktree starts from that folder state instead; the seed goes either way.
  */
-export async function newChat({ folder, text, attachments = [], model = "opus", mode = "default", effort = null, title = null, now = Date.now() }) {
+export async function newChat({ folder, text, attachments = [], model = "opus", mode = "default", effort = null, title = null, seed = null, now = Date.now() }) {
+  if (seed) {
+    const m = await import("../move.mjs");
+    try { return await newChatFrom(m, m.seedFor(seed, folder), { folder, text, attachments, model, mode, effort, title, now }); } catch (e) {
+      if (e instanceof m.MoveError) return { ok: false, code: e.code, err: e.message };
+      throw e;
+    } finally { m.dropSeed(seed); }
+  }
+  return newChatFrom(null, null, { folder, text, attachments, model, mode, effort, title, now });
+}
+
+/** newChat's work; `s` a checked seed (move.mjs `seedFor`, `m` the module) or null. */
+async function newChatFrom(m, s, { folder, text, attachments, model, mode, effort, title, now }) {
   const harness = isCodexModel(model) ? "codex" : "claude";
   const h = reserveChatHome();
   if (!h) return { ok: false, code: "failed", err: "could not find a free chat name" };
   store.writeHomeFile(h, "runtime", { runtime: "host", kind: "chat", at: now });
-  const w = makeWorktree(h, folder);
+  const w = makeWorktree(h, folder, { base: s?.tip ?? null });
+  if (s) {
+    // A seeded chat without its worktree would run without the folder's state: refused, nothing left behind.
+    if (!w.worktree) { rmSync(store.homeDir(h), { recursive: true, force: true }); return { ok: false, code: "failed", err: w.note ?? "git refused the chat's worktree" }; }
+    w.note = m.applySeed(s, w.worktree);
+  }
   const c = {
     title: title ?? draftTitle(text), titleBy: title ? "owner" : "draft", folder, repo: w.repo, worktree: w.worktree, branch: w.branch,
     harness, model, mode, effort: effort ?? null, createdAt: now, lastUsedAt: now, archivedAt: null, archivedBy: null, note: w.note,

@@ -91,6 +91,8 @@ ${RUNTIME_USAGE}
                                          the front-end interface, for apps over rollcall (JSON; see API.md)
   rollcall chat move check|pack|unpack|finish|resume|undo|discard --json '<payload>'
                                          move a chat between this machine and another (API.md "Moving a chat")
+  rollcall chat seed pack|unpack --json '<payload>'
+                                         a new chat elsewhere from a folder's state (API.md "Seeding a chat")
   rollcall usage [--json] [--refresh]    each plan's room: Claude's five-hour and weekly limits, Codex's limits
   rollcall usage report [<range>] [--save <name>] [--json]
                                          where Claude Code spend went: by model, lane, agent, project; context,

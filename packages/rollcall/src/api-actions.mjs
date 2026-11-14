@@ -157,6 +157,37 @@ async function moveStep(verb, payload) {
   }
 }
 
+/** `chat.new`'s payload checked, then the chat made (host/chat.mjs); `seed` makes it from a folder state elsewhere. */
+async function newChatAction(p, seed) {
+  const cwd = str(p, "cwd", { max: 4096 });
+  if (!cwd.startsWith("/")) refuse("bad-payload", "cwd is an absolute path");
+  let dir = false;
+  try { dir = statSync(cwd).isDirectory(); } catch {}
+  if (!dir) refuse("bad-payload", `no such folder: ${cwd}`);
+  const text = str(p, "text");
+  if (!text.trim()) refuse("bad-payload", "text is required");
+  const attachments = attachmentsOf(p);
+  const model = str(p, "model", { required: false, max: 100 }) ?? "opus";
+  // A Codex model makes a Codex chat: Codex must be installed and signed in (signing in is the owner's step).
+  const harness = isCodexModel(model) ? "codex" : "claude";
+  if (harness === "codex") { const c = codexAvailable(); if (!c.ok) refuse("not-available", c.err); }
+  if (harness === "claude" && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
+  const mode = str(p, "mode", { required: false, max: 40 }) ?? "default";
+  const modes = modesOf(harness);
+  if (!modes.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${modes.map((m) => m.id).join(", ")}`);
+  // An effort the picked model takes (chatOptions' `efforts` for it), else the session's own default.
+  const effort = str(p, "effort", { required: false, max: 20 });
+  if (effort !== null) {
+    const efforts = effortsFor(harness, model);
+    if (!efforts.includes(effort)) refuse("bad-payload", efforts.length ? `effort on ${model} is one of ${efforts.join(", ")}` : `${model} takes no effort level`);
+  }
+  const title = str(p, "title", { required: false, max: 200 });
+  if (title !== null && !title.trim()) refuse("bad-payload", "title is empty");
+  const r = await newChat({ folder: cwd, text, attachments, model, mode, effort, title: title?.trim() ?? null, seed });
+  if (!r.ok) refuse(r.code, r.err, r.home ? { home: r.home } : undefined);
+  return { home: r.home, ref: r.home, chat: r.chat, session: r.session };
+}
+
 // ---------------------------------------------------------------- the actions
 
 /**
@@ -326,33 +357,27 @@ export const ACTIONS = {
   "chat.new": {
     cli: "a new chat in cockpit",
     async run(p) {
-      const cwd = str(p, "cwd", { max: 4096 });
-      if (!cwd.startsWith("/")) refuse("bad-payload", "cwd is an absolute path");
-      let dir = false;
-      try { dir = statSync(cwd).isDirectory(); } catch {}
-      if (!dir) refuse("bad-payload", `no such folder: ${cwd}`);
-      const text = str(p, "text");
-      if (!text.trim()) refuse("bad-payload", "text is required");
-      const attachments = attachmentsOf(p);
-      const model = str(p, "model", { required: false, max: 100 }) ?? "opus";
-      // A Codex model makes a Codex chat: Codex must be installed and signed in (signing in is the owner's step).
-      const harness = isCodexModel(model) ? "codex" : "claude";
-      if (harness === "codex") { const c = codexAvailable(); if (!c.ok) refuse("not-available", c.err); }
-      if (harness === "claude" && !modelOk(model)) refuse("bad-payload", `model is an alias or an id, like opus or claude-opus-5-5: ${model}`);
-      const mode = str(p, "mode", { required: false, max: 40 }) ?? "default";
-      const modes = modesOf(harness);
-      if (!modes.some((m) => m.id === mode)) refuse("bad-payload", `mode is one of ${modes.map((m) => m.id).join(", ")}`);
-      // An effort the picked model takes (chatOptions' `efforts` for it), else the session's own default.
-      const effort = str(p, "effort", { required: false, max: 20 });
-      if (effort !== null) {
-        const efforts = effortsFor(harness, model);
-        if (!efforts.includes(effort)) refuse("bad-payload", efforts.length ? `effort on ${model} is one of ${efforts.join(", ")}` : `${model} takes no effort level`);
+      // A seed (chat.seed.unpack's) is used once: it goes when the chat is made and when it is refused.
+      const seed = str(p, "seed", { required: false, max: 100 });
+      try { return await newChatAction(p, seed); } catch (e) {
+        if (seed) (await import("./move.mjs")).dropSeed(seed);
+        throw e;
       }
-      const title = str(p, "title", { required: false, max: 200 });
-      if (title !== null && !title.trim()) refuse("bad-payload", "title is empty");
-      const r = await newChat({ folder: cwd, text, attachments, model, mode, effort, title: title?.trim() ?? null });
-      if (!r.ok) refuse(r.code, r.err, r.home ? { home: r.home } : undefined);
-      return { home: r.home, ref: r.home, chat: r.chat, session: r.session };
+    },
+  },
+
+  // A new chat on another machine from this folder's exact state (move.mjs): the Mac packs, cockpit carries the archive
+  // (move.put), the machine unpacks, and chat.new takes the `seed` it answered.
+  "chat.seed.pack": { cli: "rollcall chat seed pack", repeatable: true, run: (p) => moveStep("seedPack", { cwd: str(p, "cwd", { max: 4096 }) }) },
+  "chat.seed.unpack": {
+    cli: "rollcall chat seed unpack",
+    run(p) {
+      const path = str(p, "path", { max: 4096 });
+      if (!path.startsWith("/")) refuse("bad-payload", "path is an absolute path");
+      // The sha256 the Mac's pack answered: a seed lays files into a worktree, so it is never opened unchecked.
+      const sha256 = str(p, "sha256", { max: 64 });
+      if (!/^[0-9a-f]{64}$/.test(sha256)) refuse("bad-payload", "sha256 is the archive's sha256 (64 hex digits)");
+      return moveStep("seedUnpack", { path, sha256 });
     },
   },
 
