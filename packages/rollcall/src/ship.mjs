@@ -1,9 +1,10 @@
 // The ship script: everything after a PR opens, run by scripts and never by a waiting agent. `rollcall ship start`
 // puts the PR in the merge queue's state as "checking"; the lander (lander.mjs, one per repo) watches its checks and,
 // once they are green and no review thread is open, puts it in line (`--land`) or tells its session it is green
-// (PR only). After a landing, `rollcall ship after` (detached, one per landed PR) watches what the merge started on
-// GitHub (check runs, commit statuses, deployments) and then runs the manifest's release.afterMerge commands from
-// merged main. A model wakes only when something needs judgment: a red check (with the failing part of its log),
+// (PR only). After a landing, `rollcall ship after` (detached, one per landed PR) waits for what the release needs
+// from what the merge started on GitHub (the manifest's release.waitFor; by default its deployments and the default
+// branch's required checks), names the other runs still going without waiting on them, and then runs the manifest's
+// release.afterMerge commands from merged main. A model wakes only when something needs judgment: a red check (with the failing part of its log),
 // a review thread, a conflict, a failed deploy or release command, or a release step that is a skill. That news
 // goes into the task's worker as a notice, and to a session with no task through `rollcall ship wait`.
 //   q.entries[<pr>] (queue.mjs) with state "checking": { ..., ship: true, land, since, rerun: { head, at }, ownerOk }
@@ -31,7 +32,7 @@ const NO_CHECKS_MS = () => ms("ROLLCALL_QUEUE_NO_CHECKS_MS", 180_000);
 const SETTLE_MS = () => NO_CHECKS_MS() / 3;
 /** Checks still running this long after the push: someone hears (a self-hosted runner asleep or offline). */
 const CI_MS = () => ms("ROLLCALL_QUEUE_CI_MINUTES", 60) * 60_000;
-/** How often the after-merge runner looks at what the merge started, and for how long at most. */
+/** How often the after-merge runner looks at what the merge started, and how long at most it waits for what the release needs. */
 const AFTER_POLL_MS = () => ms("ROLLCALL_SHIP_POLL_MS", 30_000);
 const DEPLOY_MS = () => ms("ROLLCALL_SHIP_DEPLOY_MINUTES", 30) * 60_000;
 /** Nothing at all on the merge commit this long after the merge: the merge starts nothing here. */
@@ -175,18 +176,21 @@ function toLine(c, e, now) {
   return true;
 }
 
+/** The part of a failed run's log worth reading: the tail is mostly the job's cleanup, so the error lines and what leads to them. */
+function failingPart(text) {
+  const lines = text.split("\n");
+  const hit = lines.findIndex((l) => /FAIL|Error|error:|failed|✘|AssertionError|not ok/.test(l));
+  const from = hit >= 0 ? Math.max(0, hit - 10) : Math.max(0, lines.length - 150);
+  return lines.slice(from, from + 150).join("\n");
+}
+
 /** The failing part of a red check's log, saved beside the queue's state for the worker: its path, or null. */
 function failedLog(c, e, failed) {
   const ids = [...new Set(failed.map((f) => /\/actions\/runs\/(\d+)/.exec(f.link ?? "")?.[1]).filter(Boolean))];
   const parts = [];
   for (const id of ids.slice(0, 3)) {
     const r = gh(c.main, ["run", "view", id, "--log-failed"], { timeout: 120_000 });
-    if (!r.ok) continue;
-    // The tail is mostly the job's cleanup: keep the error lines and what leads to them.
-    const lines = r.out.split("\n");
-    const hit = lines.findIndex((l) => /FAIL|Error|error:|failed|✘|AssertionError|not ok/.test(l));
-    const from = hit >= 0 ? Math.max(0, hit - 10) : Math.max(0, lines.length - 150);
-    parts.push(`== run ${id}\n${lines.slice(from, from + 150).join("\n")}`);
+    if (r.ok) parts.push(`== run ${id}\n${failingPart(r.out)}`);
   }
   if (!parts.length) return null;
   const path = join(dirname(store.queueTree(c.key)), `red-${e.pr}-${short(e.head)}.log`);
@@ -222,7 +226,7 @@ function merged(cwd, sha) {
   for (const r of runs.check_runs ?? []) {
     // A cancelled run on main is mostly one a later push superseded (cancel-in-progress): that push's run tests it.
     const ok = ["success", "neutral", "skipped", "cancelled"].includes(r.conclusion);
-    items.push({ name: r.name, kind: "check", state: r.status !== "completed" ? "pending" : ok ? "ok" : "failed", link: r.details_url ?? r.html_url ?? null });
+    items.push({ name: r.name, kind: "check", state: r.status !== "completed" ? "pending" : ok ? "ok" : "failed", link: r.details_url ?? r.html_url ?? null, suite: r.check_suite?.id ?? null });
   }
   for (const s of status.statuses ?? []) items.push({ name: s.context, kind: "status", state: s.state === "success" ? "ok" : s.state === "pending" ? "pending" : "failed", link: s.target_url ?? null });
   for (const d of Array.isArray(deploys) ? deploys : []) {
@@ -234,24 +238,62 @@ function merged(cwd, sha) {
   return { items };
 }
 
-/** Waits on what the merge started: { ok, items } | { failed, items } | { timeout, items } | { none }. */
-async function watchMerge(c, sha) {
+/** The default branch's required checks (rulesets and branch protection) as names, or null when GitHub would not say. */
+function requiredChecks(cwd, b) {
+  const rules = api(cwd, `repos/{owner}/{repo}/rules/branches/${encodeURIComponent(b)}`);
+  const branch = api(cwd, `repos/{owner}/{repo}/branches/${encodeURIComponent(b)}`);
+  if (!Array.isArray(rules) && !branch) return null;
+  const names = new Set();
+  for (const r of Array.isArray(rules) ? rules : []) if (r?.type === "required_status_checks") for (const x of r.parameters?.required_status_checks ?? []) if (x?.context) names.add(x.context);
+  const p = branch?.protection?.required_status_checks;
+  for (const x of p?.contexts ?? []) names.add(x);
+  for (const x of p?.checks ?? []) if (x?.context) names.add(x.context);
+  return [...names];
+}
+
+const escapeRe = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * What the release waits for, as a test on an item of `merged`: the manifest's release.waitFor, a list of check run
+ * names, commit status contexts and deployment environments (`*` matches any run of characters), plus two words:
+ * `deployments` (every deployment the merge started) and `required` (the default branch's required checks, `required`
+ * here). Absent: ["deployments", "required"].
+ */
+export function waitsFor(release, required = []) {
+  const list = Array.isArray(release?.waitFor) ? release.waitFor.filter((x) => typeof x === "string" && x) : ["deployments", "required"];
+  const deploys = list.includes("deployments");
+  const req = new Set(list.includes("required") ? required ?? [] : []);
+  const pats = list.filter((x) => x !== "deployments" && x !== "required").map((x) => new RegExp(`^${x.split("*").map(escapeRe).join(".*")}$`));
+  return (x) => (deploys && x.kind === "deployment") || (x.kind !== "deployment" && req.has(x.name)) || pats.some((re) => re.test(x.kind === "deployment" ? x.env : x.name));
+}
+
+/**
+ * Waits on what the release needs from what the merge started (`needed`, from waitsFor): { ok, items } |
+ * { failed, items } | { timeout, items, held } | { none }. Items the release does not need are not waited on; one that
+ * failed by the time the wait ends still counts (a red main is never released over), one still running is named.
+ * A required check not on the commit yet may be a job still waiting on another (`needs:`), so while one is missing,
+ * the rest of each workflow run that holds a required check is waited on too.
+ */
+async function watchMerge(c, sha, needed, required = []) {
   const start = Date.now();
-  let last = null;
+  let last = null, held = [];
   for (;;) {
     const m = merged(c.main, sha);
     if (m) {
       last = m.items;
-      const settled = m.items.every((x) => x.state !== "pending");
       if (!m.items.length && Date.now() - start > NONE_MS()) return { none: true, items: [] };
       // Something may still be about to start (a deploy app registers its deployment a while after the merge): a
       // settled set counts only once the merge is as old as the wait for anything at all.
-      if (m.items.length && settled && Date.now() - start > NONE_MS()) {
+      const missing = required.some((n) => !m.items.some((x) => x.name === n));
+      const suites = new Set(m.items.filter((x) => x.suite && required.includes(x.name)).map((x) => x.suite));
+      const wait = m.items.filter((x) => needed(x) || (missing && suites.has(x.suite)));
+      held = wait.filter((x) => x.state === "pending");
+      if (m.items.length && Date.now() - start > NONE_MS() && wait.every((x) => x.state !== "pending")) {
         const failed = m.items.filter((x) => x.state === "failed");
         return failed.length ? { failed, items: m.items } : { ok: true, items: m.items };
       }
     } else c.log(`after: GitHub could not say what ${short(sha)} started; trying again`);
-    if (Date.now() - start > DEPLOY_MS()) return { timeout: true, items: last ?? [] };
+    if (Date.now() - start > DEPLOY_MS()) return { timeout: true, items: last ?? [], held };
     await sleep(AFTER_POLL_MS());
   }
 }
@@ -281,21 +323,26 @@ export async function after(h, prn) {
   c.log(`watching what ${short(a.sha)} started`);
   shipStage(a.task, "deploys");
 
-  // 1. What the merge started on GitHub.
-  const w = await watchMerge(c, a.sha);
+  // 1. What the release needs from what the merge started on GitHub.
   const m = manifestAt(main, a.sha);
   const prod = m.release?.production;
+  const wants = Array.isArray(m.release?.waitFor) ? m.release.waitFor : ["deployments", "required"];
+  const required = wants.includes("required") ? requiredChecks(main, h.b) : [];
+  if (required === null) c.log(`after: GitHub would not say which checks ${h.b} requires; waiting on the rest of release.waitFor`);
+  const needed = waitsFor(m.release, required ?? []);
+  const w = await watchMerge(c, a.sha, needed, required ?? []);
   const deployed = (w.items ?? []).filter((x) => x.kind === "deployment" && x.state === "ok").map((x) => `${x.env}${x.url ? ` (${x.url})` : ""}`);
   if (w.failed) {
     afterOutcome(key, a, "after-failed", `#${prn} landed as ${short(a.sha)}, and what the merge started failed: ${w.failed.map(itemLine).join(", ")}. No release step ran. Next: read the failure (gh run view <run> --log-failed for a workflow), fix it in a new PR from main, and report it; the release steps wait for a green main.`);
     return 1;
   }
   if (w.timeout) {
-    const pending = w.items.filter((x) => x.state === "pending");
-    afterOutcome(key, a, "after-failed", `#${prn} landed as ${short(a.sha)}, and what the merge started was still running after ${span(DEPLOY_MS())}: ${pending.map(itemLine).join(", ") || "nothing GitHub could name"}. No release step ran. Next: look at those runs, then run the release steps by hand once they are green.`);
+    afterOutcome(key, a, "after-failed", `#${prn} landed as ${short(a.sha)}, and what the release waits for (release.waitFor) was still running after ${span(DEPLOY_MS())}: ${w.held.map(itemLine).join(", ") || "nothing GitHub could name"}. No release step ran. Next: look at those runs, then run the release steps by hand once they are green.`);
     return 1;
   }
-  const deployLine = w.none ? "the merge started nothing on GitHub" : `${w.items.length} check${w.items.length === 1 ? "" : "s"} and deploy${w.items.length === 1 ? "" : "s"} green${deployed.length ? ` (deployed: ${deployed.join(", ")})` : ""}`;
+  const green = (w.items ?? []).filter((x) => x.state === "ok").length;
+  const running = (w.items ?? []).filter((x) => x.state === "pending").map((x) => x.name);
+  const deployLine = w.none ? "the merge started nothing on GitHub" : `${green} check${green === 1 ? "" : "s"} and deploy${green === 1 ? "" : "s"} green${deployed.length ? ` (deployed: ${deployed.join(", ")})` : ""}${running.length ? `; still running, not waited on: ${fileList(running, 4)}` : ""}`;
   c.log(deployLine);
 
   // 2. The release steps: commands run here, from merged main; a skill needs a model, which takes it from there.
@@ -365,6 +412,7 @@ export async function shipCommand(args, ctx) {
     case "wait": return await wait(rest, ctx);
     case "status": return status(rest, ctx);
     case "after": { const n = Number(rest[0]); if (!n) ctx.fail("ship after <pr>"); return await after(here(ctx), n); }
+    case "workflow": return await workflow(rest, ctx);
     case undefined: case "-h": case "--help": case "help": ctx.say(SHIP_USAGE); return 0;
     default: ctx.fail(`ship: unknown command "${sub}"\n${SHIP_USAGE}`);
   }
@@ -429,6 +477,51 @@ function start(args, ctx) {
     ? `${P} ship: nothing to wait on. A red check, a review thread, a conflict or a failed release step comes back to this task's worker with what failed; the rest needs no one.`
     : `${P} ship: run \`rollcall ship wait\` in the background and end your turn; it exits when the ship needs you or is done.`);
   return 0;
+}
+
+/**
+ * `rollcall ship workflow <workflow> [--ref <branch>] [-f key=value]...`: a release step that only starts a GitHub
+ * Actions workflow and waits for it, as a command, so no model wakes for it. It starts the workflow (gh workflow run),
+ * finds the run that start made (the link gh prints, else the one new run of that workflow), waits for it to end, and
+ * exits 0 when it succeeded, 1 otherwise, with the run's link and, on a failure, the failing part of its log.
+ */
+async function workflow(args, ctx) {
+  const usage = "ship workflow <workflow file or name> [--ref <branch>] [-f key=value]...";
+  const [file, ...rest] = args;
+  if (!file || file.startsWith("-")) ctx.fail(usage);
+  let ref = null;
+  const fields = [];
+  for (let i = 0; i < rest.length; i++) {
+    const v = rest[i + 1];
+    if (rest[i] === "--ref" && v) { ref = v; i++; }
+    else if (rest[i] === "-f" && v?.includes("=")) { fields.push(v); i++; }
+    else ctx.fail(`ship workflow: unexpected "${rest[i]}"\n  rollcall ${usage}`);
+  }
+  const cwd = process.cwd();
+  const list = () => ghJson(cwd, ["run", "list", "--workflow", file, "--event", "workflow_dispatch", "--limit", "20", "--json", "databaseId", ...(ref ? ["--branch", ref] : [])]);
+  const before = new Set((list() ?? []).map((x) => x.databaseId));
+  const r = gh(cwd, ["workflow", "run", file, ...(ref ? ["--ref", ref] : []), ...fields.flatMap((f) => ["-f", f])]);
+  if (!r.ok) ctx.fail(`ship workflow: gh workflow run ${file} failed: ${store.clip(r.err || r.out, 400)}`);
+  let id = /\/actions\/runs\/(\d+)/.exec(`${r.out}\n${r.err}`)?.[1] ?? null;
+  // An older gh prints no link: the run is the one that was not there before the start (GitHub lists it within seconds).
+  for (const end = Date.now() + 120_000; !id && Date.now() < end; ) {
+    await sleep(Math.min(AFTER_POLL_MS(), 5000));
+    id = (list() ?? []).filter((x) => !before.has(x.databaseId)).map((x) => x.databaseId).sort((a, b) => a - b)[0] ?? null;
+  }
+  if (!id) ctx.fail(`ship workflow: started ${file}, but no new run of it showed up within 2 minutes; look in the Actions tab`);
+  ctx.say(`${P} ship workflow: started ${file}${ref ? ` on ${ref}` : ""}, run ${id}; waiting for it to end`);
+  for (let misses = 0; ;) {
+    const v = ghJson(cwd, ["run", "view", String(id), "--json", "status,conclusion,url"]);
+    if (!v) { if (++misses >= 10) ctx.fail(`ship workflow: could not read run ${id} ten times in a row`); }
+    else if (v.status === "completed") {
+      if (v.conclusion === "success") { ctx.say(`${P} ship workflow: ${file} passed: ${v.url}`); return 0; }
+      ctx.say(`${P} ship workflow: ${file} ended ${v.conclusion || "without a result"}: ${v.url}`);
+      const log = gh(cwd, ["run", "view", String(id), "--log-failed"], { timeout: 120_000 });
+      if (log.ok && log.out.trim()) ctx.say(`${P} the failing part of its log:\n${failingPart(log.out)}`);
+      return 1;
+    } else misses = 0;
+    await sleep(AFTER_POLL_MS());
+  }
 }
 
 async function wait(args, ctx) {

@@ -199,3 +199,57 @@ test("a release step that is a skill wakes the worker for the rest; a failed dep
   assert.equal(last(sb).kind, "after-failed");
   assert.match(last(sb).text, /what the merge started failed: deploy \(https:\/\/ci\/run\/9\)\. No release step ran\./);
 });
+
+test("after the merge, the wait covers the deployments and required checks; a long run beside them is named, not waited on", (t) => {
+  const sb = repo(t, { manifest: { release: { merge: "squash", afterMerge: [{ name: "upload", command: "true" }] } }, ci: [{ name: "test", required: true }] });
+  const a = shipper(sb, "feat", { "src/a.js": "a\n" });
+  assert.equal(a.ship("start", "--land").code, 0);
+  sb.lander();
+  sb.setGh((s) => {
+    s.merged = {
+      checkRuns: [{ name: "test", status: "completed", conclusion: "success", check_suite: { id: 1 } }, { name: "Unit + UI tests", status: "in_progress", conclusion: null, check_suite: { id: 2 } }],
+      deployments: [{ id: 7, environment: "staging", state: "success" }],
+    };
+  });
+  const r = sb.after(1);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(last(sb).kind, "shipped");
+  assert.match(last(sb).text, /2 checks and deploys green \(deployed: staging\); still running, not waited on: Unit \+ UI tests; release steps done: upload\./);
+});
+
+test("a missing required check holds its workflow run; release.waitFor names more to wait for, and only a run it names can time the wait out", (t) => {
+  const sb = repo(t, { manifest: { release: { merge: "squash", waitFor: ["deployments", "required", "Unit*"] } }, ci: [{ name: "test", required: true }, { name: "lint", required: true }] });
+  sb.env.ROLLCALL_SHIP_DEPLOY_MINUTES = "0.01";
+  const a = shipper(sb, "feat", { "src/a.js": "a\n" });
+  assert.equal(a.ship("start", "--land").code, 0);
+  sb.lander();
+  // lint has not started (a job waiting on another): its workflow run (suite 1) is waited on, though build is not required.
+  sb.setGh((s) => { s.merged = { checkRuns: [{ name: "test", status: "completed", conclusion: "success", check_suite: { id: 1 } }, { name: "build", status: "in_progress", check_suite: { id: 1 } }, { name: "Nightly", status: "in_progress", check_suite: { id: 3 } }] }; });
+  assert.equal(sb.after(1).status, 1);
+  assert.equal(last(sb).kind, "after-failed");
+  assert.match(last(sb).text, /what the release waits for \(release\.waitFor\) was still running after \d+m: build\./);
+
+  // A run release.waitFor names by pattern is waited on; Nightly, named by nothing, is not.
+  const b = shipper(sb, "feat-b", { "src/b.js": "b\n" });
+  assert.equal(b.ship("start", "--land").code, 0);
+  sb.lander();
+  sb.setGh((s) => { s.merged = { checkRuns: [{ name: "test", status: "completed", conclusion: "success" }, { name: "lint", status: "completed", conclusion: "success" }, { name: "Unit + UI tests", status: "in_progress" }, { name: "Nightly", status: "in_progress" }] }; });
+  assert.equal(sb.after(2).status, 1);
+  assert.match(last(sb).text, /was still running after \d+m: Unit \+ UI tests\./);
+});
+
+test("ship workflow starts a workflow, finds its run, waits for it, and exits by its result", (t) => {
+  const sb = repo(t);
+  sb.setGh((s) => { s.dispatch = { "build.yml": { conclusion: "success", polls: 2 }, "old.yml": { conclusion: "success", noLink: true }, "red.yml": { conclusion: "failure" } }; s.logs = { 5002: "setup\nError: signing failed\nmore" }; });
+  const ok = sb.run("ship", "workflow", "build.yml", "--ref", "main", "-f", "build=staging", "-f", "ref=abc123");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /started build\.yml on main, run 5000; waiting for it to end[\s\S]*build\.yml passed: https:\/\/github\.com\/t\/repo\/actions\/runs\/5000/);
+  assert.deepEqual(sb.gh().runs[0].fields, ["build=staging", "ref=abc123"]);
+  const old = sb.run("ship", "workflow", "old.yml");
+  assert.equal(old.status, 0, old.stderr);
+  assert.match(old.stdout, /run 5001;[\s\S]*old\.yml passed/, "with no link from gh, the new run is the one that was not there before");
+  const red = sb.run("ship", "workflow", "red.yml");
+  assert.equal(red.status, 1);
+  assert.match(red.stdout, /red\.yml ended failure: \S+\/runs\/5002[\s\S]*the failing part of its log:\nsetup\nError: signing failed/);
+  assert.match(sb.run("ship", "workflow", "build.yml", "--bogus").stderr, /unexpected "--bogus"/);
+});
