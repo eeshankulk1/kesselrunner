@@ -25,6 +25,9 @@ const asst = (min, { model = "claude-opus-5-5", id, ctx = 10_000, out = 100, too
 });
 const user = (min, text, extra = {}) => ({ type: "user", timestamp: at(min), message: { role: "user", content: text }, ...extra });
 
+/** A response with one more tool call, by a known id. */
+const withCall = (rec, block) => ({ ...rec, message: { ...rec.message, content: [...rec.message.content, block] } });
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "usage-report-"));
   const repo = "/Users/someone/code/shop";
@@ -49,7 +52,8 @@ function fixture() {
   writeFileSync(join(proj, "s1", "subagents", "agent-a1.meta.json"), JSON.stringify({ agentType: "general-purpose" }));
   lines(join(proj, "s1", "subagents", "agent-a1.jsonl"), wt, [
     user(72, `[role: shipper] ship it ${SECRET}`),
-    asst(73, { tools: [["Agent", { subagent_type: "code-reviewer" }]] }),
+    withCall(asst(73, { tools: [["Agent", { subagent_type: "code-reviewer" }]] }), { type: "tool_use", id: "tu_check", name: "Bash", input: { command: "npm test" } }),
+    { type: "user", timestamp: at(75), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_check", content: "ok" }] } },
     asst(75, { tools: [["Agent", { subagent_type: "docs-updater" }]] }),
     asst(80, { tools: [["Bash", { command: "git push -u origin feat/x" }]] }),
     asst(85, { tools: [["Bash", { command: "gh run view 1 --log-failed | tail" }]] }),
@@ -58,7 +62,7 @@ function fixture() {
     asst(100, {}),
   ]);
   // A named helper on Sonnet.
-  writeFileSync(join(proj, "s1", "subagents", "agent-a2.meta.json"), JSON.stringify({ agentType: "code-reviewer" }));
+  writeFileSync(join(proj, "s1", "subagents", "agent-a2.meta.json"), JSON.stringify({ agentType: "code-reviewer", parentAgentId: "a1" }));
   lines(join(proj, "s1", "subagents", "agent-a2.jsonl"), wt, [user(73, `review ${SECRET}`), asst(74, { model: "claude-sonnet-5-5", out: 50 })]);
   // A session outside the range.
   lines(join(proj, "old.jsonl"), repo, [user(-20_000, "old"), asst(-20_000, {})]);
@@ -101,6 +105,11 @@ test("the report: spend, dedupe, cost-state output, classes, shapes, ships, qual
   assert.equal(rep.shapes.ships.stages.CI.median, 10);
   assert.equal(rep.shapes.ships.stages["merge queue"].median, 10);
   assert.equal(rep.shapes.ships.stages.release.ships, 0);
+  // Its own work before the first push: 2 minutes of commands, a 1-minute review; no docs helper ran under it.
+  assert.equal(rep.shapes.ships.phases["to first push"].median, 7);
+  assert.equal(rep.shapes.ships.phases.checks.median, 2);
+  assert.equal(rep.shapes.ships.phases.review.median, 1);
+  assert.equal(rep.shapes.ships.phases.docs.ships, 0);
   assert.equal(rep.quality.firstRunCiPass, 0);
   assert.equal(rep.quality.pushesPerShip, 2);
   assert.equal(rep.quality.reviewsPerShip, 1);

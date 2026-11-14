@@ -20,7 +20,7 @@ This is the **ship phase** (global CLAUDE.md "Build phase vs ship phase"). It st
 
 **Waiting.** Everything a ship waits on announces its own end: a spawned agent hands back its report, a background Bash command exits. Start it in the background (long commands with `run_in_background: true`), then end your turn with one line naming what you wait for - no tool call - but only while something you started is still pending. A turn that ends without the Step 6 report is a pause, not the end of the run. Never wait on a timer (a fixed `sleep`, or a loop that sleeps to a deadline without checking anything). Each wake-up re-reads the whole ship, so spend none on narration.
 
-**Stages.** As each stage starts, run `rollcall task stage here "<stage>"` with these words: `checks` (Step 2), `docs` (Step 3). The ship script sets `CI`, `merge queue`, `deploys` and `release` itself. It is one line outside a task too, where it does nothing.
+**Stages.** As each stage starts, run `rollcall task stage here "<stage>"` with these words: `checks` (Step 2), `docs` (Step 3). The ship script sets `CI`, `merge queue`, `deploys` and `release` itself. It is one line outside a task too, where it does nothing. Nothing else needs timing by hand: `rollcall usage report` times each part of a ship from its transcripts (commands, review, docs, tests, UI).
 
 ## Step 0: Hand the ship to a fresh context
 

@@ -100,13 +100,18 @@ export async function scanFile(path, root) {
   const sub = rel.includes("subagents");
   const out = {
     path, project: rel[0], sid: sub ? rel[1] : basename(rel[1] ?? "", ".jsonl"), sub,
-    agentType: null, cls: null, marked: false, cwd: null, entry: null,
+    agentType: null, cls: null, marked: false, cwd: null, entry: null, agentId: null, parentAgentId: null, parentToolUse: null, agentUses: [],
     reqs: [], humans: [], compacts: 0, costRuns: {},
   };
   if (sub) {
-    try { out.agentType = JSON.parse(readFileSync(path.replace(/\.jsonl$/, ".meta.json"), "utf8")).agentType ?? null; } catch {}
+    out.agentId = basename(path, ".jsonl").replace(/^agent-/, "");
+    try {
+      const meta = JSON.parse(readFileSync(path.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+      Object.assign(out, { agentType: meta.agentType ?? null, parentAgentId: meta.parentAgentId ?? null, parentToolUse: meta.toolUseId ?? null });
+    } catch {}
   }
   const byId = new Map();
+  const running = new Map(); // a foreground Bash call's id -> its request, until its result comes back
   let firstPrompt = null;
   const rl = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const line of rl) {
@@ -129,12 +134,16 @@ export async function scanFile(path, root) {
     if (d.type === "system") { if (d.subtype === "compact_boundary") out.compacts++; continue; }
     if (d.type === "user") {
       const m = d.message?.content;
-      if (Array.isArray(m) && m.some((b) => b?.type === "tool_result")) continue;
+      if (Array.isArray(m) && m.some((b) => b?.type === "tool_result")) {
+        // How long each foreground command ran: from its call to its result.
+        for (const b of m) { const r = running.get(b?.tool_use_id); if (r) { r.cmdMs += Math.max(0, ms(d.timestamp) - r.ts); running.delete(b.tool_use_id); } }
+        continue;
+      }
       if (d.isMeta || d.isCompactSummary) continue;
       const kind = d.origin?.kind;
       if (kind === "task-notification" || kind === "peer") continue;
       const text = textOf(m);
-      if (firstPrompt === null) firstPrompt = text;
+      if (firstPrompt === null) { firstPrompt = text; out.start = ms(d.timestamp); }
       if (!sub && !isMachine(text)) out.humans.push({ ts: ms(d.timestamp), corr: isCorrection(text) });
       continue;
     }
@@ -143,7 +152,7 @@ export async function scanFile(path, root) {
     if (!id || !us) continue;
     let r = byId.get(id);
     if (!r) {
-      r = { ts: ms(d.timestamp), model: msg.model ?? "?", effort: d.effort ?? null, inp: 0, w1: 0, w5: 0, cr: 0, out: 0, cats: [], flags: [] };
+      r = { ts: ms(d.timestamp), model: msg.model ?? "?", effort: d.effort ?? null, inp: 0, w1: 0, w5: 0, cr: 0, out: 0, cats: [], flags: [], cmdMs: 0 };
       byId.set(id, r);
       out.reqs.push(r);
     }
@@ -158,6 +167,8 @@ export async function scanFile(path, root) {
     for (const b of msg.content ?? []) {
       if (b?.type !== "tool_use") continue;
       r.cats.push(category(b.name, b.input));
+      if (b.name === "Bash" && !b.input?.run_in_background && b.id) running.set(b.id, r);
+      if ((b.name === "Agent" || b.name === "Task") && b.id) out.agentUses.push(b.id);
       if (b.name === "Bash") for (const f of bashFlags(b.input?.command)) if (!r.flags.includes(f)) r.flags.push(f);
     }
   }
