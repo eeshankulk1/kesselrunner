@@ -64,7 +64,7 @@ The rules for each part, and why: [references/checks.md](references/checks.md).
 1. **Quick checks, always**, run directly: compile / type-check, plus the tests for what changed. A `tier: "fast"` stack with no `ci` field runs in full; one CI runs does not.
 2. **Review (Standard/Deep): one pass.** Commit locally first, then spawn **code-reviewer** in the same message as the docs agent (Step 3). A second review only on a logic-changing fix's delta; Deep adds one read-only reviewer of the risky part.
 3. **Local-only stacks (Standard/Deep)**: `tier: "full"` stacks with no `ci` field that the diff touches, through **test-runner** in local tier. None left: skip it and say why.
-4. **UI verification, a judgment call**: `/frontend-test` or `/ios-sim` when the change warrants eyes on it (a new screen, a visual change, a shared surface); skip with a reason when CI's e2e covers it.
+4. **UI verification, a judgment call**: `/frontend-test` or `/ios-sim` when the change warrants eyes on it (a new screen, a visual change, a shared surface); skip with a reason when CI's e2e covers it. `/ios-sim` skips a look the build phase already took on the same files.
 
 Fix what fails and re-run only what failed. The quick checks are green on the final code before the push. Do not proceed with known failures - report them instead.
 
@@ -92,7 +92,7 @@ gh pr create --title "<short title, <70 chars>" --body "$(cat <<'EOF'
 - Review: {clean | N issues fixed | N issues fixed, fix delta re-reviewed | skipped (simple tier)}
 - Local tests: {quick checks result; local-only stacks result | all full stacks CI-owned}
 - CI: pending (rollcall watches it)
-- UI: {PASS/WARN via /frontend-test or /ios-sim | skipped: <why> | not applicable}
+- UI: {PASS/WARN via /frontend-test or /ios-sim | looked at in the build phase | skipped: <why> | not applicable}
 - Docs: {updated: <files> | none required (gate)}
 
 {one `Docs-skip: <doc> - <reason>` line per waived doc, or nothing}

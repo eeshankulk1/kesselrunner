@@ -144,3 +144,19 @@ export function pickDevice(list, names, want) {
   if (!deviceName) return { error: `none of ${names.join(", ")} on ${runtime.name}` };
   return { runtime, deviceType: supported.get(deviceName), deviceName };
 }
+
+// ------------------------------------------------------------- look records
+// A look that passed records the files it rests on ({ path: git blob, or null
+// for a deleted file}), so a later step of the same change (the ship, a
+// TestFlight build) skips a look whose files have not changed since.
+
+/** The paths in `now` whose content the look did not see: changed since, or not in the look at all. */
+export function unseen(seen, now) {
+  return Object.keys(now).filter((p) => !Object.hasOwn(seen ?? {}, p) || seen[p] !== now[p]);
+}
+
+/** The newest of [{ dir, look }] taken in this checkout, or null. */
+export function newestLook(records, repo) {
+  return records.filter((r) => r.look?.repo === repo && typeof r.look.at === "string" && r.look.files)
+    .reduce((a, b) => (!a || b.look.at > a.look.at ? b : a), null);
+}

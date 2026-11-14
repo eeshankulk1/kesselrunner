@@ -77,7 +77,10 @@ earns a broader pass over the screens that render it.
    the app with taps and typing, and returns a report plus the few
    screenshots worth your eyes. Do not drive the simulator from here and do
    not write a throwaway XCUITest to look at a screen: that loop is a
-   rebuild and a test run per look, in this context.
+   rebuild and a test run per look, in this context. /ios-sim skips the
+   flows a passed look in this checkout already saw on the same files (the
+   build phase's or /pr-create's), so a build of a change already looked at
+   takes no second look.
 2. Phase 1 is this skill's half of the readiness /ios-sim asks for: the
    backend is up and seeded and the app points at it BEFORE the driver is
    spawned. A flow a fixture can show (a launch argument that renders seeded

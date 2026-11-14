@@ -17,15 +17,17 @@
 //   iosim shot --udid U --out FILE.png [--width W] screenshot, plus FILE.small.png (default: 1 px per screen point)
 //   iosim tap|type|swipe|batch|button|key|key-combo|gesture|touch|drag|... --udid U   passed to AXe as is
 //   iosim help <axe command>                       AXe's own help for that command
+//   iosim look record --dir D [--note TEXT] FILE...  after a look passed: the files it rests on, by content, in D/look.json
+//   iosim look check FILE...                       exit 0 when the newest look in this checkout saw these files as they are now
 //
 // Exit codes: 0 done; 1 the thing asked for did not happen (wait timed out,
 // AXe failed); 3 usage, or AXe / the simulator is not there.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { compact, devicesOf, find, flatten, isOurSim, pickDevice, simName, staleSims } from "./core.mjs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
+import { compact, devicesOf, find, flatten, isOurSim, newestLook, pickDevice, simName, staleSims, unseen } from "./core.mjs";
 
 // The AXe release this was written against. Bump both together.
 const AXE_VERSION = "1.8.0";
@@ -201,12 +203,49 @@ const commands = {
     try { run("sips", ["--resampleWidth", String(width), full, "--out", small]); } catch (e) { die(`could not downscale ${full}: ${e.message}`, 1); }
     console.log(`look at: ${small}${points ? " (1 px = 1 pt: a position in it is the x,y to tap)" : ""}\nfull size: ${full}`);
   },
+
+  look(argv) {
+    const [verb, ...rest] = argv;
+    const { flags, rest: given } = parseFlags(rest, { "--dir": String, "--note": String });
+    if (!["record", "check"].includes(verb) || !given.length || (verb === "record" && !flags.dir)) {
+      die("usage: iosim look record --dir D [--note TEXT] FILE... | iosim look check FILE...  (FILE: the change's app files, from the checkout)");
+    }
+    const repo = realpathSync(run("git", ["rev-parse", "--show-toplevel"]).trim());
+    // Content by git blob (what `git hash-object` prints), so an edit and its undo read the same.
+    const paths = [...new Set(given.map((f) => relative(repo, resolve(f))))];
+    const present = paths.filter((p) => existsSync(join(repo, p)));
+    const blobs = present.length ? run("git", ["hash-object", "--", ...present], { cwd: repo }).trim().split("\n") : [];
+    const now = Object.fromEntries(paths.map((p) => [p, present.includes(p) ? blobs[present.indexOf(p)] : null]));
+    if (verb === "record") {
+      const file = join(resolve(flags.dir), "look.json");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `${JSON.stringify({ repo, at: new Date().toISOString(), note: flags.note ?? "", files: now }, null, 2)}\n`);
+      console.log(`recorded ${paths.length} file${paths.length === 1 ? "" : "s"} in ${file}`);
+      return;
+    }
+    // Where /ios-sim puts its artifact dirs: the checkout's ignored .claude/artifacts, else $TMPDIR.
+    const roots = [join(repo, ".claude", "artifacts", "ios-sim"), join(process.env.TMPDIR || tmpdir(), "ios-sim")];
+    const records = roots.flatMap((root) => {
+      let dirs = [];
+      try { dirs = readdirSync(root); } catch { return []; }
+      return dirs.flatMap((d) => {
+        try { return [{ dir: join(root, d), look: JSON.parse(readFileSync(join(root, d, "look.json"), "utf8")) }]; } catch { return []; }
+      });
+    });
+    const last = newestLook(records, repo);
+    if (!last) die(`no look recorded in ${repo}`, 1);
+    console.log(`look: ${last.dir} (${last.look.at})${last.look.note ? ` - ${last.look.note}` : ""}`);
+    const changed = unseen(last.look.files, now);
+    if (!changed.length) { console.log(`unchanged since that look: ${paths.length} file${paths.length === 1 ? "" : "s"}`); return; }
+    console.log(changed.map((p) => `not seen as it is now: ${p}`).join("\n"));
+    process.exit(1);
+  },
 };
 
 const [command, ...argv] = process.argv.slice(2);
 // `iosim help tap` is AXe's help for tap; `iosim help` is this file's header.
 if (!command || command === "-h" || command === "--help" || (command === "help" && !argv.length)) {
-  console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 22).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 24).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   process.exit(command ? 0 : 3);
 }
 if (Object.hasOwn(commands, command)) {

@@ -19,7 +19,7 @@ Default commands when nothing is documented: `pytest tests/ -x --tb=short -q` (v
 
 Stacks carry `tier: "fast" | "full"` (schema in kesselrunner docs/test-manifest.md). Untagged stacks are `fast` unless they are obviously slow UI suites - runner `xcuitest`/`playwright`, or a name containing `UITests`, `e2e`, `screenshot` - which count as `full`. Run:
 
-- **fast** (default): only fast stacks. Seconds to a couple of minutes.
+- **fast** (default): only fast stacks. Seconds to a couple of minutes. Never a UI suite, and never a manifest `ci.prePush` command (it can run an app's UI suites, and it is the ship's one run of them), even when the change touches its paths: for an iOS change that means the unit-test stack only.
 - **full**: every stack, including simulator/browser UI suites and screenshot captures, in the appearances the manifest notes require. Only when the caller says so (the user saying "run everything" / "full suite" does).
 - **local** (what `/pr-create` asks for): every stack CI does NOT own - skip every stack with a `ci` field (`"pr"` runs on the PR's checks, `"nightly"` on the schedule; neither is re-run here), run the rest that the change touches. A project with no `ci` fields has no CI, so `local` = `full`.
 
