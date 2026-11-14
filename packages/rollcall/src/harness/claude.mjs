@@ -14,7 +14,8 @@ import { callSync, hostedHome } from "../host/client.mjs";
 import { launchLines } from "../checkout.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
-import { TASK_ENV, capFlag, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
+import { TASK_ENV, capFlag, nameOf, noBrowser, statusLine, wantsBrowser } from "../supervisor.mjs";
+import { writeClaudeConfig } from "../worker-mcp.mjs";
 import * as tmux from "../tmux.mjs";
 import { effortOk } from "./efforts.mjs";
 
@@ -156,11 +157,15 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const files = store.filesDir(t.home, t.id);
   if (browser) mkdirSync(files, { recursive: true });
   const addDir = browser ? ` --add-dir ${q(files)}` : "";
+  // Extra MCP servers (worker-mcp.mjs), written at each launch; --mcp-config takes every word up to the next flag, so
+  // the session's flag follows it.
+  const mcpFile = writeClaudeConfig(join(dir, "mcp.json"), { ref: `${t.home}:${t.id}`, name: nameOf(t.id) });
+  const mcp = mcpFile ? ` --mcp-config ${q(mcpFile)}` : "";
   const lines = [
     ...preamble(t, { browser, files }),
     resume
-      ? `${q(bin())} --resume ${q(session)}${addDir} --settings ${q(settings)}${permission}${first}`
-      : `${q(bin())} --session-id ${q(session)}${addDir} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
+      ? `${q(bin())}${mcp} --resume ${q(session)}${addDir} --settings ${q(settings)}${permission}${first}`
+      : `${q(bin())}${mcp} --session-id ${q(session)}${addDir} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
   ];
   writeFileSync(script, `${lines.join("\n")}\n`);
   // The agent host reads this; its environment is the script's lines but its last (supervisor.mjs launch).

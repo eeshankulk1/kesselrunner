@@ -51,9 +51,10 @@ export async function terminalTurnRunning({ cfg, thread, since = 0, envFile = nu
 
 /**
  * Starts the session; resolves to the runtime host/server.mjs drives (rejects when the thread does not start). A
- * chat's own session passes `hook` (host/chat-hooks.mjs) for what a task worker's hooks do.
+ * chat's own session passes `hook` (host/chat-hooks.mjs) for what a task worker's hooks do; `mcp` is the thread's extra
+ * MCP servers as config keys (worker-mcp.mjs codexConfig).
  */
-export async function startCodexAgent({ h, id, cfg, envFile = null, env = process.env, hook = null, on, log }) {
+export async function startCodexAgent({ h, id, cfg, mcp = null, envFile = null, env = process.env, hook = null, on, log }) {
   // A unix socket path has room for ~100 bytes: the system temp folder, not the store.
   const sock = join(tmpdir(), `rollcall-codex-${process.pid}-${randomBytes(4).toString("hex")}.sock`);
   const pre = `${String(cfg.session).slice(0, 8)}:`;
@@ -79,7 +80,7 @@ export async function startCodexAgent({ h, id, cfg, envFile = null, env = proces
       default:
     }
   };
-  const core = await startCodex({ h, id, cfg, sock, envFile, env, hosted: true, hook, on: onEvent, log });
+  const core = await startCodex({ h, id, cfg, mcp, sock, envFile, env, hosted: true, hook, on: onEvent, log });
   return {
     harness: "codex",
     pid: core.pid,

@@ -24,7 +24,8 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
-import { capFlag, markCap, workerHook } from "../supervisor.mjs";
+import { capFlag, markCap, nameOf, workerHook } from "../supervisor.mjs";
+import { codexConfig, serversFor } from "../worker-mcp.mjs";
 import { launchFile, stateFile } from "../harness/codex.mjs";
 import { recordCodex } from "../usage.mjs";
 import { connect } from "./rpc.mjs";
@@ -206,6 +207,8 @@ export async function codexWorker([h, id]) {
     config: {
       ...(cfg.effort ? { model_reasoning_effort: cfg.effort } : {}),
       ...(cfg.sandbox === "workspace-write" ? { sandbox_workspace_write: { network_access: true, writable_roots: cfg.writableRoots ?? [] } } : {}),
+      // Extra MCP servers (worker-mcp.mjs), read at each start and resume.
+      ...codexConfig(serversFor({ ref: `${h}:${id}`, name: nameOf(id), harness: "codex" })),
     },
   };
   try {

@@ -139,6 +139,17 @@ test("away mode's answers and records are the owner's: an agent's shell never an
   assert.equal(a.bashPre("grep -n grants.json src/away.mjs").stdout, "", "reading rollcall's source passes");
 });
 
+test("the MCP servers every worker starts are the owner's: an agent's shell and edit tools leave their list alone", (t) => {
+  const sb = sandbox(t);
+  const a = sb.session();
+  a.start();
+  for (const cmd of [`echo '{}' > ~/.rollcall/_machine/worker-mcp.json`, `cat "$ROLLCALL_HOME/_machine/worker-mcp.json"`]) {
+    assert.match(reason(a.bashPre(cmd)), /MCP servers every worker starts/, cmd);
+  }
+  assert.equal(a.bashPre("node --test test/worker-mcp.test.mjs").stdout, "", "its tests and source pass");
+  for (const tool of ["Write", "Edit"]) assert.match(reason(a.pre(join(sb.home, "_machine", "worker-mcp.json"), tool)), /MCP servers every worker starts/, tool);
+});
+
 test("the guard follows the command to its checkout, and honours allow-shared and ROLLCALL_DISABLE", (t) => {
   const sb = sandbox(t);
   const wt = sb.worktree("mine");

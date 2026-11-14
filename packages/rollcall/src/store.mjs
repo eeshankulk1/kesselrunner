@@ -5,6 +5,7 @@
 //   _machine/trouble.json          what stops work on this Mac or account now, one record per cause (trouble.mjs)
 //   _machine/clean-list.{json,txt} what `rollcall clean --yes` would delete
 //   _machine/decisions.json        what waits on the owner, one list for every supervisor
+//   _machine/worker-mcp.json       extra MCP servers every worker gets at each start (worker-mcp.mjs)
 //   _snapshots/<hash>.git/         per-turn snapshots of one linked worktree (snapshot.mjs): a private bare repo
 //                                  that borrows the repo's objects, so its refs are never pushed
 //   <repo-key>/events.jsonl        append-only: claim, done, msg, wait
