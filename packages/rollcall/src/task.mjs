@@ -14,18 +14,16 @@ import { addComment, commentsCommand, commentsLine, readComments } from "./comme
 import { defaultBranch, fetchSync, gitSync, locate, mainCheckout, mainSha, repoKey } from "./git.mjs";
 import { BIN, P, ago, cli, short } from "./session.mjs";
 import { sameProcess } from "./proc.mjs";
-import { callSync } from "./host/client.mjs";
-import { isChat } from "./host/chat.mjs";
 import { STATES, allowed, isOpen, transition } from "./state.mjs";
 import * as store from "./store.mjs";
 import { WAITABLE, isUsage, openBlocker, openBlockers, waitLabel } from "./trouble.mjs";
-import { HARNESSES, NAMES, defaultHarness, harnessName, harnessOf } from "./harness/index.mjs";
+import { HARNESSES, NAMES, defaultHarness, harnessName, harnessOf, workerAdapter } from "./harness/index.mjs";
 import { usageLine, usageOf } from "./usage.mjs";
 import { runtimeLines, runtimeOf, spotlightOf } from "./checkout.mjs";
 // The code that changes a checkout's runtime (runtime.mjs, archive.mjs, runtime-cli.mjs) loads only in the commands that
 // use it: every hook imports this module, and each module it loads is time on every tool call.
 const runtime = () => import("./runtime.mjs");
-import { START, deliverWords, clearCap, closing, effortOk, effortsOf, ensureWatcher, homeOf, holderOf, idOf, label, modelOk, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
+import { START, deliverWords, clearCap, closing, effortOk, effortsOf, ensureWatcher, homeOf, holderOf, idOf, label, nameOf, startingMs, stopWorker, taskEnv, tell, unpark, workerState } from "./supervisor.mjs";
 
 const TYPES = ["feat", "fix", "refactor", "test", "docs"];
 /** build: a change that ships; discuss: research and a recommendation the owner talks through (start.mjs briefs each its own way). */
@@ -72,9 +70,7 @@ export const USAGE = `  rollcall task new "<title>" [--repo <dir>] [--words "<te
                                          --model and --effort: its workers run on these instead of the harness's own)
   rollcall task list [--all] [--json]    this supervisor's open tasks (--all: finished ones too)
   rollcall task show <id|here> [--json]  one task: the owner's words, notes, sessions, output
-  rollcall task chat <id> [--before <cursor>] [--limit <n>] [--json]   a page of the worker's chat, newest last
   rollcall task interrupt <id>           the worker's turn stops, as the owner's Esc would
-  rollcall task wait <id> [--timeout <minutes>]   until a hosted worker's turn ends or it asks something
   rollcall task set <id|here> [--state working|needs-you|pr-open|queued|landed|closed] [--question "<q>"]
                     [--pr <url>] [--title "<t>"] [--kind build|discuss]
                                          a worker's report; needs-you reaches its supervisor, the rest its owner
@@ -359,11 +355,6 @@ async function create(args, ctx) {
     const top = locate(worktree)?.top ?? worktree;
     const baseSha = gitSync(top, ["rev-parse", "HEAD"]).stdout?.trim() || null;
     Object.assign(t, update(t, ctx, (x) => { x.worktree = top; x.baseSha = baseSha; }));
-  }
-  // A task a chat started shows in that chat as a card (host/chat.mjs taskItem): the host appends it to its history.
-  if (isChat(h)) {
-    const r = callSync("chat-task", { ref: h, task: t.id, title: t.title }, { timeoutMs: 15_000 });
-    if (!r.ok && !json) ctx.say(`${P} the chat's card for ${t.id} did not go in: ${r.error?.message ?? "no answer"}`);
   }
   // A new worktree runs on its own before its worker's first turn: its ports, then its files and setup in the background.
   const fresh = !own && t.branch && existsSync(t.worktree);
@@ -1187,12 +1178,18 @@ async function spotlight(args, ctx) {
   return 0;
 }
 
+/** `task interrupt <id>`: the worker's turn stops, as the owner's Esc would. */
+function interruptCmd(args, ctx) {
+  notWorker("interrupt", ctx);
+  const t = resolve(args.shift(), ctx);
+  mayWrite(t, ctx.whoAmI(), ctx);
+  ctx.say(workerAdapter(t).interrupt(t) ? `${label(t)}: its turn stopped` : `${label(t)}: nothing to stop (no turn runs)`);
+  return 0;
+}
+
 const COMMANDS = {
   new: create, list, show, set, close, move, tell: tellCmd, relay, output, handoff, where, decisions, stage, "wait-for": waitFor,
-  // The supervisor's tools on a worker (task-agent.mjs): through the agent host for a hosted one.
-  chat: async (a, c) => (await import("./task-agent.mjs")).chatCmd(a, c, resolve),
-  interrupt: async (a, c) => { notWorker("interrupt", c); return (await import("./task-agent.mjs")).interruptCmd(a, c, (id, cx) => { const t = resolve(id, cx); mayWrite(t, cx.whoAmI(), cx); return t; }); },
-  wait: async (a, c) => { notWorker("wait", c); return (await import("./task-agent.mjs")).waitCmd(a, c, resolve); },
+  interrupt: interruptCmd,
   comment: addComment, comments: commentsCommand,
   setup: inTask("setup"), run: inTask("run"), ports: inTask("ports"), archive, restore, spotlight,
   words: (a, c) => addText(a, c, "words"),
@@ -1350,7 +1347,7 @@ export function mergeSeen(t0, { why, head = null }, w = workerState(t0), now = D
 // ---------------------------------------------------------------- the owner's words
 
 /** How the owner's words reached the task: through the supervisor (@tN, its picker, a relay), or typed in the worker's own window. */
-const VIA = { supervisor: "through the supervisor", worker: "in the worker's own window", app: "from a front end" };
+const VIA = { supervisor: "through the supervisor", worker: "in the worker's own window" };
 
 /**
  * Records the owner's words on `t` (call under the task lock). Every way of talking to a worker comes
@@ -1374,15 +1371,13 @@ export function ownerSaid(t, text, via, now = Date.now()) {
 }
 
 /**
- * Records the owner's words on a task, under its lock. `mark(t)` also runs under it (a pick notes which question
- * it answered, answer.mjs). Returns the question they closed, or null.
+ * Records the owner's words on a task, under its lock. Returns the question they closed, or null.
  */
-export function recordWords(t0, text, via, mark = null) {
+export function recordWords(t0, text, via) {
   const r = store.withTasksLock(t0.home, () => {
     const t = store.readTask(t0.home, t0.id);
     if (!t) return null;
     const closed = ownerSaid(t, text, via);
-    mark?.(t);
     store.writeTask(t);
     return closed;
   });
@@ -1410,8 +1405,8 @@ export function ownerTypedInWorker(t0, session, text, at) {
  * since it last heard. It never saw those words, and without this it would ask again about what they settled.
  */
 export function ownerNews(h, now = Date.now()) {
-  // Words typed in the worker's window, or sent from a front end (the cockpit app): the supervisor saw neither.
-  const fresh = (t) => t.words.filter((w) => (w.via === "worker" || w.via === "app") && w.at > (t.toldAt ?? 0));
+  // Words typed in the worker's window: the supervisor did not see them.
+  const fresh = (t) => t.words.filter((w) => w.via === "worker" && w.at > (t.toldAt ?? 0));
   if (!store.listTasks(h).some((t) => fresh(t).length)) return [];
   const r = store.withTasksLock(h, () => {
     const lines = [];
@@ -1423,7 +1418,7 @@ export function ownerNews(h, now = Date.now()) {
       store.writeTask(t);
       const closed = said.filter((w) => w.closed).map((w) => `"${w.closed}"`);
       lines.push(
-        `${P} ${label(t)}: the owner talked to its worker ${last.via === "app" ? `from ${last.client ?? "a front end"}` : "in its own window"}, ${said.length} message${said.length === 1 ? "" : "s"}, the last ${ago(last.at, now)}: "${store.clip(store.oneLine(last.text), 160)}". ` +
+        `${P} ${label(t)}: the owner talked to its worker in its own window, ${said.length} message${said.length === 1 ? "" : "s"}, the last ${ago(last.at, now)}: "${store.clip(store.oneLine(last.text), 160)}". ` +
           `Their words are on its record (\`${cli()} task show ${t.id}\`) and count like any they send through you.` +
           (closed.length ? ` They closed its open question (${closed.join("; ")}); ${t.id} asks again if it still needs them.` : "") +
           ` Ask the owner nothing about ${t.id} that came before these words.`,

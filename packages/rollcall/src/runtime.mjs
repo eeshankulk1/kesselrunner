@@ -54,7 +54,7 @@ const free=async(b)=>{for(let p=b;p<b+size;p++){if(!(await tryOn(p))||!(await tr
 export function portsFor(path, { allocate = false } = {}) {
   const p = real(path);
   const shape = (b) => (b ? { base: b.base, size: b.size, last: b.base + b.size - 1 } : null);
-  // Reading takes no lock: front ends ask for every task's ports on each refresh, and a write is one atomic rename.
+  // Reading takes no lock: a write is one atomic rename.
   const own = readBlocks().find((b) => b.path === p);
   if (own || !allocate) return shape(own);
   const { min, max, size } = portRange();
@@ -329,6 +329,6 @@ export function snapshot(top, message = "rollcall snapshot", { unless = null } =
 
 export const writeSpotlight = (main, v) => (v ? writeJson(spotlightPath(main), v) : rmSync(spotlightPath(main), { force: true }));
 
-// ---------------------------------------------------------------- a task's runtime, for task show and front ends
+// ---------------------------------------------------------------- a task's runtime, for task show
 
 

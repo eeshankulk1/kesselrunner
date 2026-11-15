@@ -33,8 +33,6 @@ import { KINDS, closeBlocker, diskRunEnded, notify, lines as troubleLines } from
 import { USAGE as TASK_USAGE, mergeHold, mergeSeen, skillStamp, taskAt, taskCommand, visibleTasks } from "./task.mjs";
 import { pickPictures } from "./pictures.mjs";
 import * as tmux from "./tmux.mjs";
-import { hostedHome } from "./host/client.mjs";
-import { isChat, readChat } from "./host/chat.mjs";
 
 const USAGE = `rollcall - awareness for parallel agent sessions on one machine
 
@@ -87,12 +85,6 @@ ${RUNTIME_USAGE}
   rollcall inbox                         in a task's worker: print the supervisor's unread messages
   rollcall attach <task> [--print]       show the task's worker (by name or id: luke, t3): its tab, inside
                                          falcon; else a new terminal tab on it (--print: the command only)
-  rollcall api version | snapshot | stream | do <action> <json> | attach <home>[:<task>]
-                                         the front-end interface, for apps over rollcall (JSON; see API.md)
-  rollcall chat move check|pack|unpack|finish|resume|undo|discard --json '<payload>'
-                                         move a chat between this machine and another (API.md "Moving a chat")
-  rollcall chat seed pack|unpack --json '<payload>'
-                                         a new chat elsewhere from a folder's state (API.md "Seeding a chat")
   rollcall usage [--json] [--refresh]    each plan's room: Claude's five-hour and weekly limits, Codex's limits
   rollcall usage report [<range>] [--save <name>] [--json]
                                          where Claude Code spend went: by model, lane, agent, project; context,
@@ -141,10 +133,6 @@ export async function main(argv) {
       case "_pick-pictures": return await pickPictures(rest);
       case "codex-worker": return await (await import("./codex/worker.mjs")).codexWorker(rest);
       case "_codex-send": return await (await import("./codex/send.mjs")).codexSend(rest);
-      case "_claude-send": return await (await import("./claude/send.mjs")).claudeSend(rest);
-      case "host": return await (await import("./host/server.mjs")).hostCommand(rest);
-      case "open": return await (await import("./host/client.mjs")).openCommand(rest);
-      case "_host-call": return await (await import("./host/client.mjs")).hostCall(rest);
       case "usage": return await usage(rest);
       case "park": return parkCommand(rest);
       case "back": return back(rest);
@@ -155,9 +143,6 @@ export async function main(argv) {
       case "supervise": return supervise(rest);
       case "inbox": return inbox(rest);
       case "attach": return attach(rest);
-      // The front-end interface (api.mjs), loaded only when asked for.
-      case "api": return await (await import("./api-cli.mjs")).apiCommand(rest, { say, whoAmI });
-      case "chat": return await (await import("./api-cli.mjs")).chatCommand(rest, { say, whoAmI });
       case undefined: case "help": case "-h": case "--help": say(USAGE); return 0;
       default: return usageError(`unknown command "${cmd}"`);
     }
@@ -562,8 +547,6 @@ function supervise(args) {
     return 0;
   }
   const h = name ?? homeOf(g.id) ?? pickName();
-  // A cockpit chat holds its own home (host/chat.mjs): no supervisor takes it.
-  if (isChat(h)) fail(`${h} is a chat in cockpit, not a supervisor: open it there, or pick another name`);
   if (!store.HOME_NAME.test(h)) fail(`a supervisor name is lowercase letters, digits and -, starting with a letter (like alpha): "${h}"`);
   const took = takeHome(g, h);
   if (!took.ok) {
@@ -572,22 +555,17 @@ function supervise(args) {
   }
   store.writeGlobal({ ...g, supervisor: { home: h, at: g.supervisor?.home === h ? g.supervisor.at : Date.now(), skill: skillStamp() ?? undefined } });
   ensureWatcher(h);
-  if (hostedHome(h)) {
-    // A crew cockpit made: it and its workers run in the agent host, and the owner follows them in cockpit's chat.
-    say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; it and its workers run in the agent host (no tmux windows), and the owner follows them in cockpit. Drive workers with start.mjs, task tell, task chat, task wait and task interrupt.`);
-  } else {
-    say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; its workers run in tmux (session ${tmux.sessionName(h)}), its chips in the status line.`);
-    if (!tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
-    else if (tmux.inside() && tmux.windowOf(h, h)) say(`  Tabs: each task gets a tab in the bar at the bottom of this terminal. The owner clicks one to switch to that worker and clicks ${h} to come back; /attach t3 switches too.`);
-    else say(`  Tabs: this supervisor runs outside falcon, so /attach t3 opens a terminal tab per task, and news reaches it with the owner's next line, since nothing can type into this terminal. For tabs in one terminal, the owner quits this session (/exit) and runs \`falcon resume ${h}\` in a terminal tab.`);
-  }
+  say(`rollcall: this session (${short(g.id)}) is supervisor ${h}: no edits inside git checkouts; its workers run in tmux (session ${tmux.sessionName(h)}), its chips in the status line.`);
+  if (!tmux.available()) say("  tmux is not installed, so no worker can start: the owner runs `brew install tmux` once.");
+  else if (tmux.inside() && tmux.windowOf(h, h)) say(`  Tabs: each task gets a tab in the bar at the bottom of this terminal. The owner clicks one to switch to that worker and clicks ${h} to come back; /attach t3 switches too.`);
+  else say(`  Tabs: this supervisor runs outside falcon, so /attach t3 opens a terminal tab per task, and news reaches it with the owner's next line, since nothing can type into this terminal. For tabs in one terminal, the owner quits this session (/exit) and runs \`falcon resume ${h}\` in a terminal tab.`);
   const open = store.listTasks(h).filter(isOpen);
   const legacy = open.filter((t) => workerState(t)?.legacy);
   say(open.length ? `  ${open.length} open task${open.length === 1 ? "" : "s"}: rollcall task list` : "  no open tasks");
   if (legacy.length) say(`  ${legacy.map((t) => t.id).join(", ")} still ${legacy.length === 1 ? "has a v2 worker" : "have v2 workers"} (claude --bg): \`start.mjs <id> --resume "<why>"\` moves one into tmux with its context, when there is work for it.`);
   // Other supervisors running, and those with open work, so a list split across tabs is not lost.
   const count = (n, what) => `${n} ${what}${n === 1 ? "" : "s"}`;
-  const others = store.listHomes().filter((x) => x !== h && !isChat(x))
+  const others = store.listHomes().filter((x) => x !== h)
     .map((x) => ({ x, running: !!holderOf(x), open: store.listTasks(x).filter(isOpen).length }))
     .filter((o) => o.running || o.open);
   if (others.length) {
@@ -656,16 +634,6 @@ function attach(args) {
 
 // ---------------------------------------------------------------- gc
 
-/** gc's `chat(path)`: why a chat keeps its worktree (it is not archived), else null; an archived one's goes as any. */
-function chatKeeps() {
-  const open = new Map();
-  for (const h of store.listHomes()) {
-    if (!isChat(h)) continue;
-    const c = readChat(h);
-    if (c?.worktree && !c.archivedAt) open.set(realOf(c.worktree), `chat ${h} is open`);
-  }
-  return (path) => open.get(realOf(path)) ?? null;
-}
 const realOf = (p) => { try { return realpathSync(p); } catch { return p; } };
 
 /** What keeps a repo's worktrees for gc: `occupied(path)` (a session whose process still runs, however idle) and `task(path)`. */
@@ -684,7 +652,6 @@ function gcContext(key, recs = store.listRecords(key)) {
 
 /** Every repo's worktrees whose work never landed and that no one touched for two weeks (gc.mjs unlandedWorktrees). */
 function unlandedEverywhere() {
-  const chat = chatKeeps();
   // A repo can sit under two keys (its origin changed): each checkout is looked at once.
   const seen = new Set();
   return store.listRepoKeys().flatMap((key) => {
@@ -692,7 +659,7 @@ function unlandedEverywhere() {
     const main = recs.map((r) => r.main).find((m) => m && existsSync(m));
     if (!main || seen.has(realOf(main))) return [];
     seen.add(realOf(main));
-    return unlandedWorktrees(main, { ...gcContext(key, recs), chat });
+    return unlandedWorktrees(main, gcContext(key, recs));
   });
 }
 
@@ -722,7 +689,7 @@ async function gc(args) {
     let res;
     let refs = 0;
     try {
-      res = gcRepo(main, { dryRun, occupied, task, chat: chatKeeps(), runtime: await gcRuntime() });
+      res = gcRepo(main, { dryRun, occupied, task, runtime: await gcRuntime() });
       if (!dryRun && store.claimRefsSlot(key)) refs = pruneRefs(main, { queued: Object.keys(store.readQueue(key).entries) });
     } finally { release(); }
     const line = summary(name, res, { dryRun });

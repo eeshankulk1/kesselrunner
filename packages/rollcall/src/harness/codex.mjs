@@ -9,9 +9,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import * as live from "../claude/live.mjs";
 import { received } from "../delivery.mjs";
-import { callSync, hostedHome } from "../host/client.mjs";
 import { pidAlive } from "../proc.mjs";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
@@ -57,22 +55,10 @@ export const models = { ok: (m) => typeof m === "string" && OWN.test(m), map: (m
  * acceptEdits and the default ask the owner. Network is on in the workspace sandbox: a worker pushes and opens PRs.
  */
 export function policyFor(mode) {
-  // A chat's own pick in cockpit (host/chat.mjs CODEX_MODES): Codex's Read Only preset.
-  if (mode === "read-only") return { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "read-only" };
   if (mode === "bypassPermissions") return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" };
   if (mode === "dontAsk") return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "workspace-write" };
   if (mode === "auto") return { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandbox: "workspace-write" };
   return { approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" };
-}
-
-/**
- * The sandbox a turn runs in, as turn/start's `sandboxPolicy` takes it (thread/start takes the plain `sandbox` mode):
- * for a mode changed mid-chat, from the next turn on.
- */
-export function sandboxPolicyOf({ sandbox, writableRoots = [] } = {}) {
-  if (sandbox === "danger-full-access") return { type: "dangerFullAccess" };
-  if (sandbox === "read-only") return { type: "readOnly", networkAccess: false };
-  return { type: "workspaceWrite", writableRoots, networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
 }
 
 /** The git common dir of `dir` (a worktree's metadata lives in its main checkout's .git), or null. */
@@ -86,8 +72,7 @@ function gitCommonDir(dir) {
  * own store (its `rollcall task` commands), the task's files folder (screenshots), and ROLLCALL_CODEX_ADD_DIRS.
  */
 export function writableRoots(t, env = process.env) {
-  // A chat (no task id) has no task files folder: its own worktree, the git dir and the store are enough.
-  const dirs = [gitCommonDir(t.worktree), store.home(), t.id ? store.filesDir(t.home, t.id) : null, join(homedir(), ".cache"), ...(env.ROLLCALL_CODEX_ADD_DIRS ?? "").split(":")];
+  const dirs = [gitCommonDir(t.worktree), store.home(), store.filesDir(t.home, t.id), join(homedir(), ".cache"), ...(env.ROLLCALL_CODEX_ADD_DIRS ?? "").split(":")];
   return [...new Set(dirs.filter((d) => d && existsSync(d)))];
 }
 
@@ -99,12 +84,10 @@ export function modelFor({ model = null, effort = null } = {}, env = process.env
   };
 }
 
-/** The worker's launch file: what codex/worker.mjs reads to start or resume it. A chat's own (no task id) is in its home's folder. */
-export const launchFile = (h, id) => join(store.workerDir(h, id ?? h), "codex-launch.json");
+/** The worker's launch file: what codex/worker.mjs reads to start or resume it. */
+export const launchFile = (h, id) => join(store.workerDir(h, id), "codex-launch.json");
 /** The running worker's own record: { pid, sock, session, thread, turn (the turn running now, or null), at }. */
-export const stateFile = (h, id) => join(store.workerDir(h, id ?? h), "codex.json");
-/** The chat's items for rollcall session `session` (codex/items.mjs), journaled by a hosted Codex agent. */
-export const journalFile = (h, id, session) => join(store.workerDir(h, id ?? h), `codex-${String(session).replace(/[^\w-]/g, "")}.jsonl`);
+export const stateFile = (h, id) => join(store.workerDir(h, id), "codex.json");
 export function workerRecord(h, id) {
   try { return JSON.parse(readFileSync(stateFile(h, id), "utf8")); } catch { return null; }
 }
@@ -152,17 +135,6 @@ function send(t, args, input) {
  * owner's half-written words in the UI stay theirs. `before` is for keystrokes; there are none here.
  */
 export function type(t, text) {
-  // A hosted worker (a hosted supervisor's task) takes the words through the host: files the owner attached go in,
-  // images as images.
-  if (hostedHome(t.home)) {
-    const { body, attachments } = live.attachmentsIn(String(text));
-    const r = live.record(t.home, t.id)
-      ? live.send(t.home, t.id, { op: "say", text: body, attachments, from: "rollcall" })
-      : (({ ok, how, error }) => ({ ok, how, err: error?.message }))(callSync("say", { ref: `${t.home}:${t.id}`, text: body, attachments, from: "rollcall" }));
-    if (!r.ok) return { ok: false, err: r.err ?? "the agent host refused" };
-    received(t, String(text));
-    return { ok: true, how: r.how };
-  }
   const r = send(t, ["say"], String(text));
   // The server took it into the thread: that is the receipt (a steer adds no prompt event of its own to wait for).
   if (r.ok) received(t, String(text));
@@ -170,7 +142,7 @@ export function type(t, text) {
 }
 
 /** Stops the worker's running turn (turn/interrupt). */
-export const interrupt = (t) => (hostedHome(t.home) ? callSync("interrupt", { ref: `${t.home}:${t.id}` }).interrupted === true : send(t, ["interrupt"]).ok);
+export const interrupt = (t) => send(t, ["interrupt"]).ok;
 
 /** Words go through the protocol, never into the UI's input box: the worker takes them once its thread runs. */
 export function takesTyping(t) {

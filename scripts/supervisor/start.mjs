@@ -27,8 +27,6 @@ import { fileURLToPath } from "node:url";
 const ROLLCALL = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "rollcall", "bin", "rollcall.mjs");
 const src = (m) => import(join(dirname(ROLLCALL), "..", "src", m));
 const [{ HANDOFF, HANDOFF_HOLDS, closeAfterMs, freshUndo, launch, nameOf, stopWorker, workerState }, { isOpen }, store, tmux, { adapter, harnessOf, workerAdapter }] = await Promise.all([src("supervisor.mjs"), src("state.mjs"), src("store.mjs"), src("tmux.mjs"), src("harness/index.mjs")]);
-const { hostedHome } = await src("host/client.mjs");
-const [{ clampEffort, effortsFor }, { models: codexModels }] = await Promise.all([src("harness/efforts.mjs"), src("harness/codex.mjs")]);
 
 const run = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, ...opts });
 const rollcall = (argv) => run(process.execPath, [ROLLCALL, ...argv]);
@@ -44,8 +42,7 @@ function rollcallCommand() {
 /**
  * The model and effort a worker runs on: its task's own (`task new --model/--effort`), else the harness's
  * (kesselrunner's core settings, then the owner's overlay, as `kesselrunner sync` merges them), never what `/model`
- * last saved to the owner's settings. Null leaves the choice to Claude Code. A cockpit chat's task that names no effort
- * takes the chat's (the owner's pick on its chip) when it runs on the chat's harness, clamped to what its model takes.
+ * last saved to the owner's settings. Null leaves the choice to Claude Code.
  */
 function workerModel(t) {
   const read = (p) => { try { return JSON.parse(readFileSync(p, "utf8")) ?? {}; } catch { return {}; } };
@@ -53,16 +50,7 @@ function workerModel(t) {
   const overlay = (read(join(claudeDir, ".kesselrunner", "state.json")).overlay) ?? read(join(claudeDir, ".dotclaude", "state.json")).overlay; // .dotclaude: the state dir before the rename
   const s = { ...read(join(dirname(ROLLCALL), "..", "..", "..", "settings.core.json")), ...(overlay ? read(join(overlay, "settings.json")) : {}) };
   const model = t.model ?? s.model ?? null;
-  return { model, effort: t.effort ?? chatEffort(t, model) ?? s.effortLevel ?? null };
-}
-
-/** The effort task `t` takes from the chat that started it, or null (no chat, no pick, another harness). */
-function chatEffort(t, model) {
-  if (!chat?.effort) return null;
-  const harness = harnessOf(t);
-  if ((chat.harness ?? "claude") !== harness) return null;
-  const on = harness === "codex" ? (codexModels.ok(t.model) ? t.model : process.env.ROLLCALL_CODEX_MODEL || null) : model;
-  return clampEffort(chat.effort, effortsFor(harness, on), harness);
+  return { model, effort: t.effort ?? s.effortLevel ?? null };
 }
 
 function readJson(r, what) {
@@ -89,11 +77,8 @@ if (!id) die('usage: node start.mjs <task> [--fresh "<why>"] [--dry-run] [--home
 const task = readJson(rollcall(["task", "show", id, "--json", ...(home ? ["--home", home] : [])]), "rollcall task show");
 if (dryRun) { process.stdout.write(`${composeBrief(task, { fresh, rc: rollcallCommand() })}\n`); process.exit(0); }
 const me = readJson(rollcall(["status", "--json"]), "rollcall status").me;
-// A worker runs in its supervisor's permission mode; the watcher, which is no session, names it. A cockpit chat's
-// mode is the owner's pick on its chip: its session's record lags behind a pick made mid-chat.
-const { claudeModeOf, readChat } = await src("host/chat.mjs");
-const chat = readChat(task.home);
-const mode = modeArg ?? (chat ? claudeModeOf(chat) : null) ?? me?.mode ?? null;
+// A worker runs in its supervisor's permission mode; the watcher, which is no session, names it.
+const mode = modeArg ?? me?.mode ?? null;
 const w = workerState(task);
 
 if (stop || interrupt) {
@@ -120,9 +105,7 @@ if (resume !== undefined) {
   ].join(" ");
   const r = launch(task, { prompt: nudge, resume: true, session, mode, ...workerModel(task) });
   if (!r.ok) die(`could not resume ${task.id}'s worker: ${r.err}`);
-  process.stdout.write(hostedHome(task.home)
-    ? `${task.id}: worker ${r.session.slice(0, 8)} resumed in the agent host (the owner sees it in cockpit)\n`
-    : `${task.id}: worker ${r.session.slice(0, 8)} resumed in tmux (${tmux.sessionName(task.home)}, window ${task.id})\n  watch it: rollcall attach ${task.id}\n`);
+  process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} resumed in tmux (${tmux.sessionName(task.home)}, window ${task.id})\n  watch it: rollcall attach ${task.id}\n`);
   if (finished) process.stdout.write(`  ${task.id} stays ${task.state}; its window closes ${Math.round(closeAfterMs() / 60_000)}m after the worker's last turn\n`);
   process.exit(await settled(task));
 }
@@ -149,9 +132,7 @@ const r = launch(task, { prompt: brief, mode, name, ...on });
 if (!r.ok) die(`could not start ${task.id}'s worker: ${r.err}`);
 if (fresh !== undefined) await freshTaken(task);
 const runsOn = [a.name !== "claude" && `on ${a.title}`, a.models.map(on.model), on.effort && `${on.effort} effort`, mode && `${mode} mode`].filter(Boolean).join(", ");
-// A hosted worker (a chat's, a hosted crew's) has no tmux window: the owner follows it in cockpit.
-const watch = hostedHome(task.home) ? "  the owner follows it in cockpit" : `  watch it: rollcall attach ${task.id}`;
-process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} started (${name}) in ${task.worktree}${runsOn ? `, ${runsOn}` : ""}\n${watch}\n`);
+process.stdout.write(`${task.id}: worker ${r.session.slice(0, 8)} started (${name}) in ${task.worktree}${runsOn ? `, ${runsOn}` : ""}\n  watch it: rollcall attach ${task.id}\n`);
 process.exit(await settled(task));
 
 /**
@@ -176,10 +157,9 @@ async function freshTaken(t) {
 /**
  * Waits (up to ~15 s) for the worker's session to start. Claude Code asks once per repo whether to trust it,
  * before any hook runs: then exit 4 and what the owner does. The window stays up, so accepting there is enough.
- * A hosted worker never meets that question (stream mode does not ask it), so it never waits on it.
  */
 async function settled(t) {
-  if (!hostedHome(t.home) && workerAdapter(store.readTask(t.home, t.id) ?? t).trusted(t) === false) {
+  if (workerAdapter(store.readTask(t.home, t.id) ?? t).trusted(t) === false) {
     process.stderr.write([
       `start: ${t.id}'s worker waits on Claude Code's trust prompt for ${t.repo.name} (asked once per repo).`,
       `The owner answers it in the worker's window (rollcall attach ${t.id}: "Yes, I trust this folder"), and the worker starts on its brief.`,

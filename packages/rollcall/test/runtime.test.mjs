@@ -95,7 +95,7 @@ test("two tasks on one web app run their dev servers at once on their own ports,
   assert.match(theirs.stdout, /task t2 of alpha.*NOT this checkout/);
   assert.equal(sup.cli(["serving", String(p1 + 5)], { cwd: one.worktree }).code, 2, "nothing listens there");
 
-  // Preview links in task show, and in its JSON for the front ends.
+  // Preview links in task show, and in its JSON.
   const shown = json(sup.cli(["task", "show", "t1", "--json"])).runtime;
   assert.deepEqual(shown.previews, [`http://127.0.0.1:${p1}`]);
   assert.match(sup.cli(["task", "show", "t1"]).stdout, new RegExp(`run web: running at http://127.0.0.1:${p1}`));

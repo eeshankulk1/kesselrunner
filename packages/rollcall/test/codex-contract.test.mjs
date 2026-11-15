@@ -31,12 +31,6 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
   const props = (f) => new Set(Object.keys(read(`v2/${f}.json`).properties ?? {}));
   for (const p of ["cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "model", "config"]) assert.ok(props("ThreadStartParams").has(p), `thread/start takes ${p}`);
   for (const p of ["threadId", "approvalPolicy", "sandbox", "config"]) assert.ok(props("ThreadResumeParams").has(p), `thread/resume takes ${p}`);
-  // The config is open keys, each a dotted path into config.toml: workers' extra MCP servers go in as
-  // `mcp_servers.<name>` (worker-mcp.mjs codexConfig), so the owner's own [mcp_servers] stay.
-  for (const f of ["ThreadStartParams", "ThreadResumeParams"]) {
-    const config = read(`v2/${f}.json`).properties.config;
-    assert.ok(JSON.stringify(config).includes("additionalProperties"), `${f}.config takes any key`);
-  }
   for (const p of ["threadId", "input", "clientUserMessageId", "effort"]) assert.ok(props("TurnStartParams").has(p), `turn/start takes ${p}`);
   for (const p of ["threadId", "expectedTurnId", "input", "clientUserMessageId"]) assert.ok(props("TurnSteerParams").has(p), `turn/steer takes ${p}`);
   assert.ok(props("ThreadTokenUsageUpdatedNotification").has("tokenUsage"));
@@ -56,43 +50,6 @@ test("the installed Codex still offers what the Codex worker uses", { skip: !rea
     for (const d of ["accept", "decline"]) assert.match(decisions, new RegExp(`"${d}"`), `${f} takes ${d}`);
   }
   for (const p of ["permissions", "scope"]) assert.ok(p in read("PermissionsRequestApprovalResponse.json").properties, `a permissions answer carries ${p}`);
-  // A hosted Codex agent (codex/items.mjs, codex/session.mjs): streamed text, the plan, the thread items it maps and their
-  // fields, a resumed thread's saved history, the session-wide approvals, images in a message, a turn's model.
-  for (const m of ["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "turn/plan/updated"]) assert.ok(notes.has(m), `notification ${m}`);
-  const v2 = read("codex_app_server_protocol.v2.schemas.json").definitions;
-  const items = Object.fromEntries(v2.ThreadItem.oneOf.map((o) => [o.properties.type.enum[0], new Set(Object.keys(o.properties))]));
-  const want = {
-    userMessage: ["id", "clientId", "content"], agentMessage: ["id", "text"], reasoning: ["id", "summary", "content"], plan: ["id", "text"],
-    commandExecution: ["id", "command", "cwd", "status", "exitCode", "aggregatedOutput"], fileChange: ["id", "changes", "status"],
-    mcpToolCall: ["id", "server", "tool", "arguments", "status", "result", "error"], collabAgentToolCall: ["id", "tool", "prompt", "status"],
-    webSearch: ["id", "query"], contextCompaction: ["id"], hookPrompt: ["id", "fragments"],
-  };
-  for (const [type, fields] of Object.entries(want)) for (const f of fields) assert.ok(items[type]?.has(f), `a ${type} item carries ${f}`);
-  for (const f of ["path", "kind", "diff"]) assert.ok(f in v2.FileUpdateChange.properties, `a file change carries ${f}`);
-  assert.deepEqual(v2.CommandExecutionStatus.enum.sort(), ["completed", "declined", "failed", "inProgress"]);
-  for (const f of ["id", "status", "items", "error", "durationMs", "startedAt", "completedAt"]) assert.ok(f in v2.Turn.properties, `a turn carries ${f}`);
-  for (const f of ["step", "status"]) assert.ok(f in v2.TurnPlanStep.properties, `a plan step carries ${f}`);
-  assert.ok("thread" in v2.ThreadResumeResponse.properties && "turns" in v2.Thread.properties, "a resumed thread comes with its turns");
-  assert.ok(props("ThreadReadParams").has("includeTurns"));
-  assert.ok(props("TurnStartParams").has("model"), "turn/start takes a model");
-  assert.match(JSON.stringify(v2.UserInput), /"localImage"/, "a message takes a local image");
-  for (const [f, def] of [["CommandExecutionRequestApprovalResponse", "CommandExecutionApprovalDecision"], ["FileChangeRequestApprovalResponse", "FileChangeApprovalDecision"]]) {
-    assert.match(JSON.stringify(read(`${f}.json`).definitions[def]), /"acceptForSession"/, `${f} takes acceptForSession`);
-  }
-  assert.ok(read("PermissionsRequestApprovalResponse.json").definitions.PermissionGrantScope.enum.includes("session"));
-  // A Codex chat (host/chat.mjs): its contract as developer instructions, its mode changed from the next turn, the
-  // model chip from Codex's own list.
-  for (const f of ["ThreadStartParams", "ThreadResumeParams"]) assert.ok(props(f).has("developerInstructions"), `${f} takes developerInstructions`);
-  for (const p of ["approvalPolicy", "approvalsReviewer", "sandboxPolicy"]) assert.ok(props("TurnStartParams").has(p), `turn/start takes ${p}`);
-  const reviewers = JSON.stringify(v2.ApprovalsReviewer);
-  for (const r of ["user", "auto_review"]) assert.match(reviewers, new RegExp(`"${r}"`), `approvals reviewer ${r}`);
-  const sandboxes = Object.fromEntries(v2.SandboxPolicy.oneOf.map((o) => [o.properties.type.enum[0], new Set(Object.keys(o.properties))]));
-  for (const [type, fields] of Object.entries({ readOnly: ["networkAccess"], workspaceWrite: ["writableRoots", "networkAccess"], dangerFullAccess: [] })) {
-    assert.ok(sandboxes[type], `sandbox policy ${type}`);
-    for (const f of fields) assert.ok(sandboxes[type].has(f), `a ${type} sandbox policy carries ${f}`);
-  }
-  assert.ok(client.has("model/list"), "client method model/list");
-  for (const f of ["model", "displayName", "hidden", "isDefault"]) assert.ok(f in v2.Model.properties, `a listed model carries ${f}`);
 
   const caps = read("v1/InitializeParams.json").definitions.InitializeCapabilities.properties;
   assert.ok("experimentalApi" in caps, "initialize still takes experimentalApi");

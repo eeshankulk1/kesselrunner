@@ -22,7 +22,6 @@
     "bin/",
     "src/",
     "README.md",
-    "API.md",
     "LICENSE"
   ],
   "scripts": {

@@ -204,7 +204,7 @@ export function listActions(f) {
 }
 
 /**
- * Task `t`'s runtime as front ends draw it: { ports: { base, last } | null, setup, actions: [{ name, url, running, log,
+ * Task `t`'s runtime as `task show` gives it: { ports: { base, last } | null, setup, actions: [{ name, url, running, log,
  * since }], previews: [url], spotlit, archived }. Null for a task with no worktree of its own.
  */
 export function runtimeOf(t) {

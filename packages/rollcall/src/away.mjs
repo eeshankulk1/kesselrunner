@@ -1,7 +1,7 @@
-// Away mode: one switch for the whole machine (`rollcall away on|off`, the `away.set` action), for when the owner
+// Away mode: one switch for the whole machine (`rollcall away on|off`), for when the owner
 // steps away. While it is on, nothing a task worker does waits on the owner: a permission prompt is refused with a
 // note (held for the owner, carry on with other work) and saved to the held list, and a question goes to the task's
-// record even when a terminal shows the worker. The owner answers held requests later, from any surface: an approval
+// record even when a terminal shows the worker. The owner answers held requests later (`rollcall away allow|deny`): an approval
 // leaves a one-time grant that lets the worker's next matching request through, and either answer reaches the worker
 // as its next prompt, which wakes it. Only task workers are held; the owner's own sessions and supervisors never are.
 //
@@ -48,7 +48,7 @@ export function doneBetween(since, until) {
 }
 
 /**
- * Turns away mode on or off for client `by` ("the terminal", "cockpit"). Turning it off keeps the spell that ended as
+ * Turns away mode on or off, by `by` ("the terminal"). Turning it off keeps the spell that ended as
  * `last`, with what got done in it; turning it on starts a new one. Held items stay held until answered either way.
  * Returns { away, already }, or null when the record stayed busy.
  */
@@ -150,7 +150,7 @@ export function holdRequest(t, { harness, tool, input, now = Date.now() }) {
   const { item, fresh } = r.out;
   if (fresh) {
     store.appendStatus(t.home, t.id, { ev: "held", id: item.id, tool });
-    notify(`${nameOf(t.id)} held a request (${t.home})`, `${label(t)} asked for ${tool}: ${item.summary}. Held until you answer it.`, { tag: { kind: "held", ref, held: item.id } });
+    notify(`${nameOf(t.id)} held a request (${t.home})`, `${label(t)} asked for ${tool}: ${item.summary}. Held until you answer it.`);
   }
   return { item, fresh };
 }

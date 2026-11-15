@@ -24,14 +24,12 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BIN } from "../session.mjs";
 import * as store from "../store.mjs";
-import { capFlag, markCap, nameOf, workerHook } from "../supervisor.mjs";
-import { codexConfig, serversFor } from "../worker-mcp.mjs";
+import { capFlag, markCap, workerHook } from "../supervisor.mjs";
 import { launchFile, stateFile } from "../harness/codex.mjs";
 import { recordCodex } from "../usage.mjs";
 import { connect } from "./rpc.mjs";
 
-// The protocol's pieces live in session.mjs, which the agent host's Codex agents run on too.
-import { answerFor, approvalAnswer, clientId, contextOf, decisionIn, dialogPayload, questionsOf, usageLimited, APPROVALS, DELIVERY, INJECTED, textOf } from "./session.mjs";
+import { answerFor, approvalAnswer, clientId, contextOf, decisionIn, dialogPayload, questionsOf, usageLimited, APPROVALS, DELIVERY, INJECTED, textOf } from "./protocol.mjs";
 export { APPROVALS, DELIVERY, INJECTED, answerFor, approvalAnswer, clientId, contextOf, decisionIn, dialogPayload, questionsOf, textOf, usageLimited };
 const contextIn = (out) => { try { return JSON.parse(out)?.hookSpecificOutput?.additionalContext ?? null; } catch { return null; } };
 const reasonIn = (out) => { try { return JSON.parse(out)?.hookSpecificOutput?.permissionDecisionReason ?? null; } catch { return null; } };
@@ -207,8 +205,6 @@ export async function codexWorker([h, id]) {
     config: {
       ...(cfg.effort ? { model_reasoning_effort: cfg.effort } : {}),
       ...(cfg.sandbox === "workspace-write" ? { sandbox_workspace_write: { network_access: true, writable_roots: cfg.writableRoots ?? [] } } : {}),
-      // Extra MCP servers (worker-mcp.mjs), read at each start and resume.
-      ...codexConfig(serversFor({ ref: `${h}:${id}`, name: nameOf(id), harness: "codex" })),
     },
   };
   try {

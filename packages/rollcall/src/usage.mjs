@@ -1,7 +1,7 @@
 // The usage meter: how much room each plan has before a turn fails on it. Claude's comes from Claude Code's status
 // line (`rate_limits`: the five-hour and weekly windows, for Pro and Max plans, after a session's first answer);
 // Codex's from its app server (`account/rateLimits/updated` in a worker, else one short read). Both land in one file
-// in rollcall's store (one file per plan), read by `task list`, the supervisor's status line, the front end and the watcher, which offers
+// in rollcall's store (one file per plan), read by `task list`, the supervisor's status line and the watcher, which offers
 // the owner to move waiting tasks to the other harness when one plan nears its limit. It never moves one by itself.
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -140,8 +140,3 @@ export function usageLine(now = Date.now()) {
   return parts.join(" | ");
 }
 
-/** Task `t`'s tokens: its worker's context now, and on Codex the thread's total so far. */
-export function tokensOf(t) {
-  const c = store.readHomeFile(t.home, `context-${t.id}`);
-  return c ? { context: c.tokens ?? null, size: c.size ?? null, total: c.total ?? null } : null;
-}

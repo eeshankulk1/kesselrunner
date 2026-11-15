@@ -1,11 +1,13 @@
 ---
-status: active
+status: superseded
 date: 2026-11-08
 decided-with-owner: 2026-11-08 (cockpit task t28 "Chat view rethink"; cockpit docs/plans/2026-11-08-agent-host.md), reshaped 2026-11-09 (two runtimes kept apart: the host is cockpit's, the terminal keeps tmux)
 covers: "rollcall's agent host: one long-lived process that runs a hosted crew's supervisor and task workers as its children (Claude Code in stream mode, Codex on its app server), owns each agent's state, keeps one history per task across sessions, saves questions and permission prompts as requests, and pushes all of it to front ends over a socket"
 ---
 
 # Agent host (rollcall side)
+
+Cockpit now owns its own engine (cockpit repo `docs/plans/2026-11-14-cockpit-owns-its-engine.md`); this code left rollcall.
 
 The plan this serves is cockpit's `docs/plans/2026-11-08-agent-host.md` (section "rollcall becomes the agent host").
 This file records how rollcall builds it, so a fresh worker carries on from the same shapes. The facts about Claude
