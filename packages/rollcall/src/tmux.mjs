@@ -245,10 +245,10 @@ export function viewed(h, task) {
 }
 
 /**
- * Whether the owner is looking at the task's window now: a terminal shows it and has the focus. The Cockpit app
- * keeps a terminal attached to every task it has opened, so one that shows a window is not enough: t19's question
- * stayed in its window, unseen, while the owner was in the supervisor's. tmux counts a terminal focused until the
- * terminal says it lost the focus, so one that never reports focus still counts (rollcall turns focus-events on).
+ * Whether the owner is looking at the task's window now: a terminal shows it and has the focus. A terminal that
+ * shows a window in a background tab is not enough: a question stayed in its window, unseen, while the owner was in
+ * the supervisor's. tmux counts a terminal focused until the terminal says it lost the focus, so one that never
+ * reports focus still counts (rollcall turns focus-events on).
  */
 export function watched(h, task) {
   const w = windowOf(h, task);

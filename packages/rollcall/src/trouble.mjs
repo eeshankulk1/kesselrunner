@@ -12,7 +12,6 @@ import { cpus, loadavg } from "node:os";
 import { spawnDetached } from "./proc.mjs";
 import { BIN } from "./session.mjs";
 import { isOpen } from "./state.mjs";
-import { noteNotice } from "./clients.mjs";
 import * as store from "./store.mjs";
 import { watcherEnv } from "./supervisor.mjs";
 
@@ -50,12 +49,10 @@ export const KINDS = Object.keys(NAMES);
 export const SPOTLIGHT_FIX = "sudo killall mds; sleep 5; sudo mdutil -i on / && sudo mdutil -E /System/Volumes/Data";
 
 const appleString = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-/** `tag`: what a front end acts on beside the words, for a notice about one item (`{ kind, ref, held }`, away.mjs). */
-export function notify(title, text, { sound = true, tag = null } = {}) {
-  // A front end that shows the owner's notifications (clients.mjs) gets this one through its stream instead.
-  if (noteNotice({ title, text, sound, ...(tag ?? {}) })) return;
+/** A macOS notification for the owner (with ROLLCALL_NOTIFY_LOG set, a line in that file instead). */
+export function notify(title, text, { sound = true } = {}) {
   const log = process.env.ROLLCALL_NOTIFY_LOG;
-  if (log) { appendFileSync(log, `${JSON.stringify({ title, text, ...(tag ?? {}) })}\n`); return; }
+  if (log) { appendFileSync(log, `${JSON.stringify({ title, text })}\n`); return; }
   spawnSync("osascript", ["-e", `display notification ${appleString(text)} with title ${appleString(title)}${sound ? ' sound name "Glass"' : ""}`], { stdio: "ignore", timeout: 5000 });
 }
 
@@ -267,7 +264,7 @@ function notice(b, now) {
   if (isUsage(b.kind)) return `${(b.text ?? (b.kind === "usage" ? "Claude's usage limit stopped your workers" : "Codex's usage limit stopped its workers")).replace(/\.?$/, ".")} ${b.until ? `rollcall resumes them after ${clock(b.until, now)}.` : `rollcall tries them again every ${Math.round(retryMs() / 60_000)} minutes.`} ${CLEAR(b.kind)}`;
   if (b.kind === "billing") return `GitHub would not start jobs over billing${b.text ? `: "${store.clip(b.text, 200)}"` : ""}. Fix it under Billing and plans on GitHub${b.run ? `: rollcall retries by itself, and what waits on it goes on. ${CLEAR("billing")}` : ", then run rollcall blockers clear billing."}`;
   if (b.kind === "memory") return `Memory is low (${b.pct}% free). rollcall closed the test browsers nothing uses; anything that ran out comes back by itself.`;
-  if (b.kind === "spotlight") return `Spotlight's index went read-only, which macOS does when the disk runs low and keeps after space returns, so Cmd-Space stops finding apps (Cockpit among them). Run this in Terminal, with your password: ${SPOTLIGHT_FIX}. Spotlight then rebuilds its index, and rollcall sees it is back.`;
+  if (b.kind === "spotlight") return `Spotlight's index went read-only, which macOS does when the disk runs low and keeps after space returns, so Cmd-Space stops finding apps. Run this in Terminal, with your password: ${SPOTLIGHT_FIX}. Spotlight then rebuilds its index, and rollcall sees it is back.`;
   if (b.kind === "power") return `The Mac is on battery${b.pct ? ` at ${b.pct}%` : ""}${b.shipping ? " with a ship running: a sleep stalls it until it wakes" : ""}. Plug it in, and what waits on power goes on.`;
   return `${NAMES[b.kind]} stopped work.`;
 }

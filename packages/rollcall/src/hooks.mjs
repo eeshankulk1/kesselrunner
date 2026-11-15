@@ -16,8 +16,7 @@ import {
 } from "./session.mjs";
 import * as store from "./store.mjs";
 import { sameWords } from "./asked.mjs";
-import { hostedHome } from "./host/client.mjs";
-import { answeredElsewhere, droppedPick, joinLines, markAnswered, pickLine, questionId } from "./answer.mjs";
+import { joinLines, pickLine } from "./answer.mjs";
 import { PICTURE, picturesFindable, picturesLater } from "./pictures.mjs";
 import { MENTION, tempDenial } from "./temp.mjs";
 import * as tmux from "./tmux.mjs";
@@ -121,11 +120,8 @@ function mainDenial(info) {
   ].join("\n");
 }
 
-/**
- * Whether session `g` holds a home: a supervisor (`rollcall supervise`), or a cockpit chat (`chat`, host/chat.mjs
- * bindChat), which does its own work: its turns and its tasks' news are tracked as a supervisor's, its edits never denied.
- */
-const holds = (g) => !!(g.supervisor || g.chat);
+/** Whether session `g` holds a home: a supervisor (`rollcall supervise`). */
+const holds = (g) => !!g.supervisor;
 
 /** A supervisor (`rollcall supervise`) routes work to task workers and edits no project file, its subagents included. */
 function supervisorDenial(info) {
@@ -205,8 +201,6 @@ function sessionStart(p, now) {
 
 function preToolUse(p, now) {
   if (p.tool_name === "Bash") return bashGuard(p, now);
-  const ti = p.tool_input ?? {};
-  if (EDIT_TOOLS.has(p.tool_name) && WORKER_MCP_FILE.test(ti.file_path ?? ti.notebook_path ?? ti.path ?? "")) return { deny: WORKER_MCP_DENIAL };
   const focus = editFocus(p);
   if (!focus) return null;
   const { info, repo } = focus;
@@ -246,28 +240,16 @@ function preToolUse(p, now) {
 const SAID_FILE = /\bsaid\.json\b/;
 const HOME_PATH = /\.rollcall\b|_supervisors\b|\bROLLCALL_HOME\b/;
 const RELAY = /\btask\s+relay\b/;
-// The front-end interface's actions (api.mjs) act as the owner: their words reach a worker as the owner's own. A
-// front end is no agent session, so an agent's shell never runs them (api-cli.mjs refuses them there too).
-const API_DO = /\bapi[\s'\"\\]+do\b/;
 // Away mode (away.mjs) is the owner's switch, and an answer to what it held grants a permission: the owner runs them
 // in their own terminal or with `!` in the Falcon, which pass no hook; an agent's shell never does. Nor does it touch
 // the records behind them. A guard rail for an agent that means well, not a wall: the CLI refuses a worker too.
 const AWAY_ANSWER = /\baway[\s'\"\\]+(allow|deny|allow-all)\b/;
 const AWAY_SWITCH = /\baway[\s'\"\\]+(on|off)\b/;
 const AWAY_RECORD = /_machine\b[^\s;|&]*[\\/](grants|held|away)\.json\b/;
-// The extra MCP servers every worker starts (worker-mcp.mjs) are the owner's, set through a front end: an agent that
-// wrote the list would have its command run in every later worker. Same guard rail: its shell and its edit tools
-// leave the file alone.
-const WORKER_MCP_FILE = /[\\/]_machine[\\/]worker-mcp\.json$/;
-const workerMcpRecord = (cmd) => /\bworker-mcp\.json\b/.test(cmd) && (/_machine\b/.test(cmd) || HOME_PATH.test(cmd));
-const WORKER_MCP_DENIAL = `${P} Blocked: the MCP servers every worker starts are the owner's, set from a front end's settings. Leave their list alone; mention what you need in your report.`;
 
 function saidDenial(cmd) {
   if (SAID_FILE.test(cmd) && HOME_PATH.test(cmd)) {
     return `${P} Blocked: said.json is rollcall's record of the owner's own words to their supervisor, written only by its prompt hook, and \`${cli()} task relay\` types it into a worker as theirs. Leave it alone: for the owner's say-so, ask them to type their words (to the supervisor, or \`@<name> <words>\`).`;
-  }
-  if (API_DO.test(cmd) && /\brollcall\b/.test(cmd)) {
-    return `${P} Blocked: \`rollcall api do\` is the front-end interface, which acts as the owner, for the apps the owner uses. An agent session uses the \`${cli()} task\` commands, which run the same code.`;
   }
   if (AWAY_ANSWER.test(cmd) && /\brollcall\b/.test(cmd)) {
     return `${P} Blocked: answering what away mode held grants a permission, and that is the owner's alone (their terminal, or \`!\` in the Falcon). Leave it to them; mention what you need in your report.`;
@@ -278,7 +260,6 @@ function saidDenial(cmd) {
   if (AWAY_RECORD.test(cmd)) {
     return `${P} Blocked: rollcall's away-mode records (held, grants, away) are its own. Read them with \`${cli()} away status\`; answering what it held is the owner's.`;
   }
-  if (workerMcpRecord(cmd)) return WORKER_MCP_DENIAL;
   if (RELAY.test(cmd) && taskEnv()) {
     return `${P} Blocked: \`task relay\` is the supervisor's, and types the owner's words into a worker. Put what you need from the owner in a question or your report (\`${cli()} task output\`).`;
   }
@@ -289,8 +270,7 @@ function saidDenial(cmd) {
  * Bash is never blocked, except git commands that would change the files,
  * branch or index of a checkout another live session owns (checkout, reset,
  * stash, commit...), deletions that reach a live session's Claude temp
- * folder (temp.mjs), the two ways around `task relay`, the front-end interface's actions, and away mode's answers and
- * records (saidDenial).
+ * folder (temp.mjs), the two ways around `task relay`, and away mode's answers and records (saidDenial).
  * Read-only git and `git worktree add` always pass.
  */
 function bashGuard(p, now) {
@@ -358,12 +338,6 @@ const KEYED_MS = 30_000;
  * Claude Code's own "limit has reset, continue" must not reach a worker as the owner's words.
  */
 function keyed(h, text, now) {
-  // A line from a front end's composer to a hosted supervisor (the host writes it) is the owner's as much as a key press.
-  if (hostedHome(h)) {
-    const app = store.readHomeFile(h, "app-line");
-    if (app && now - app.at < KEYED_MS && sameWords(app.text, text)) return true;
-    return !FRAMED.test(text);
-  }
   if (!tmux.windowOf(h, h)?.alive) return !FRAMED.test(text);
   tmux.forget(h);
   return now - tmux.lastUsed(h, h) < KEYED_MS;
@@ -417,10 +391,10 @@ function sent(t, r) {
 const reachable = (t) => isOpen(t) || !!t?.sessions?.length;
 
 /** Delivers the owner's words to task `id` of home `h`, typed (`typed`, when the worker hears more than the record keeps): { stop } for the hook. */
-function sendTo(h, g, id, text, typed = text, mark = null) {
+function sendTo(h, g, id, text, typed = text) {
   const t = store.readTask(h, id);
   if (!reachable(t)) return { stop: `No task ${nameOf(id)} (${id}) with a worker in supervisor ${h}: \`${cli()} task list\` shows them.` };
-  return { stop: sent(t, deliverWords(t, typed, { record: () => recordWords(t, text, "supervisor", mark), mode: g.mode })), task: t };
+  return { stop: sent(t, deliverWords(t, typed, { record: () => recordWords(t, text, "supervisor"), mode: g.mode })), task: t };
 }
 
 /**
@@ -480,13 +454,7 @@ function picks(g, p) {
   }
   const lines = [];
   const now = Date.now();
-  for (const [id, all] of byTask) {
-    // The first answer wins: a question a front end answered meanwhile is not answered twice (answer.mjs).
-    const t0 = store.readTask(h, id);
-    const gone = all.map((a) => answeredElsewhere(t0, a.x.question)).find(Boolean);
-    const picked = all.filter((a) => !answeredElsewhere(t0, a.x.question));
-    if (gone) lines.push(droppedPick(t0, gone));
-    if (!picked.length) continue;
+  for (const [id, picked] of byTask) {
     // Only the picker's own result is the owner's: the same field on the tool's input is the model's to fill.
     if (p.tool_response?.answers) for (const a of picked) if (a.own) keepSaid(h, g, a.said, now);
     const text = joinLines(picked);
@@ -500,7 +468,7 @@ function picks(g, p) {
     const pictured = picked.some((a) => a.own && a.said.includes(PICTURE));
     const findable = pictured && picturesFindable(p);
     const picture = !pictured ? "" : findable ? `\n${P} Their picture comes next, as a saved path: wait for it, and do not search for it.` : `\n${P} rollcall could not save their picture: ask them for it, and do not search for it.`;
-    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`, (t) => markAnswered(t, picked.map((a) => a.x), "the terminal Falcon", text, { qid: questionId(t0) })).stop}`);
+    lines.push(`${P} ${sendTo(h, g, id, text, `${text}${reply}${picture}`).stop}`);
     if (findable) picturesLater(h, id, p);
   }
   return lines;

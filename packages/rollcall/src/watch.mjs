@@ -28,7 +28,7 @@ import { P, cli } from "./session.mjs";
 import { isOpen } from "./state.mjs";
 import * as trouble from "./trouble.mjs";
 import {
-  HANDOFF, closesAt, closing, hostedTask, stopWorker, colorOf, ensureWatcher, freshDue, freshPrOn, freshUndo, holderOf, homeOf, label, markCap, markFresh, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
+  HANDOFF, closesAt, closing, colorOf, ensureWatcher, freshDue, freshPrOn, freshUndo, holderOf, homeOf, label, markCap, markFresh, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
   unpark, watcherEnv, whereCurrent, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
@@ -38,10 +38,7 @@ import { allDecisions, mergeSeen, ownerTypedInWorker, queueState, shipHolds } fr
 import * as tmux from "./tmux.mjs";
 import { fullest, nearPct, recordClaude, refreshCodex, usageLine, when } from "./usage.mjs";
 import { HARNESSES, harnessOf } from "./harness/index.mjs";
-import { comeBack, contextOf, hostedSupervisor, markBack, startWindow, supervisorMark } from "./window.mjs";
-import { callSync as hostCall, hostedHome } from "./host/client.mjs";
-import { isChat } from "./host/chat.mjs";
-import { readJson } from "./claude/live.mjs";
+import { comeBack, contextOf, markBack, startWindow, supervisorMark } from "./window.mjs";
 
 const ms = (name, dflt) => { const v = Number(process.env[name]); return Number.isFinite(v) && v > 0 ? v : dflt; };
 // A task waits on the owner this long before the first notification, then reminds every 10 minutes.
@@ -277,7 +274,7 @@ function alertOwner(h, views, now) {
     const text = wait.kind === "prompt" ? `${label(t)} has waited ${long} on ${w?.asks ? asksText(w.asks) : "a prompt"} in its worker. In the supervisor: /attach ${t.id}`
       : wait.kind === "needs-you" ? (away ? `${label(t)} asks you: ${asked}` : `${label(t)} has waited ${long} for you: ${asked}`)
         : `${label(t)}: its worker stopped ${long} ago while the task was being worked; the supervisor is told.`;
-    notify(`${nameOf(t.id)} needs you (${h})`, text, away && wait.kind === "needs-you" ? { tag: { kind: "question", ref: `${h}:${t.id}` } } : {});
+    notify(`${nameOf(t.id)} needs you (${h})`, text);
   }
   store.writeHomeFile(h, "notified", Object.fromEntries(Object.entries(live).filter(([, v]) => v !== null)));
 }
@@ -350,7 +347,7 @@ function shipMoved(t, w, prAt, now) {
  * and it is news once they leave it open. Returns whether it queued news.
  */
 function promptDue(h, t, w, seen) {
-  if (!isOpen(t) || !w?.alive || !w.dialog || seen[`prompt:${t.id}`] === w.dialog || (!w.hosted && tmux.watched(h, t.id))) return false;
+  if (!isOpen(t) || !w?.alive || !w.dialog || seen[`prompt:${t.id}`] === w.dialog || tmux.watched(h, t.id)) return false;
   seen[`prompt:${t.id}`] = w.dialog;
   store.enqueueWake(h, { task: t.id, kind: "prompt" });
   return true;
@@ -446,11 +443,6 @@ export function tick(h, now = Date.now()) {
       const st = workerState(t, now);
       const at = closesAt(st, now);
       if (at !== null && now >= at && (!st?.alive || !tmux.viewed(h, t.id))) tmux.killWindow(h, t.id);
-    } else if (hostedTask(t)) {
-      // A finished task's hosted agent stops on the same clock (no window to close).
-      const st = workerState(t, now);
-      const at = st?.alive ? closesAt(st, now) : null;
-      if (at !== null && now >= at) stopWorker(t);
     }
   }
   try { if (usageOffers(h, views, seen, now)) changed = true; } catch {}
@@ -471,7 +463,7 @@ export function tick(h, now = Date.now()) {
  */
 function prFresh(t, w, now) {
   if (!freshPrOn() || (t.state !== "pr-open" && t.state !== "queued") || t.wait) return false;
-  if (!w || w.legacy || w.hosted || !w.alive || w.busy || w.dialog || !Array.isArray(w.bg) || w.bg.length) return false;
+  if (!w || w.legacy || !w.alive || w.busy || w.dialog || !Array.isArray(w.bg) || w.bg.length) return false;
   if (t.fresh?.session === w.session || waiting(t.home, t.id).length) return false;
   if (!whereCurrent(t, w) || !shipHolds(t, now)) return false;
   return !tmux.viewed(t.home, t.id);
@@ -528,7 +520,7 @@ function usageOffers(h, views, seen, now) {
  * The moves worth offering now: for each plan near its limit while the other has room, the open tasks that wait on
  * it (held by its limit, not started yet, or parked or stopped while worked). `views`: [{ t, w }] as view() gives
  * them. Returns [{ window (a fullest() entry), other, room (the other plan's fullest window), tasks }], none empty.
- * The watcher turns them into news; the front-end snapshot shows the first as its usage offer.
+ * The watcher turns them into news.
  */
 export function usageMoves(views, now = Date.now()) {
   const all = fullest(now);
@@ -831,50 +823,6 @@ function repliesFor(e, t, entries) {
   return (Number.isFinite(since) && all.some((n) => n.at >= since) ? all.filter((n) => n.at >= since) : all.slice(-1)).map((n) => n.text.replace(/^reply:\s*/i, "").trim());
 }
 
-/** A task's questions as words: 'Ship it? (Yes / No)', one after another. */
-export function questionWords(questions) {
-  return (questions ?? []).map((q) => {
-    const opts = (q.options ?? []).map((o) => o.label).filter(Boolean);
-    return `${store.oneLine(q.question ?? "")}${opts.length ? ` (${opts.join(" / ")})` : ""}`;
-  }).join(" ");
-}
-
-/**
- * One piece of task news as a chat hears it: what happened to which task, by title (its name after, which the
- * rollcall commands take), in plain words. The chat's contract (host/chat-contract.md) says what to do with it.
- * Null when the news no longer stands.
- */
-export function chatNewsLine(e, t, entries = [e]) {
-  const who = `"${t.title}" (${nameOf(t.id)})`;
-  const quote = (x, n = 300) => `"${store.clip(store.oneLine(x ?? ""), n)}"`;
-  if (e.kind === "ask" && t.state === "needs-you" && t.ask) return `${who} asks: ${questionWords(t.ask.questions)}`;
-  if (e.kind === "needs-you" && t.state === "needs-you" && !t.ask) return `${who} asks: ${quote(t.question ?? "(no question recorded)")}`;
-  if (e.kind === "stuck" && t.state === "working") {
-    const w = workerState(t);
-    if (!(w?.alive && !w.busy && w.bg?.length === 0)) return null;
-    return `${who} stopped ${duration(Date.now() - w.since) || "minutes"} ago without a report. Its last words: ${quote(w.last ?? "(none)")}`;
-  }
-  if (e.kind === "stalled" && (t.state === "pr-open" || t.state === "queued")) return `${who}: its PR has been quiet for ${duration(Date.now() - e.since) || "a while"}.`;
-  if (e.kind === "reply") {
-    const texts = repliesFor(e, t, entries);
-    const said = texts.length ? texts.join("\n\n") : "(no note)";
-    const head = `${who}${isOpen(t) ? "" : ` (${t.state})`} replies:`;
-    if (said.length <= 300 && !said.includes("\n")) return `${head} "${said}"`;
-    const rest = said.length > 600 ? `\n    (the rest: \`rollcall task show ${nameOf(t.id)}\`)` : "";
-    return `${head}\n${store.clip(said, 600).replace(/^/gm, "    ")}${rest}`;
-  }
-  if (e.kind === "unanswered" && !isOpen(t)) return `${who} (${t.state}) heard from you after it finished and did not reply.${e.said ? ` Its last words: ${quote(e.said)}` : ""}`;
-  if (e.kind === "grew" && isOpen(t)) return `${who}: the work grew: ${quote(t.notes.findLast((n) => /^grew:/i.test(n.text))?.text.replace(/^grew:\s*/i, "") ?? "(no note)")}`;
-  if (e.kind === "failed" && isOpen(t)) return `${who}: its worker did not start (${e.what}): ${e.err || "no reason given"}.`;
-  if (e.kind === "setup-failed" && isOpen(t) && setupState(t.worktree)?.state === "failed") return `${who}: its worktree setup failed: ${quote(setupState(t.worktree).last, 200)}`;
-  if (e.kind === "spotlight" && isOpen(t)) return `${who}: the main checkout stopped following it: ${e.err}.`;
-  if (e.kind === "answered-elsewhere") return `${who}: you answered its question from ${e.by ?? "another app"}.`;
-  if (e.kind === "hooks-untrusted" && isOpen(t)) return `${who} runs on Codex, where ${e.count} of your hooks are not trusted yet.`;
-  if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) return `${who} runs on ${HARNESSES[e.harness].title}, whose ${e.window} limit is at ${e.pct}%; ${HARNESSES[e.other].title} has room (${e.room}% used).`;
-  if (e.kind === "exit-loop" && isOpen(t)) return `${who}: its worker exited ${e.times} times in ${RESUME_WINDOW_MS / 60_000} minutes, so rollcall stopped resuming it.`;
-  return null;
-}
-
 /**
  * The text a wake hands the supervisor: one line per piece of news that needs its judgment, or null when none
  * still stands. `shown` collects the tasks whose report went in, for markReported once it is delivered.
@@ -882,22 +830,12 @@ export function chatNewsLine(e, t, entries = [e]) {
 export function wakeText(h, entries, { shown = new Map() } = {}) {
   const lines = [];
   const done = new Set();
-  const chat = isChat(h);
   for (const e of [...entries].reverse()) {
     const key = `${e.task}:${e.kind}`;
     if (done.has(key)) continue;
     done.add(key);
     const t = store.readTask(h, e.task);
     if (!t) continue;
-    if (chat) {
-      // A chat shows these words to the owner as they go in: plain lines, no orders for a supervisor.
-      const said = chatNewsLine(e, t, entries);
-      if (!said) continue;
-      const out = reportToShow(t) && reportFile(t) ? t.output : null;
-      if (out) shown.set(t.id, out.at);
-      lines.unshift(`- ${said}${out ? ` Its report: "${reportGist(t)}" (${reportFile(t)})` : ""}`);
-      continue;
-    }
     const note = reportNote(t);
     const carries = (line) => { if (note) shown.set(t.id, t.output.at); return `${line}${note}`; };
     let line = null;
@@ -936,9 +874,6 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
         `Its worker reads the result before it starts work; tell it with \`rollcall task tell ${t.id} "<text>"\` if you change something. One line to the owner when it needs them.`;
     } else if (e.kind === "spotlight" && isOpen(t)) {
       line = `${label(t)}: the main checkout no longer follows it in the spotlight: ${e.err}. \`rollcall task spotlight ${t.id} --off\` ends the spotlight (it refuses while the main checkout has changes of its own). One line to the owner.`;
-    } else if (e.kind === "answered-elsewhere") {
-      // answer.mjs closed the Falcon's picker (Esc) once a front end answered every question in it.
-      line = `${label(t)}: the owner answered its question from ${e.by ?? "a front end"} ("${store.clip(store.oneLine(t.answered?.answer ?? ""), 200)}"), and it went to its worker, so rollcall closed your picker for it. Do not ask it again.`;
     } else if (e.kind === "hooks-untrusted" && isOpen(t)) {
       line = `${label(t)} runs on Codex, where ${e.count} of the owner's hooks are not trusted yet, so they do not run on its tool calls (the owner's guards and rollcall's checkout checks among them). Tell the owner in one line: it is their one step, once, in its window (/attach ${t.id}: "Review hooks", then trust all) or in Codex's /hooks.`;
     } else if (e.kind === "usage-near" && isOpen(t) && harnessOf(t) === e.harness) {
@@ -951,8 +886,6 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
     if (line) lines.unshift(`- ${line}`);
   }
   if (!lines.length) return null;
-  // A chat started these tasks itself (host/chat.mjs): its contract says what to do with news.
-  if (chat) return [`${P} News from your tasks:`, ...lines].join("\n");
   return [`${P} supervisor ${h}: news from your tasks. Act on each line per the /supervisor skill, then end your turn.`, ...lines].join("\n");
 }
 
@@ -1038,7 +971,6 @@ function takeNews(h, session, entries, now) {
  */
 function supervisorNow(h, now) {
   const holder = holderOf(h);
-  if (hostedHome(h)) return hostedNow(h, holder);
   const inWindow = !!tmux.windowOf(h, h)?.alive;
   if (holder) {
     if (!inWindow) return { at: "terminal", holder };
@@ -1056,24 +988,6 @@ function supervisorNow(h, now) {
   return { at: g && !g.endedAt && store.readHomeFile(h, "falcon") ? "crashed" : "closed" };
 }
 
-/**
- * Where a supervisor the agent host runs stands, from the host's own state (agent.json), no window read. Parked is
- * idle here: a message through the host resumes its session and delivers (hostSay), so news never waits for a start.
- */
-function hostedNow(h, holder) {
-  const a = hostedSupervisor(h);
-  if (!a) return { at: "closed" };
-  const who = holder ?? (a.session ? { id: a.session } : null);
-  if (a.state === "terminal") return { at: "terminal", holder: who };
-  if (a.state === "stopped" || !who) return { at: "closed" };
-  // The compat record names a prompt open in the chat: claude.json, or codex.json for a Codex chat.
-  if (a.state === "running") return { at: "busy", holder: who, picker: !!readJson(join(store.workerDir(h, h), a.harness === "codex" ? "codex.json" : "claude.json"))?.prompt };
-  return { at: "idle", holder: who };
-}
-
-/** Words into a hosted supervisor: rollcall's own, through the host (which wakes a parked one on its session). */
-const hostSay = (h, text) => { const r = hostCall("say", { ref: h, text, from: "rollcall" }); return r.ok ? { ok: true } : { ok: false, err: r.error?.message }; };
-
 /** Prompts typed that never arrived, in a row, and when the last one was found lost. */
 const lost = { misses: 0, at: 0 };
 
@@ -1083,8 +997,6 @@ const lost = { misses: 0, at: 0 };
  * second old, and a key pressed in that second counts.
  */
 function clearToType(h, now) {
-  // Nothing is typed into a hosted supervisor: the news goes in through the host, queued behind a running turn.
-  if (hostedHome(h)) return true;
   tmux.forget(h);
   return now - tmux.lastUsed(h, h) >= keyQuietMs() && !tmux.draft(h, h);
 }
@@ -1132,8 +1044,7 @@ function bringBack(h, queued, why, now) {
     const shown = new Map();
     const text = b.resume ? wakeText(h, queued, { shown }) : null;
     const first = why === "parked" ? "was parked while idle, and news from its tasks brought it back" : "stopped without warning, and news from its tasks brought it back";
-    // A chat's news reads the same either way (its words show in the chat as they go in).
-    const prompt = !text ? null : isChat(h) ? text : `${P} Supervisor ${h} ${first}.\n${text}`;
+    const prompt = text ? `${P} Supervisor ${h} ${first}.\n${text}` : null;
     const started = startWindow(h, b, { prompt });
     if (started.ok && text) {
       store.markDelivered(h, queued.map((w) => w.name));
@@ -1157,7 +1068,7 @@ const heldTold = new Set();
 export function heldWhy(h, s, now) {
   if (trouble.paused()) return "rollcall holds it while Claude's usage limit is open. If Claude works again, `rollcall blockers clear usage` lets it through";
   if (s.at === "terminal") return "its supervisor runs outside falcon, so it goes in with your next line to that supervisor";
-  if (s.at === "idle" && !hostedHome(h) && now - tmux.lastUsed(h, h) >= keyQuietMs() && tmux.draft(h, h)) return "words left in the supervisor's prompt box keep rollcall from typing. Send or clear them";
+  if (s.at === "idle" && now - tmux.lastUsed(h, h) >= keyQuietMs() && tmux.draft(h, h)) return "words left in the supervisor's prompt box keep rollcall from typing. Send or clear them";
   return null;
 }
 
@@ -1181,7 +1092,7 @@ function deliver(h, s, news, now) {
   if (lost.misses >= MAX_MISSES && (store.readHomeFile(h, "turn")?.at ?? 0) <= lost.at) return;
   const taken = takeNews(h, s.holder.id, news, now);
   if (!taken) return;
-  const r = hostedHome(h) ? hostSay(h, taken.text) : tmux.type(h, h, taken.text);
+  const r = tmux.type(h, h, taken.text);
   if (r.ok) { markReported(h, taken.shown); return; }
   store.requeueWakes(h, taken.names.map((n) => `d-${n.slice(2)}`));
   store.writeHomeFile(h, "delivery", null);
@@ -1222,10 +1133,8 @@ function handOver(h, s, now) {
   if (!s.holder || !(s.at === "idle" || s.picker)) return false;
   const pct = contextOf(h, s.holder.id);
   if (!Number.isFinite(pct) || pct < supervisorMark()) return false;
-  if (!hostedHome(h)) {
-    tmux.forget(h);
-    if (now - tmux.lastUsed(h, h) < handOverQuietMs() || tmux.draft(h, h)) return false;
-  }
+  tmux.forget(h);
+  if (now - tmux.lastUsed(h, h) < handOverQuietMs() || tmux.draft(h, h)) return false;
   const cwd = store.readHomeFile(h, "falcon")?.cwd;
   const lock = store.readHomeFile(h, "lock");
   store.writeHomeFile(h, "lock", null);
