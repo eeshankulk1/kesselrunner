@@ -45,6 +45,16 @@ export function pending(entries) {
   return calls.filter((c) => !done.has(c.id));
 }
 
+/** When tool call `id` went into `entries` (tail's), in ms, or null when they do not hold it. */
+export function callAt(entries, id) {
+  if (!id) return null;
+  for (const e of entries) {
+    const content = e?.message?.content;
+    if (Array.isArray(content) && content.some((c) => c?.type === "tool_use" && c.id === id)) return Date.parse(e.timestamp) || null;
+  }
+  return null;
+}
+
 // As tmux.type sends it: no control characters but line breaks and tabs. Claude Code escapes a tag it finds inside a
 // paste it wraps (`<pasted_content` comes back `<\pasted_content`, its end `<\/pasted_content`), so that backslash goes.
 const flat = (s) => String(s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").replace(/<\\/g, "<").replace(/\s+/g, " ").trim();

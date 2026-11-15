@@ -15,8 +15,8 @@ import {
   joinRepo, markDone, msgLine, peersOf, presenceSince, remember, settle, short, trimPrompt, who, worktreeCommand,
 } from "./session.mjs";
 import * as store from "./store.mjs";
-import { sameWords } from "./asked.mjs";
-import { joinLines, pickLine } from "./answer.mjs";
+import { callAt, sameWords, tail } from "./asked.mjs";
+import { answeredInWindow, joinLines, pickLine } from "./answer.mjs";
 import { PICTURE, picturesFindable, picturesLater } from "./pictures.mjs";
 import { MENTION, tempDenial } from "./temp.mjs";
 import * as tmux from "./tmux.mjs";
@@ -434,12 +434,18 @@ function keepSaid(h, g, text, now) {
   store.writeHomeFile(h, "said", [...(Array.isArray(said) ? said : []), { at: now, session: g.id, text: text.slice(0, 50_000), pick: true }].slice(-SAID_KEEP));
 }
 
+/** What the supervisor hears for a pick on a question the owner answered in its worker's own window first. */
+const droppedPick = (t, w) =>
+  `${P} ${label(t)}: the owner answered its question in its own window after your picker opened ("${store.clip(store.oneLine(w.text), 160)}"), ` +
+  `so this pick did not go to its worker. Ask them nothing more about it; if their pick adds something, pass it on: \`${cli()} task tell ${t.id} "<it>"\`.`;
+
 /**
  * The owner answered the supervisor's picker: each question tagged "luke · ..." is a worker's (or one the
  * supervisor asked for it), and the pick goes to that task's worker, typed. Several questions for one task
  * go as one prompt, numbered in their order. Free text is often a question for the worker, whose window
  * nobody reads, so it also hears how to reply. Free text that routes work stops at the supervisor, and a picture
- * follows its pick as a saved path (pictures.mjs).
+ * follows its pick as a saved path (pictures.mjs). A question the owner answered in the worker's own window
+ * after the picker opened is answered already: its pick goes nowhere, and the supervisor hears why.
  */
 function picks(g, p) {
   const h = homeOf(g.id);
@@ -454,7 +460,12 @@ function picks(g, p) {
   }
   const lines = [];
   const now = Date.now();
+  // When this picker opened: an answer the owner typed in a worker's own window after that came first.
+  const opened = byTask.size ? callAt(tail(p.transcript_path), p.tool_use_id) : null;
   for (const [id, picked] of byTask) {
+    const t0 = opened === null ? null : store.readTask(h, id);
+    const answered = answeredInWindow(t0, opened);
+    if (answered) { lines.push(droppedPick(t0, answered)); continue; }
     // Only the picker's own result is the owner's: the same field on the tool's input is the model's to fill.
     if (p.tool_response?.answers) for (const a of picked) if (a.own) keepSaid(h, g, a.said, now);
     const text = joinLines(picked);
