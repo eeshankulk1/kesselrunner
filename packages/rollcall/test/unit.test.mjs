@@ -6,7 +6,8 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSy
 import { tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { asked, asksText, describe, promptAuthor, sameWords } from "../src/asked.mjs";
+import { answeredInWindow } from "../src/answer.mjs";
+import { asked, asksText, callAt, describe, promptAuthor, sameWords } from "../src/asked.mjs";
 import { dialogFlag, dialogUp, settleDialog } from "../src/delivery.mjs";
 import { branch, locate, normalizeRemote, repoKey } from "../src/git.mjs";
 import { globToRegExp, matchScope } from "../src/glob.mjs";
@@ -396,4 +397,26 @@ test("a process is its id and its start time: a reused id is another process", (
   assert.equal(isHolding({ pid: process.pid, pidStart: start }), true);
   assert.equal(isHolding({ pid: process.pid, pidStart: start + 1000 }), false);
   assert.equal(isAlive({ pid: process.pid, pidStart: start, endedAt: 1 }), false);
+});
+
+test("a question the owner answered in the worker's own window after a picker opened is answered, until the task asks again", () => {
+  const word = { at: 2000, text: "use the subtitle", via: "worker", closed: "Which header?" };
+  const t = { state: "working", ask: null, words: [{ at: 1500, text: "hi", via: "supervisor" }, word] };
+  assert.equal(answeredInWindow(t, 1000), word);
+  assert.equal(answeredInWindow(t, 3000), null, "before the picker opened: that picker asked after it");
+  assert.equal(answeredInWindow({ ...t, words: [{ ...word, via: "supervisor" }] }, 1000), null, "the picker's own answer is no other window's");
+  assert.equal(answeredInWindow({ ...t, words: [{ ...word, closed: null }] }, 1000), null, "words that closed nothing");
+  assert.equal(answeredInWindow({ ...t, state: "needs-you", ask: { at: 2500 } }, 1000), null, "it asked again since");
+  assert.equal(answeredInWindow({ ...t, state: "needs-you", ask: null, stateAt: 1800 }, 1000), word, "an older question still on record");
+  assert.equal(answeredInWindow(null, 1000), null);
+});
+
+test("callAt finds when a tool call went into a transcript", () => {
+  const entries = [
+    { type: "user", timestamp: "2026-11-15T15:24:48.000Z", message: { content: "news" } },
+    { type: "assistant", timestamp: "2026-11-15T15:24:56.684Z", message: { content: [{ type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: {} }] } },
+  ];
+  assert.equal(callAt(entries, "toolu_1"), Date.parse("2026-11-15T15:24:56.684Z"));
+  assert.equal(callAt(entries, "toolu_2"), null);
+  assert.equal(callAt(entries, undefined), null);
 });

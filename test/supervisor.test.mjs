@@ -728,6 +728,80 @@ test("a worker's question goes to the picker while a terminal only shows its win
   assert.equal(w.task().state, "working");
 });
 
+test("a worker's question waits while the owner is with that worker: gone once they answer there, asked once they leave", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  const asked = () => w.task().state === "needs-you";
+
+  // The owner typed in its window: until the transcript says whose that prompt is, the supervisor does not ask.
+  w.sup.prompt("@t1 ask");
+  await until(asked, { timeout: 5000 });
+  inWorker(w, "use the subtitle");
+  await until(() => homeFile(w, "typed-t1")?.length === 1, { timeout: 5000 });
+  assert.doesNotMatch(news(w), /asks the owner/);
+  look(w);
+  assert.equal(w.task().state, "working", "their words closed it");
+  const heard = news(w);
+  assert.doesNotMatch(heard, /asks the owner/, "answered: nothing to ask");
+  assert.match(heard, /the owner talked to its worker in its own window, 1 message/);
+  assert.deepEqual(queue(w), []);
+
+  // The owner is on its window (2026-11-15: they answered there while the supervisor's picker asked the same).
+  w.sup.prompt("@t1 ask");
+  await until(asked, { timeout: 5000 });
+  await terminal(w, "alpha");
+  w.tmux("select-window", "-t", "=sv-alpha:=t1");
+  look(w);
+  assert.doesNotMatch(news(w), /asks the owner/, "the owner is with its worker");
+  assert.deepEqual(queue(w), ["q"], "it waits");
+  // They left with it still open: now the supervisor asks.
+  w.tmux("new-window", "-t", "=sv-alpha:", "-n", "elsewhere", "sleep 600");
+  look(w);
+  assert.match(news(w), /yoda · chat header asks the owner/);
+});
+
+test("the first answer wins: the owner's answer in its worker's window closes the supervisor's picker on it with Esc, the supervisor hears why, and a late pick goes nowhere", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.claude.prompts().length === 1);
+  w.sup.prompt("@t1 ask");
+  await until(() => w.task().state === "needs-you", { timeout: 5000 });
+  const tagged = QUESTIONS.map((x) => ({ ...x, header: "yoda Style" }));
+  // The supervisor in its window, its picker open on that question: a window that logs its keys, and a transcript
+  // holding the call, unanswered.
+  const keys = join(w.sb.root, "supervisor-keys.log");
+  write(join(w.sb.root, "keys.cjs"), `const fs = require("node:fs");\nfs.writeFileSync(${JSON.stringify(keys)}, "");\nprocess.stdin.setRawMode(true);\nprocess.stdin.on("data", (d) => fs.appendFileSync(${JSON.stringify(keys)}, JSON.stringify(d.toString()) + "\\n"));\n`);
+  w.tmux("new-window", "-d", "-t", "=sv-alpha:", "-n", "alpha", "--", process.execPath, join(w.sb.root, "keys.cjs"));
+  await until(() => existsSync(keys), { timeout: 20_000 });
+  const transcript = w.sup.payload("x").transcript_path;
+  write(transcript, `${JSON.stringify({ type: "assistant", timestamp: new Date().toISOString(), message: { content: [{ type: "tool_use", id: "toolu_1", name: "AskUserQuestion", input: { questions: tagged } }] } })}\n`);
+  const escaped = () => readFileSync(keys, "utf8").includes(JSON.stringify("\x1b"));
+
+  // Nobody answered yet: the picker stays.
+  look(w);
+  assert.ok(!escaped());
+  await sleep(50);
+
+  inWorker(w, "use the subtitle");
+  await until(() => homeFile(w, "typed-t1")?.length === 1, { timeout: 5000 });
+  look(w);
+  assert.equal(w.task().state, "working");
+  await until(escaped, { timeout: 5000 });
+  assert.ok(kinds(w).includes("answered-there"));
+  const heard = news(w);
+  assert.doesNotMatch(heard, /asks the owner/, "its question is answered");
+  assert.match(heard, /yoda · chat header: the owner answered its question in its own window \("use the subtitle"\), so rollcall closed your picker for it\. .*Do not ask it again/);
+  assert.doesNotMatch(heard, /talked to its worker in its own window/, "said once");
+
+  // The owner's pick landed as the picker closed: it goes nowhere.
+  assert.match(addedContext(ask(w.sup, tagged, { "Which header style?": "Bold title" })), /yoda · chat header: the owner answered its question in its own window after your picker opened \("use the subtitle"\), so this pick did not go to its worker/);
+  await sleep(300);
+  look(w);
+  assert.equal(times(w, "Style: Bold title"), 0);
+  assert.equal(readFileSync(keys, "utf8").split(JSON.stringify("\x1b")).length - 1, 1, "one Esc");
+});
+
 test("a home has one watcher: a second stands down at once, one from before this kind gives way, and a name with no home is refused", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
   const w = world(t);
   const first = watcher(w, { ROLLCALL_WATCH_POLL_MS: "60000" });

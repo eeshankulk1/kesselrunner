@@ -18,7 +18,8 @@ import { existsSync, readdirSync, statSync, watch as watchFolder } from "node:fs
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { asksText } from "./asked.mjs";
+import { answeredInWindow } from "./answer.mjs";
+import { asksText, pending, tail } from "./asked.mjs";
 import { isAway } from "./away.mjs";
 import { enqueue, keyQuietMs, receiptMs, settleDialog, settleTyped, typedWaiting, waiting } from "./delivery.mjs";
 import { lastEntry, parkSupervisor, supervisorDue } from "./park.mjs";
@@ -29,7 +30,7 @@ import { isOpen } from "./state.mjs";
 import * as trouble from "./trouble.mjs";
 import {
   HANDOFF, closesAt, closing, colorOf, ensureWatcher, freshDue, freshPrOn, freshUndo, holderOf, homeOf, label, markCap, markFresh, nameOf, park, parkDue, pump, running, setWait, startingMs, taggedQuestions, taskEnv,
-  unpark, watcherEnv, whereCurrent, workerState,
+  taskOfQuestion, unpark, watcherEnv, whereCurrent, workerState,
 } from "./supervisor.mjs";
 import { headOf, unlanded } from "./gc.mjs";
 import { allSpotlights, setupState } from "./checkout.mjs";
@@ -792,6 +793,13 @@ const STEPS = new Set(["handoff", "exited", "after-merge", "ready", "undelivered
 const TOLD = new Set(["pr-open", "queued", "landed", "closed", "decision", "merged", "prompt"]);
 const judgment = (e) => !STEPS.has(e.kind) && !TOLD.has(e.kind);
 
+/**
+ * Whether the owner is with the worker whose question `e` brings: looking at its window, or just typed there (a
+ * prompt the transcript has not yet said is theirs). They may answer it there, so the supervisor does not ask it
+ * meanwhile: it stays queued, and goes once they leave with it still open (wakeText drops it once answered).
+ */
+const withWorker = (h, e) => (e.kind === "ask" || e.kind === "needs-you") && (tmux.watched(h, e.task) || typedWaiting(h, e.task).length > 0);
+
 /** The worker's report, when the supervisor has not been handed it yet. */
 const reportToShow = (t) => (t.output && t.output.at > (t.reportedAt ?? 0) ? t.output : null);
 
@@ -863,6 +871,10 @@ export function wakeText(h, entries, { shown = new Map() } = {}) {
       const said = e.said ? `Its last words, as written:\n${e.said.replace(/^/gm, "    ")}\n ` : "It left no last words.";
       line = `${label(t)} (${t.state}) heard from you after it finished and ended its turn without a reply. ${said} If they answer what the owner asked, give the owner that answer whole, as written; ` +
         `else ask it: \`rollcall task tell ${t.id} "<question>"\` (its answer comes back as a reply).`;
+    } else if (e.kind === "answered-there") {
+      // closeAnsweredPicker closed the supervisor's picker (Esc) once the owner answered all of it in the workers' windows.
+      line = `${label(t)}: the owner answered its question in its own window ("${store.clip(store.oneLine(e.said ?? ""), 200)}"), so rollcall closed your picker for it. ` +
+        `Their words are on its record (\`${cli()} task show ${t.id}\`) and count like any they send through you. Do not ask it again; act on any other line of the news that opened that picker.`;
     } else if (e.kind === "grew" && isOpen(t)) {
       const grew = t.notes.findLast((n) => /^grew:/i.test(n.text));
       line = `${label(t)}: its worker says the work grew: "${store.clip(store.oneLine(grew?.text.replace(/^grew:\s*/i, "") ?? "(no note)"), 300)}". Judge it per "Stay or fresh": split the new part into a task of its own, or let this worker carry on.`;
@@ -914,7 +926,7 @@ export const turnReady = (h, g, now = Date.now()) => { markTurn(h, g, true, now)
  * the owner's line and the news go in one turn. Returns the lines to add to the prompt.
  */
 export function turnStarted(h, g, now = Date.now()) {
-  const news = store.listWakes(h).queued.filter(judgment);
+  const news = store.listWakes(h).queued.filter((e) => judgment(e) && !withWorker(h, e));
   const taken = news.length ? takeNews(h, g.id, news, now) : null;
   markTurn(h, g, false, now);
   if (taken) markReported(h, taken.shown);
@@ -1118,7 +1130,7 @@ function drain(h, s, now) {
       if (!heard.has(key)) tellOwner(h, e, t);
       heard.add(key);
       gone.push(e.name);
-    } else news.push(e);
+    } else if (!withWorker(h, e)) news.push(e);
   }
   store.ackWakes(h, gone);
   if (news.length) { heldNotice(h, s, news, now); deliver(h, s, news, now); }
@@ -1141,6 +1153,44 @@ function handOver(h, s, now) {
   const r = startWindow(h, { session: randomUUID(), cwd: cwd && existsSync(cwd) ? cwd : homedir(), resume: false });
   if (!r.ok) { store.writeHomeFile(h, "lock", lock); return false; }
   told(h, null, `Supervisor ${h} reached ${pct}% of its context, so a fresh session took over from its task records. Your tasks carry on.`);
+  return true;
+}
+
+/**
+ * The supervisor's open picker asks only what the owner answered meanwhile in the workers' own windows: rollcall
+ * closes it (Esc, which ends that turn with no Stop hook) and the supervisor hears why, so the owner answers each
+ * question once. Not while the owner may be picking in it (a key there just now): picks() drops that pick instead.
+ * A picker that still asks something stays. Returns whether it closed one.
+ */
+function closeAnsweredPicker(h, s, now) {
+  if (!s.picker || !s.holder) return false;
+  const transcript = store.readGlobal(s.holder.id)?.transcript;
+  const call = transcript ? pending(tail(transcript)).filter((c) => c.name === "AskUserQuestion").sort((a, b) => b.at - a.at)[0] : null;
+  const questions = Array.isArray(call?.input?.questions) ? call.input.questions : [];
+  // The picker it closed last, on disk so a watcher started meanwhile knows it too: until its Esc reaches the
+  // transcript the call still looks open, and a second Esc would open Claude Code's rewind.
+  // call.at 0 is a timestamp that did not parse: every earlier answer would count as later than the picker.
+  if (!call?.at || !questions.length || store.readHomeFile(h, "picker-closed")?.id === call.id) return false;
+  const answered = new Map();
+  for (const x of questions) {
+    const id = taskOfQuestion(x);
+    const w = answeredInWindow(id ? store.readTask(h, id) : null, call.at);
+    if (!w) return false;
+    answered.set(id, w);
+  }
+  tmux.forget(h);
+  if (now - tmux.lastUsed(h, h) < keyQuietMs() || !tmux.interrupt(h, h)) return false;
+  store.writeHomeFile(h, "picker-closed", { id: call.id, at: now });
+  // That turn ended with no Stop hook: news goes in once the transcript shows the call ended (supervisorNow).
+  markTurn(h, s.holder, true, now);
+  for (const [id, w] of answered) {
+    store.enqueueWake(h, { task: id, kind: "answered-there", said: w.text });
+    // The wake carries their words, so the owner's next line to the supervisor does not bring them again (ownerNews).
+    store.withTasksLock(h, () => {
+      const t = store.readTask(h, id);
+      if (t && (t.toldAt ?? 0) < w.at) { t.toldAt = w.at; store.writeTask(t); }
+    });
+  }
   return true;
 }
 
@@ -1249,6 +1299,7 @@ export async function watchHome(h, { once = false } = {}) {
       try { soon = typeWaiting(h, now); } catch {}
       const s = supervisorNow(h, now);
       try {
+        closeAnsweredPicker(h, s, now);
         reclaim(h, s, now);
         drain(h, s, now);
         if (looked) {
