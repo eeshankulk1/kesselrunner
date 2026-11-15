@@ -27,7 +27,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `agents/` | code-reviewer, test-runner, test-updater, frontend-tester, ios-driver, docs-updater, deploy-watcher, and the helpers code-scout, web-researcher, prod-reader, browser-operator ([helpers.md](helpers.md)). The three that work from a complete brief (frontend-tester, ios-driver, deploy-watcher) set `omitClaudeMd: true` and start without the CLAUDE.md files; their own file and the brief carry what they need |
 | `skills/` | `/pr-create`, `/ci-setup`, `/recap`, `/handoff`, `/note`, `/frontend-test`, `/ios-sim`, `/browser`, `/prod-read`, `/update-docs`, `/update-tests`, `/ship-ios-build`, `/supervisor` |
 | `hooks/pre-tool-use/` | The core's one guard, `agent-model.mjs`: refuses an Agent call that would run on the session's model by accident (no model named on an agent that has none of its own), and a `general-purpose` call doing test, review or docs work |
-| `docs/` | These docs, plus the project docs standard, templates, the test-manifest schema, plans and the worklog |
+| `docs/` | These docs, plus the project docs standard, templates, the test-manifest schema and the worklog |
 | `bin/kesselrunner.mjs` | The install, sync, doctor, delegate and rules CLI (`bin/dotclaude.mjs` is the old name) |
 | `lib/reconcile.mjs` | Install and sync: links, the `CLAUDE.md` block, settings merge, docsic, migrations, the malformed-settings guard |
 | `lib/pull.mjs` | Fast-forwards the core clone; never resets or touches a dirty tree |
@@ -51,6 +51,7 @@ Why it is built this way: [principles.md](principles.md). Everything you type: [
 | `install.sh` | The one-line installer: clones the public repo over https with plain git (no `gh` needed) |
 | `scripts/release.sh` | Bumps the version, updates `CHANGELOG.md`, tags, and prints the remaining steps; never pushes or publishes |
 | `CHANGELOG.md`, `LICENSE` | Release notes and the MIT license (`packages/rollcall/LICENSE` for the package) |
+| `.github/` | CI (`workflows/check.yml`), and `CONTRIBUTING.md` and `SECURITY.md`, which GitHub shows on the repo page |
 
 ### How a worker starts
 
@@ -109,5 +110,4 @@ To turn a mod off on one machine, set it to `false` under `enabledPlugins` in `~
 | [test-manifest.md](test-manifest.md) | The `.claude/test-manifest.json` schema test tooling reads |
 | [templates/](templates/) | Starting points for a project's docs |
 | [assets/](assets/) | The README banner |
-| [plans/](plans/) | Plans with a `status:`, one per piece of work |
 | [worklog/](worklog/) and `worklog.jsonl` | One entry per shipped PR |
