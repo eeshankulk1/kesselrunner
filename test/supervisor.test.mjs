@@ -1750,7 +1750,10 @@ test("an idle worker whose task waits on the owner parks: its tab says so, Enter
   assert.match(w.sup.cli(["task", "list"]).stdout, /parked/);
   assert.match(statusline(w.sup), / yoda chat header: needs you/, "the owner still sees what it waits on");
 
-  // Enter in its tab: the same conversation, waiting for words.
+  // Enter in its tab: the same conversation, waiting for words. It starts the way rollcall starts a worker now, even
+  // where an older rollcall wrote its launch script at the park (here: one that still named a folder by --add-dir).
+  const script = join(w.sb.home, "_supervisors/alpha/workers/t1/launch.sh");
+  writeFileSync(script, readFileSync(script, "utf8").replace(" --settings ", " --add-dir '/old' --settings "));
   const before = runs();
   w.tmux("send-keys", "-t", "=sv-alpha:=t1", "Enter");
   await until(() => runs() === before + 1, { timeout: 5000 });

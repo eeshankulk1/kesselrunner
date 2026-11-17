@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // rollcall - awareness for parallel agent sessions on one machine.
 // `rollcall hook <event>` is the hook entry point; `worker-hook` and `statusline` are the
-// supervisor's (a worker's launch settings, Claude Code's status line).
+// supervisor's (a worker's launch settings, Claude Code's status line), and `worker-launch` a parked worker's tab's.
 // Everything else is the CLI.
 const argv = process.argv.slice(2);
 const HOOKS = new Set(["hook", "worker-hook", "statusline"]);
@@ -34,6 +34,9 @@ if (HOOKS.has(argv[0])) {
       if (out) process.stdout.write(out);
     }
   } catch (e) { debug(e); process.exitCode = 0; }
+} else if (argv[0] === "worker-launch") {
+  // A parked worker's tab, on Enter: its launch files written again. It fails quietly; the old files stand.
+  try { (await import("../src/supervisor.mjs")).relaunchFiles(argv[1], argv[2]); } catch (e) { if (process.env.ROLLCALL_DEBUG) process.stderr.write(`rollcall: ${e?.stack ?? e}\n`); }
 } else {
   const { main } = await import("../src/cli.mjs");
   process.exitCode = await main(argv);
