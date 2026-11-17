@@ -288,19 +288,22 @@ test("start launches the worker in its tmux window: the brief, a fixed session i
   const run = w.claude.runs()[0];
   const sid = w.task().sessions[0].id;
   const files = join(w.sb.home, "_supervisors/alpha/files/t1");
-  assert.deepEqual(run.argv.slice(0, 6), ["--session-id", sid, "--add-dir", files, "--settings", join(w.sb.home, "_supervisors/alpha/workers/t1/settings.json")]);
+  // No --add-dir: Claude Code asks the owner to trust each folder it names, and every task has a new one.
+  assert.deepEqual(run.argv.slice(0, 4), ["--session-id", sid, "--settings", join(w.sb.home, "_supervisors/alpha/workers/t1/settings.json")]);
+  assert.ok(!run.argv.includes("--add-dir"));
   assert.equal(run.cwd, w.wt);
   assert.equal(run.task, "alpha:t1", "its environment names its task");
   assert.match(run.argv.at(-1), /^You are the worker for task t1/);
   assert.equal(w.tmux("list-windows", "-t", "=sv-alpha", "-F", "#{window_name}"), "t1");
-  const settings = JSON.parse(readFileSync(run.argv[5], "utf8"));
+  const settings = JSON.parse(readFileSync(run.argv[3], "utf8"));
   assert.equal(settings.enabledPlugins["1password@1password"], false);
   assert.equal(settings.enabledPlugins["playwright@claude-plugins-official"], undefined, "a repo with no test manifest keeps the browser servers");
   // Nothing in a worker's status line changes with time: it runs on its own events, not the owner's 5 s timer.
   assert.equal(settings.statusLine.refreshInterval, 3600);
   // The owner's screenshots go to the task's folder, which each browser server is told of its own way.
   assert.ok(existsSync(files));
-  assert.ok(readFileSync(join(dirname(run.argv[5]), "launch.sh"), "utf8").includes(`export PLAYWRIGHT_MCP_OUTPUT_DIR='${files}'`));
+  assert.deepEqual(settings.permissions.additionalDirectories, [files], "Chrome DevTools: a working folder named in settings, which Claude Code never asks to trust");
+  assert.ok(readFileSync(join(dirname(run.argv[3]), "launch.sh"), "utf8").includes(`export PLAYWRIGHT_MCP_OUTPUT_DIR='${files}'`));
   assert.match(settings.statusLine.command, /rollcall\.mjs' statusline$/);
   assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /worker-hook 'alpha' 't1' ask/);
   await until(() => w.task().worker?.alive && !w.task().worker.busy, { timeout: 5000 });
@@ -1053,7 +1056,7 @@ test("past 35% context a worker hears it once from its own hooks, not the superv
   const context = (pct) => spawnSync(process.execPath, [BIN, "statusline"], { input: JSON.stringify({ session_id: sid, context_window: { used_percentage: pct, context_window_size: 1_000_000, total_input_tokens: Math.round(pct * 10_000) } }), env: { ...w.sup.env, ROLLCALL_TASK: "alpha:t1" }, encoding: "utf8" });
   const hook = (event, payload = {}) => spawnSync(process.execPath, [BIN, "worker-hook", "alpha", "t1", event], { input: JSON.stringify({ session_id: sid, ...payload }), env: w.sup.env, encoding: "utf8" }).stdout;
   // The PostToolUse hook from its launch settings, shell test and all.
-  const settings = JSON.parse(readFileSync(w.claude.runs()[0].argv[5], "utf8"));
+  const settings = JSON.parse(readFileSync(w.claude.runs()[0].argv[3], "utf8"));
   const capHook = settings.hooks.PostToolUse.flatMap((e) => e.hooks).find((h) => /worker-hook 'alpha' 't1' cap/.test(h.command));
   assert.match(capHook.command, /^\[ -e '.*\/cap' \] && /, "node runs only once the cap flag is up");
   const afterTool = (session = sid) => spawnSync("sh", ["-c", capHook.command], { input: JSON.stringify({ session_id: session, hook_event_name: "PostToolUse" }), env: w.sup.env, encoding: "utf8" }).stdout;
@@ -1751,7 +1754,7 @@ test("an idle worker whose task waits on the owner parks: its tab says so, Enter
   const before = runs();
   w.tmux("send-keys", "-t", "=sv-alpha:=t1", "Enter");
   await until(() => runs() === before + 1, { timeout: 5000 });
-  assert.deepEqual(w.claude.runs().at(-1).argv, ["--resume", sid, "--add-dir", join(w.sb.home, "_supervisors/alpha/files/t1"), "--settings", join(w.sb.home, "_supervisors/alpha/workers/t1/settings.json")]);
+  assert.deepEqual(w.claude.runs().at(-1).argv, ["--resume", sid, "--settings", join(w.sb.home, "_supervisors/alpha/workers/t1/settings.json")]);
   await until(() => w.task().worker?.alive && !w.task().worker.parked, { timeout: 5000 });
 
   // The owner's words, from the supervisor: it resumes with them as its prompt.

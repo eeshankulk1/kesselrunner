@@ -55,6 +55,11 @@ export function trusted(t) {
  * database, which raised a macOS prompt for every new worker). Its status line draws nothing that changes
  * with time, so it runs on the session's own events only (the longest refresh there is: an hour); the
  * browser servers start only where the worker can use them (wantsBrowser).
+ *
+ * A browser worker also gets the task's files folder as a working folder, so Chrome DevTools (which writes only
+ * inside Claude Code's folders, its MCP roots) can save the owner's screenshots there. It goes in here, not on the
+ * command line: since 2.1.32x Claude Code asks the owner to trust each folder `--add-dir` names, once per session,
+ * and every task has a new one. A folder this settings file names is the launcher's own word, so it never asks.
  */
 export function launchSettings(t) {
   const { home: h, id } = t;
@@ -66,8 +71,10 @@ export function launchSettings(t) {
     { hooks: [{ type: "command", command: `[ -e ${q(dialogFlag(h, id))} ] && ${hook("clear")} || true`, timeout: 10 }] },
     { hooks: [{ type: "command", command: `[ -e ${q(capFlag(h, id))} ] && ${hook("cap")} || true`, timeout: 10 }] },
   ];
+  const browser = wantsBrowser(t);
   return {
-    enabledPlugins: { "1password@1password": false, ...(wantsBrowser(t) ? {} : noBrowser()) },
+    enabledPlugins: { "1password@1password": false, ...(browser ? {} : noBrowser()) },
+    ...(browser ? { permissions: { additionalDirectories: [store.filesDir(h, id)] } } : {}),
     statusLine: statusLine(3600),
     hooks: {
       SessionStart: cmd("session-start"),
@@ -118,17 +125,16 @@ export function writeLaunch(t, { prompt, resume = false, session: pick = null, m
   const permission = `${MODES.has(mode) ? ` --permission-mode ${mode}` : ""}${modelOk(model) ? ` --model ${q(model)}` : ""}${effortOk(effort) ? ` --effort ${effort}` : ""}`;
   const first = prompt ? ` "$(cat ${q(promptFile)})"` : "";
   // The browser servers refuse a path outside the folders they know, and the owner's screenshots go to the task's
-  // own: Chrome DevTools reads Claude Code's folders (--add-dir), Playwright its output folder. --add-dir takes
-  // every word up to the next flag, so it never stands last, before the prompt.
+  // own: Chrome DevTools reads Claude Code's folders (the settings file's additionalDirectories), Playwright its
+  // output folder.
   const browser = wantsBrowser(t);
   const files = store.filesDir(t.home, t.id);
   if (browser) mkdirSync(files, { recursive: true });
-  const addDir = browser ? ` --add-dir ${q(files)}` : "";
   const lines = [
     ...preamble(t, { browser, files }),
     resume
-      ? `${q(bin())} --resume ${q(session)}${addDir} --settings ${q(settings)}${permission}${first}`
-      : `${q(bin())} --session-id ${q(session)}${addDir} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
+      ? `${q(bin())} --resume ${q(session)} --settings ${q(settings)}${permission}${first}`
+      : `${q(bin())} --session-id ${q(session)} --settings ${q(settings)}${permission}${name ? ` -n ${q(name)}` : ""}${first}`,
   ];
   writeFileSync(script, `${lines.join("\n")}\n`);
   return { script, session };
