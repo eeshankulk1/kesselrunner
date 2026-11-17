@@ -500,6 +500,9 @@ export function parkDue(t, w, now = Date.now()) {
   return !tmux.viewed(t.home, t.id);
 }
 
+// What a launch script bakes in from the environment, passed to `worker-launch` from a parked tab.
+const LAUNCH_ENV = ["ROLLCALL_HOME", "ROLLCALL_TMUX_SOCKET", "ROLLCALL_WATCHER", "KESSELRUNNER_CLAUDE_BIN", "DOTCLAUDE_CLAUDE_BIN"];
+
 /**
  * Parks the task's worker: its Claude Code stops (its conversation is saved, and its SessionEnd hooks run as
  * on any exit), and its tab says so; Enter there resumes the same conversation in place, waiting for the
@@ -516,6 +519,11 @@ export function park(t, w, now = Date.now()) {
       ? `printf '\\n  %s is parked: its PR is open and the ship script has it. Its conversation is saved.\\n  When the owner or the supervisor next writes to it, a fresh worker starts from the task record. Press Enter to bring back this conversation instead.\\n\\n' ${q(label(t))}`
       : `printf '\\n  %s is parked: its worker stopped after %s minutes idle, to free memory. Its conversation is saved.\\n  Press Enter to bring it back here. It also comes back by itself when the owner or the supervisor writes to it.\\n\\n' ${q(label(t))} ${q(String(idle))}`,
     "read -r _ || exit 0",
+    // Its launch files are written again first, by the rollcall installed then: Enter may come after an update, and
+    // the files written now would start it the old way (a fix to its command line would not reach it).
+    // (The variables the launch script bakes in go along: the pane has them only once that script runs, and
+    // without them the files written now would differ from the ones written at park.)
+    `${LAUNCH_ENV.filter((k) => process.env[k]).map((k) => `${k}=${q(process.env[k])} `).join("")}${q(process.execPath)} ${q(BIN)} worker-launch ${q(t.home)} ${q(t.id)} 2>/dev/null`,
     `. ${q(script)}`,
   ];
   writeFileSync(parked, `${lines.join("\n")}\n`);
@@ -524,6 +532,20 @@ export function park(t, w, now = Date.now()) {
   // Its pane was not respawned: the worker still runs, so it is not parked.
   if (!r.ok) store.appendStatus(t.home, t.id, { ev: "session", source: "park-failed" });
   return r.ok;
+}
+
+/**
+ * `rollcall worker-launch <home> <task>`: a parked worker's tab runs it on Enter, just before it sources the launch
+ * script. It writes the worker's launch files again for the same conversation, mode, model and effort, so the
+ * worker starts the way the rollcall installed now starts one. Returns whether it wrote them; where it cannot, the
+ * files from the park stand.
+ */
+export function relaunchFiles(h, id) {
+  const t = store.readTask(h, id);
+  const w = t ? workerState(t) : null;
+  if (!w || w.legacy) return false;
+  workerAdapter(t).writeLaunch(t, { resume: true, mode: w.mode, model: w.model, effort: w.effort });
+  return true;
 }
 
 /**
