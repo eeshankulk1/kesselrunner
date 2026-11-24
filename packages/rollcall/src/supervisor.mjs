@@ -233,13 +233,15 @@ export function workerState(t, now = Date.now()) {
   const w = tmux.windowOf(t.home, t.id);
   const r = running(store.readStatus(t.home, t.id));
   const idle = r.turn?.ev === "idle";
+  const booting = isBooting(w, r, now);
+  const alive = !!w?.alive || booting;
   let dialog = null;
   try { dialog = statSync(dialogFlag(t.home, t.id)).mtimeMs; } catch {}
   return {
-    window: !!w, alive: !!w?.alive, busy: !!w?.alive && !idle, dialog: w?.alive ? dialog : null,
+    window: !!w, alive, booting, busy: alive && !idle, dialog: w?.alive ? dialog : null,
     asks: w?.alive && dialog ? dialogAsks(t.home, t.id) : null,
     // Parked: rollcall stopped it while it sat idle. Stopped: on purpose (start.mjs --stop), and no one resumes it unasked.
-    session: s.id, harness: sessionHarness(s), legacy: false, parked: r.held === "parked" && !w?.alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
+    session: s.id, harness: sessionHarness(s), legacy: false, parked: r.held === "parked" && !alive, context, tokens, size, total, since: r.turn?.at ?? s.at,
     stopped: r.held === "stopped",
     bg: idle ? r.turn.bg ?? null : null, last: idle ? r.turn.last ?? null : null,
     // The mode, model and effort it was launched with, so a parked or stopped worker comes back on the same ones.
@@ -247,6 +249,21 @@ export function workerState(t, now = Date.now()) {
     // When its Claude Code last started (a resume by Enter in a parked tab ends no turn, so `since` stays old).
     up: r.up, launchedAt: r.launch?.at ?? null, started: r.started,
   };
+}
+
+/** How long a launched worker may take to reach Claude Code (or Codex) before a pane still at its shell means it is dead. */
+export const bootMs = () => msEnv("ROLLCALL_BOOT_MS", 3 * 60_000);
+
+/**
+ * Whether a worker is on its way up, from its window `w` and its folded log `r` (running): launched, its pane open,
+ * and neither its session nor an exit heard since. Its pane first runs the owner's login shell, which sources the
+ * launch script (15 seconds and more on a loaded Mac, with nvm in the profile), and only then the harness, so for that
+ * while the pane shows a shell, as a dead worker's does. Read as dead, a resumed finished task's window was closed
+ * under it and words for a starting worker launched it a second time; it counts as running until bootMs() passes.
+ */
+function isBooting(w, r, now) {
+  if (!w || w.alive || w.dead || !r.launch || r.started || r.last !== r.launch) return false;
+  return now - r.launch.at < bootMs();
 }
 
 // ---------------------------------------------------------------- a finished task's window
@@ -482,7 +499,8 @@ const msEnv = (name, dflt) => { const v = Number(process.env[name]); return Numb
 export const parkAfterMs = () => msEnv("ROLLCALL_PARK_AFTER_MS", 15 * 60_000);
 export const parkSupervisorAfterMs = () => msEnv("ROLLCALL_PARK_SUPERVISOR_MS", 3600_000);
 // A worker counts as starting (not dead, not stuck) this long after its launch.
-export const startingMs = () => msEnv("ROLLCALL_STARTING_MS", 20_000);
+// Measured from the launch, so it covers the login shell's start too (bootMs), and Claude Code's SessionStart hooks.
+export const startingMs = () => msEnv("ROLLCALL_STARTING_MS", 60_000);
 /** ROLLCALL_PARK=0 keeps every session running. */
 export const parkingOn = () => store.envFlag("ROLLCALL_PARK") !== false;
 const PARKABLE = new Set(["pr-open", "queued", "needs-you"]);

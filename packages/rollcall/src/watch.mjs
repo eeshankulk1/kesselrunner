@@ -77,7 +77,7 @@ export function view(t, now = Date.now()) {
   const launchedAt = w?.launchedAt ?? null;
   let wait = null;
   if (w?.alive && w.dialog) wait = { kind: "prompt", since: w.dialog };
-  else if (w?.alive && w.started === false && now - launchedAt > startingMs()) wait = { kind: "prompt", since: launchedAt + startingMs() };
+  else if (w?.alive && !w.booting && w.started === false && now - launchedAt > startingMs()) wait = { kind: "prompt", since: launchedAt + startingMs() };
   else if (t.state === "needs-you") wait = { kind: "needs-you", since: t.stateAt ?? t.updatedAt };
   // A parked worker is not a stopped one: the watcher brings it back once its task is worked again.
   else if (w && !w.alive && !w.parked && !w.stopped && !t.wait && t.state === "working" && !(launchedAt && now - launchedAt < startingMs())) wait = { kind: "stopped", since: Math.max(w.since ?? 0, launchedAt ?? 0) };

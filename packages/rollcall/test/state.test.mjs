@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { MOVES, STATES, allowed, isOpen, transition } from "../src/state.mjs";
+import { MOVES, STATES, allowed, isOpen, transition, wordsSinceAnswer } from "../src/state.mjs";
 
 const SRC = new URL("../src/", import.meta.url);
 const [W, N, P, Q, L, C] = STATES;
@@ -107,4 +107,16 @@ test("only state.mjs writes a task's state, and every row of its table has a cal
   }
   const all = Object.values(text).join("\n");
   for (const event of new Set(MOVES.map(([e]) => e))) assert.ok(all.includes(`"${event}"`), `no caller of ${event}`);
+});
+
+test("wordsSinceAnswer: what the owner added after their last answer, or after the task's own words; a bare go and an issue add nothing", () => {
+  const texts = (t) => wordsSinceAnswer(t).map((w) => w.text);
+  const base = { createdAt: 100, words: [{ at: 50, text: "the issue", via: "issue" }, { at: 100, text: "fix the header" }] };
+  assert.deepEqual(texts(base), []);
+  assert.deepEqual(texts({ ...base, words: [...base.words, { at: 110, text: "Ship it!" }, { at: 120, text: "also bump the version" }] }), ["also bump the version"]);
+  const answered = [...base.words, { at: 110, text: "use blue" }, { at: 130, text: "Shp: Ship it (Recommended)", via: "supervisor", closed: "Ship it?" }];
+  assert.deepEqual(texts({ ...base, words: answered }), [], "words before the last answer were settled by it");
+  assert.deepEqual(texts({ ...base, words: [...answered, { at: 140, text: "once thats shipped, also release prod" }] }), ["once thats shipped, also release prod"]);
+  assert.deepEqual(texts({ ...base, words: [...answered, { at: 140, text: "go ahead" }, { at: 150, text: "lgtm." }] }), []);
+  assert.deepEqual(texts({}), []);
 });
