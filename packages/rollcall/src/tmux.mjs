@@ -88,14 +88,16 @@ export function runInWindow(h, name, cwd, argv, { first = false } = {}) {
 // ---------------------------------------------------------------- the tab bar
 
 // Bumped when the options below change, so a server started by an older rollcall is dressed again.
-const DRESS = "2";
+const DRESS = "3";
 
 /**
  * rollcall's tmux server draws its status bar as tabs: one per window, the supervisor's first, each
  * clicked to show it (tmux's own mouse binding). A window's tab reads its @tab options, which the
  * supervisor's status line keeps current (setTabs); @tab_back marks the way back, on tabs not shown now.
- * Claude Code asks for focus events inside tmux; a window keeps its name whatever runs in it, and links
- * (the clickable mod's) reach the terminal.
+ * Claude Code asks for focus events inside tmux; a window keeps its name whatever runs in it, links
+ * (the clickable mod's) reach the terminal, and Shift-Enter reaches Claude Code as a new line instead of
+ * sending the message (extended keys: tmux asks the terminal for them and passes them on to a program that
+ * asks, as Claude Code does).
  */
 export function dress(opts = {}) {
   const options = [
@@ -107,9 +109,10 @@ export function dress(opts = {}) {
     ["@falcon_dress", DRESS],
   ];
   const cmds = options.flatMap(([k, v]) => [";", "set-option", "-g", k, v]);
-  // Fixed slots, so dressing again replaces them instead of adding more: links, and truecolor for the
-  // tasks' colors (a tab is drawn in its task's dot color).
+  // Fixed slots, so dressing again replaces them instead of adding more: links, truecolor for the tasks'
+  // colors (a tab is drawn in its task's dot color), and extended keys from the terminal.
   cmds.push(";", "set-option", "-s", "terminal-features[90]", "*:hyperlinks", ";", "set-option", "-s", "terminal-features[91]", "*:RGB");
+  cmds.push(";", "set-option", "-s", "terminal-features[92]", "xterm*:extkeys", ";", "set-option", "-s", "extended-keys", "on");
   return tmux(cmds.slice(1), opts).ok;
 }
 
