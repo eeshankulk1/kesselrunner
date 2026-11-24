@@ -938,7 +938,8 @@ test("the status line keeps the tabs: each task's state, filled while it waits o
   assert.equal(tab("t1", "@tab"), "yoda chat header · idle");
   assert.equal(tab("t1", "@tab_style"), "fg=#0A84FF");
   assert.equal(w.tmux("list-windows", "-t", "=sv-alpha", "-F", "#{@tab_back}|#{window_name}|#{@tab}|#{@tab_style}").split("\n").at(-1), "◀ |alpha|alpha|bold");
-  assert.equal(w.tmux("show-options", "-gv", "@falcon_dress"), "2", "a server without the tab bar is dressed again");
+  assert.equal(w.tmux("show-options", "-gv", "@falcon_dress"), "3", "a server without the tab bar is dressed again");
+  assert.equal(w.tmux("show-options", "-sv", "extended-keys"), "on", "Shift-Enter reaches Claude Code as its own key");
 
   w.sup.cli(["task", "set", "t1", "--state", "needs-you", "--question", "Ship it?"], { env: { ROLLCALL_TASK: "alpha:t1" } });
   statusline(w.sup);
@@ -2225,7 +2226,7 @@ test("falcon starts the first free supervisor, falcon, in a window of its own in
   assert.equal(lean.hooks, undefined);
   assert.equal(w.claude.runs()[0].cwd, w.sb.main);
   assert.equal(w.tmux("list-windows", "-t", "=sv-falcon", "-F", "#{@tab_back}|#{window_name}|#{@tab}|#{@tab_style}"), "◀ |falcon|falcon|bold");
-  assert.deepEqual(["@falcon_dress", "mouse", "status-left"].map((o) => w.tmux("show-options", "-gv", o)), ["2", "on", ""]);
+  assert.deepEqual(["@falcon_dress", "mouse", "status-left"].map((o) => w.tmux("show-options", "-gv", o)), ["3", "on", ""]);
   assert.match(w.tmux("show-options", "-gv", "window-status-format"), /#\{@tab_back\}#\{\?@tab,#\{@tab\},#W\}/);
 
   const next = w.falcon([], { cwd: w.sb.root });
