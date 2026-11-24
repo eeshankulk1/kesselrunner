@@ -12,6 +12,7 @@
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { enqueue } from "./delivery.mjs";
 import { defaultBranch, dirtyPaths, fetchSync, gitSync, locate, mainCheckout, repoKey, resolveRef, safeName } from "./git.mjs";
 import { matchScope } from "./glob.mjs";
 import { AGAIN, ENDS, SHIP_USAGE, shipNews } from "./ship-news.mjs";
@@ -19,7 +20,7 @@ import { blockOnBilling, billingRefusal, clear, ensureTree, rerun, runIn, troubl
 import { pidAlive, sameProcess, startOf } from "./proc.mjs";
 import { changedFiles, checksOf, ensureLander, entryNews, finishEntry, gh, ghJson, guard, isStatus, manifestAt, prLook, span } from "./queue.mjs";
 import { P, ago, fileList, msgLine, short, who } from "./session.mjs";
-import { isOpen, transition } from "./state.mjs";
+import { isOpen, transition, wordsSinceAnswer } from "./state.mjs";
 import * as store from "./store.mjs";
 import { queueState, shipStage, taskAt } from "./task.mjs";
 import { prThreads, threadLine } from "./threads.mjs";
@@ -55,20 +56,32 @@ function afterOutcome(key, a, kind, text) {
   shipStage(a.task, "done");
   if (kind === "shipped") {
     // The ship is over: the task lands with what the script saw below the worker's own report. A task that waits on
-    // the owner keeps waiting (merged moves only working, pr-open and queued).
+    // the owner keeps waiting (merged moves only working, pr-open and queued). One where the owner asked for more
+    // after their go ("once that's shipped, also release prod") stays open, and its worker comes back for it: nothing
+    // else would wake it, and a production release on the owner's go once sat four hours unstarted.
     const now = Date.now();
     const r = store.withTasksLock(h, () => {
       const x = store.readTask(h, id);
-      if (!isOpen(x)) return false;
+      if (!isOpen(x)) return null;
       const body = `rollcall's ship script: ${text}`;
       x.output = { at: now, by: x.output?.by ?? "rollcall", text: x.output ? `${x.output.text}\n\n${body}` : body };
       x.merged = { key: a.sha ?? x.pr ?? "its work", at: now, pr: x.pr ?? null, why: "its ship finished" };
+      const asks = x.state === "needs-you" ? [] : wordsSinceAnswer(x);
+      if (asks.length && (x.state === "working" || transition(x, "merged-more-to-do", { now }))) {
+        x.notes.push({ at: now, by: "rollcall", text: `merged: ${store.clip(text, 300)} The task stays open: the owner asked for more once it shipped, and its worker comes back for it.` });
+        store.writeTask(x);
+        return { asks };
+      }
       const moved = transition(x, "merged", { now });
       x.notes.push({ at: now, by: "rollcall", text: moved ? `landed: ${store.clip(text, 300)}` : `ship finished (${store.clip(text, 200)}); the task stays ${x.state}` });
       store.writeTask(x);
-      return moved;
+      return { moved };
     });
-    if (r?.out) store.enqueueWake(h, { task: id, kind: "landed" });
+    if (r?.out?.asks) {
+      const said = r.out.asks.map((w) => `"${store.clip(store.oneLine(w.text), 500)}"`).join(", then ");
+      enqueue(store.readTask(h, id), "notice", `${P} ship: ${text} While it shipped, the owner said: ${said}. Do now what that asks for once it landed, unless you already did; then save your report and set the task landed.`);
+      store.enqueueWake(h, { task: id, kind: "merged" });
+    } else if (r?.out?.moved) store.enqueueWake(h, { task: id, kind: "landed" });
     return;
   }
   queueState(h, id, "queue-sent-back", { note: `ship: ${kind} - ${store.clip(store.oneLine(text), 300)}` });

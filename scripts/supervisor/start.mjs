@@ -155,7 +155,7 @@ async function freshTaken(t) {
 }
 
 /**
- * Waits (up to ~15 s) for the worker's session to start. Claude Code asks once per repo whether to trust it,
+ * Waits (up to ~15 s, ROLLCALL_START_WAIT_MS) for the worker's session to start. Claude Code asks once per repo whether to trust it,
  * before any hook runs: then exit 4 and what the owner does. The window stays up, so accepting there is enough.
  */
 async function settled(t) {
@@ -167,7 +167,8 @@ async function settled(t) {
     return 4;
   }
   const launched = store.readStatus(t.home, t.id).findLast((e) => e.ev === "launch")?.at ?? Date.now();
-  for (let i = 0; i < 30; i++) {
+  const tries = Math.ceil((Number(process.env.ROLLCALL_START_WAIT_MS) || 15_000) / 500);
+  for (let i = 0; i < tries; i++) {
     if (store.readStatus(t.home, t.id).some((e) => e.ev === "session" && e.at >= launched)) return 0;
     await sleep(500);
   }
