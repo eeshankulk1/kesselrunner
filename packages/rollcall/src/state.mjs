@@ -47,6 +47,21 @@ export const MOVES = [
   ["abandoned", OPEN, ["closed"]],
 ];
 
+// A go typed as a line of its own, not picked: it asks for no more than the ship itself.
+const GO = /^\W*(?:ship it|create a pr|open a pr|go|go ahead|yes|ok(?:ay)?|lgtm|do it)\W*$/i;
+
+/**
+ * The owner's words that came after their last answer to one of the task's questions (after the words the task
+ * started from, when none was answered): what they added once the work was settled, such as "once that's shipped,
+ * also release prod". A bare go to ship adds nothing.
+ */
+export function wordsSinceAnswer(t) {
+  const words = (t?.words ?? []).filter((w) => w.via !== "issue");
+  const answer = words.findLast((w) => w.closed);
+  const from = answer?.at ?? t?.createdAt ?? words[0]?.at ?? 0;
+  return words.filter((w) => w.at > from && !w.closed && !GO.test(w.text ?? ""));
+}
+
 /** The state `event` may move `t` to, or null: `to` when the event lets the caller name one, else the event's only target. */
 function target(t, event, to) {
   const row = MOVES.find(([e, from]) => e === event && from.includes(t.state));

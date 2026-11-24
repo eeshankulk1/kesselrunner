@@ -1046,6 +1046,56 @@ test("a finished task's worker comes back to answer the owner: --resume (its wor
   assert.equal(w.claude.runs()[4].argv.at(-1), "what did you change?");
 });
 
+/**
+ * A login shell that takes `secs` to start, as the owner's does with nvm on a loaded Mac: named sh, so its pane shows
+ * a shell all the while (macOS names a script's process for the script).
+ */
+function slowShell(w, secs) {
+  const sh = join(w.sb.root, "slow", "sh");
+  write(sh, `#!/bin/sh\nsleep ${secs}\nexec /bin/sh "$@"\n`);
+  chmodSync(sh, 0o755);
+  // start.mjs gives up waiting for the session well before the shell is done, as it did on the owner's Mac.
+  w.sup.env = { ...w.sup.env, SHELL: sh, ROLLCALL_START_WAIT_MS: "500" };
+}
+
+test("a worker whose login shell is still loading is starting, not stopped: a finished task's resumed window stays, and words for it wait instead of launching it again", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  assert.equal(w.start(["t1"]).code, 0);
+  await until(() => w.task().worker?.alive && !w.task().worker.busy, { timeout: 5000 });
+  w.sup.cli(["task", "output", "t1", "Done."], { env: { ROLLCALL_TASK: "alpha:t1" } });
+  w.sup.cli(["task", "set", "t1", "--state", "landed"], { env: { ROLLCALL_TASK: "alpha:t1" } });
+  assert.equal(w.start(["t1", "--stop"]).code, 0);
+
+  // Resumed long after its last turn, so its window is past due the moment it opens: before, the watcher read the
+  // loading shell as a worker gone and closed the window before Claude Code ever ran.
+  slowShell(w, 3);
+  assert.equal(w.start(["t1", "--resume", "did the prod release run?"]).code, 0);
+  assert.equal(w.task().worker.booting, true);
+  assert.match(w.sup.cli(["task", "list"]).stdout, /starting: its shell is still loading/);
+  look(w, { ROLLCALL_CLOSE_AFTER_MS: "1" });
+  assert.equal(w.task().worker.window, true, "the window stays while its shell loads");
+  assert.equal(w.start(["t1", "--resume", "again"]).code, 1, "a starting worker is not resumed twice");
+  await until(() => w.claude.runs().length === 2, { timeout: 15_000 });
+  await until(() => w.task().worker?.alive && !w.task().worker.booting && !w.task().worker.busy, { timeout: 5000 });
+  assert.match(w.claude.prompts().at(-1), /^\[rollcall\] The owner brought this worker back after task t1 was landed \(did the prod release run\?\)/);
+});
+
+test("the owner's words for an open task's worker that is still starting wait for it, and reach the one launch", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const w = world(t);
+  slowShell(w, 3);
+  assert.equal(w.start(["t1"]).code, 0);
+  const v = w.task();
+  assert.equal(v.worker.alive, true);
+  assert.equal(v.worker.booting, true);
+  assert.doesNotMatch(w.sup.cli(["task", "list"]).stdout, /stopped/);
+  assert.equal(routed(w.sup.prompt("@t1 also check the footer")), "→ yoda · chat header: its worker is still starting: your words go in once it runs");
+  const ticker = watcher(w);
+  await until(() => w.claude.prompts().includes("also check the footer"), { timeout: 20_000 });
+  await ticker.stop();
+  assert.equal(w.claude.runs().length, 1, "one launch: the words did not start it again");
+  assert.equal(times(w, "also check the footer"), 1);
+});
+
 test("past 35% context a worker hears it once from its own hooks, not the supervisor; at the cap its hooks make it hand off, and rollcall starts the fresh worker from the handoff", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
   const w = world(t);
   const brief = w.start(["t1", "--dry-run"]).stdout;

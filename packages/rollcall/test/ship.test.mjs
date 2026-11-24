@@ -120,6 +120,46 @@ test("green joins the line and lands; the after-merge runner watches the deploys
   assert.match(a.ship("wait", "--timeout", "1").stdout, /ship: shipped - #1 landed/);
 });
 
+test("the owner's words after their go to ship keep the task open past the landing, and its worker comes back for them; a bare go does not", (t) => {
+  const sb = repo(t);
+  const { task, outbox, wt } = withTask(sb, "feat");
+  const file = join(sb.home, "_supervisors/alpha/tasks/t1.json");
+  const say = (words) => { const x = JSON.parse(readFileSync(file, "utf8")); x.words.push(...words); writeFileSync(file, JSON.stringify(x)); };
+  const at = task().createdAt;
+  // The worker asked whether to ship and the owner picked it; then they typed a go of their own, and asked for more.
+  say([
+    { at: at + 1, text: "Shp: Ship it (Recommended)", via: "supervisor", closed: "Ship it?" },
+    { at: at + 2, text: "ship it!", via: "supervisor" },
+    { at: at + 3, text: "once thats shipped, also release prod for me please", via: "supervisor" },
+  ]);
+  const a = shipper(sb, "feat", { "src/a.js": "a\n" }, { wt });
+  assert.equal(a.ship("start", "--land").code, 0);
+  sb.lander();
+  assert.equal(sb.after(1).status, 0);
+  assert.equal(last(sb).kind, "shipped");
+  const t1 = task();
+  assert.equal(t1.state, "working", "not landed: the owner asked for more once it shipped");
+  assert.match(t1.notes.at(-1).text, /^merged: #1 landed .* The task stays open: the owner asked for more once it shipped/);
+  const n = outbox().find((x) => x.kind === "notice");
+  assert.match(n?.text ?? "", /^\[rollcall\] ship: #1 landed as [0-9a-f]{8}; .* While it shipped, the owner said: "once thats shipped, also release prod for me please"\. Do now what that asks for once it landed, unless you already did; then save your report and set the task landed\.$/);
+  assert.doesNotMatch(n.text, /ship it!/, "a bare go asks for nothing more");
+
+  // A second task whose owner only answered the ship question lands with its ship, as before.
+  const sup2 = sb.session(sb.root);
+  sup2.start();
+  assert.equal(sup2.cli(["supervise", "beta"]).code, 0);
+  assert.equal(sup2.cli(["task", "new", "feat-b", "--repo", sb.main, "--slug", "feat-b"]).code, 0);
+  const file2 = join(sb.home, "_supervisors/beta/tasks/t1.json");
+  const x2 = JSON.parse(readFileSync(file2, "utf8"));
+  x2.words.push({ at: x2.createdAt + 1, text: "Shp: Ship it (Recommended)", via: "supervisor", closed: "Ship it?" }, { at: x2.createdAt + 2, text: "go ahead", via: "supervisor" });
+  writeFileSync(file2, JSON.stringify(x2));
+  const b = shipper(sb, "feat-b", { "src/b.js": "b\n" }, { wt: join(sb.main, ".claude/worktrees/feat-b") });
+  assert.equal(b.ship("start", "--land").code, 0);
+  sb.lander();
+  assert.equal(sb.after(2).status, 0);
+  assert.equal(JSON.parse(sup2.cli(["task", "show", "t1", "--json"]).stdout).state, "landed");
+});
+
 test("a red check is re-run once, then goes back to the task's worker with the failing part of its log", (t) => {
   const sb = repo(t, { ci: [{ name: "test", failIfGrep: "broken" }] });
   const { task, outbox, wt } = withTask(sb, "red");

@@ -60,10 +60,14 @@ export function forget(h) {
   clientList = null;
 }
 
-/** The task's window: { id, pane, cmd, alive } (alive: the pane's foreground process is not a shell), or null. */
+/**
+ * The task's window: { id, pane, cmd, alive, dead } (alive: the pane's foreground process is not a shell; dead: its
+ * pane's process ended), or null. A pane at a shell is also one whose launch script is still loading, before its
+ * program runs: supervisor.mjs workerState tells the two apart.
+ */
 export function windowOf(h, task) {
   const w = listing(h)?.find((x) => x.name === task);
-  return w ? { id: w.id, pane: w.pane, cmd: w.cmd, alive: w.dead !== "1" && !!w.cmd && !SHELLS.test(w.cmd) } : null;
+  return w ? { id: w.id, pane: w.pane, cmd: w.cmd, alive: w.dead !== "1" && !!w.cmd && !SHELLS.test(w.cmd), dead: w.dead === "1" } : null;
 }
 
 /** Every window in a home's tmux session, by name. */

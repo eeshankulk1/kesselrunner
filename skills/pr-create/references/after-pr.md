@@ -44,7 +44,7 @@ The deploys were green and the release commands before it ran; the text lists, i
 
 ## shipped
 
-The script finished: the PR landed, what the release waits for was green, and the release commands ran. Runs it did not wait on (a long suite on main) are named as still running: the project's own red-main handling covers them, nothing to do. In a task, rollcall marks it landed and adds the script's line below the worker's report; nothing to do. In a session with no task, `ship wait` prints it: relay it to the user as the end of the ship (merge commit, deploys, release steps; with `release.production`, that production is unchanged and the word that releases it).
+The script finished: the PR landed, what the release waits for was green, and the release commands ran. Runs it did not wait on (a long suite on main) are named as still running: the project's own red-main handling covers them, nothing to do. In a task, rollcall marks it landed and adds the script's line below the worker's report; nothing to do. When the owner asked for more after the go (words after their last answered question that are not a bare go), the task does not land: it goes back to working and a `[rollcall] ship:` notice quotes those words. The PR is merged, so do that work as a follow-up. In a session with no task, `ship wait` prints it: relay it to the user as the end of the ship (merge commit, deploys, release steps; with `release.production`, that production is unchanged and the word that releases it).
 
 ## Merges the script did not run
 

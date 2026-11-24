@@ -440,6 +440,7 @@ function workerLine(t, w, now) {
   if (w.legacy) return `worker ${short(w.session)} (a v2 background session: \`start.mjs\` resumes it in tmux)`;
   if (w.parked) return `worker ${short(w.session)} parked (stopped while idle, to free memory): it comes back when written to, or on Enter in its tab`;
   if (!w.alive) return `worker ${short(w.session)} stopped${w.window ? "" : ", no window"}`;
+  if (w.booting) return `worker ${short(w.session)} starting: its shell is still loading`;
   const doing = w.dialog ? `waiting on ${asksText(w.asks)} in its window` : w.busy ? "working" : `idle, its turn ended ${ago(w.since, now)}`;
   const ctx = w.context === null ? "" : `, context ${w.context}%${w.tokens ? ` (${kTokens(w.tokens)}${w.size ? ` of ${kTokens(w.size)}` : ""})` : ""}${w.total ? `, ${kTokens(w.total)} used in all` : ""}`;
   // What an idle worker waits on: the background work it left running (its shipper, a CI watch), or nothing.
