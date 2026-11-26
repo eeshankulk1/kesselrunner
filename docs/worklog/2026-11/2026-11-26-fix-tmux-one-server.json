@@ -1,0 +1,1 @@
+{"date": "2026-11-26", "project": "kesselrunner", "summary": "rollcall keeps one tmux server: a slow server's windows no longer read as gone, a lost socket comes back by SIGUSR1, and a new server starts only when none runs.", "pr": 0, "why": "A second tmux server hid a supervisor's task tabs and news from the owner's terminal."}

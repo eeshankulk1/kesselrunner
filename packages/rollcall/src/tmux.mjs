@@ -5,6 +5,7 @@
 // when Claude exits, so a pane back at a bare shell is a dead worker, and resuming replaces the pane.
 // Windows are found by exact name and addressed by id: tmux resolves a missing name to some other window.
 import { spawnSync } from "node:child_process";
+import { readFileSync, readdirSync, readlinkSync } from "node:fs";
 
 export const SOCKET = () => process.env.ROLLCALL_TMUX_SOCKET || "rollcall";
 const SHELLS = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh|csh|login)$/;
@@ -23,10 +24,80 @@ export function cleanEnv() {
 /** Runs tmux on rollcall's server: { ok, out, err }. */
 export function tmux(args, { input, timeout = 5000 } = {}) {
   const r = spawnSync("tmux", ["-L", SOCKET(), ...args], { encoding: "utf8", input, timeout, env: cleanEnv(), stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
-  return { ok: r.status === 0, out: (r.stdout ?? "").trimEnd(), err: (r.stderr ?? "").trim() || (r.error ? String(r.error.message) : "") };
+  // A timeout is no answer: the tmux client exits 0 on the SIGTERM spawnSync sends it, so its status alone read as an
+  // empty success (no windows at all) whenever the server was slow.
+  return { ok: r.status === 0 && !r.error && !r.signal, out: (r.stdout ?? "").trimEnd(), err: (r.stderr ?? "").trim() || (r.error ? String(r.error.message) : "") };
 }
 
 export const available = () => spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+
+// ---------------------------------------------------------------- one server
+
+// tmux answers "no such session" and "no server" in words; anything else (a timeout on a loaded Mac, "Connection
+// refused" when the server's queue is full) means the server is there but did not answer.
+const NO_SESSION = /can't find (session|window)/;
+const NO_SERVER = /no server running|error connecting to .*\(No such file or directory\)/;
+
+/** What tmux's failed answer `err` says: "session" (the server runs, the session does not), "server" (no socket), or "unknown". */
+export const absence = (err) => NO_SESSION.test(err) ? "session" : NO_SERVER.test(err) ? "server" : "unknown";
+
+/**
+ * tmux servers still running for rollcall's socket name: [pid]. The server is the tmux process that leads its own
+ * session (it detaches from the client that started it, which ps marks "s"); its arguments are that client's, so
+ * they name the socket.
+ */
+export function serverPids() {
+  const r = spawnSync("ps", ["-axo", "pid=,stat=,args="], { encoding: "utf8", timeout: 5000 });
+  const out = [];
+  for (const line of (r.stdout ?? "").split("\n")) {
+    const m = /^\s*(\d+)\s+(\S+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!m || !m[2].includes("s") || !/(^|\/)tmux$/.test(m[3])) continue;
+    const args = m[4].split(/\s+/);
+    const i = args.indexOf("-L");
+    if (i >= 0 && args[i + 1] === SOCKET()) out.push(Number(m[1]));
+  }
+  return out.length ? out : procServerPids();
+}
+
+/**
+ * Linux retitles a tmux server "tmux: server", which drops "-L <socket>" from ps. The kernel's socket table still
+ * lists the server's socket by path (deleted or not), and the server's descriptors name it by inode.
+ */
+function procServerPids() {
+  const inodes = new Set();
+  try {
+    for (const line of readFileSync("/proc/net/unix", "utf8").split("\n")) {
+      const f = line.trim().split(/\s+/);
+      if (f[7] && f[7].split("/").pop() === SOCKET() && f[7].includes("/tmux-")) inodes.add(f[6]);
+    }
+  } catch { return []; }
+  const out = [];
+  if (!inodes.size) return out;
+  for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+    try {
+      if (!readFileSync(`/proc/${pid}/comm`, "utf8").startsWith("tmux")) continue;
+      if (readdirSync(`/proc/${pid}/fd`).some((fd) => { try { return inodes.has(/^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`))?.[1]); } catch { return false; } })) out.push(Number(pid));
+    } catch {}
+  }
+  return out;
+}
+
+/**
+ * Brings back the socket of a rollcall tmux server that lost it (SIGUSR1 makes tmux recreate it), so the next
+ * command reaches the windows already open instead of starting a second, empty server beside them. Returns "none"
+ * (no such server runs), "back" (it answers again) or "stuck" (it runs but still does not answer).
+ */
+function revive() {
+  const pids = serverPids();
+  if (!pids.length) return "none";
+  for (const pid of pids) { try { process.kill(pid, "SIGUSR1"); } catch {} }
+  for (let i = 0; i < 20; i++) {
+    const r = tmux(["list-sessions"]);
+    if (r.ok || absence(r.err) === "session") return "back";
+    pause(100);
+  }
+  return "stuck";
+}
 
 /** Whether this process runs inside rollcall's tmux server ($TMUX names its socket first). */
 export const inside = (env = process.env) => !!env.TMUX && env.TMUX.split(",")[0].split("/").pop() === SOCKET();
@@ -44,6 +115,12 @@ function listing(h, opts) {
   const kept = listings.get(h);
   if (kept && Date.now() - kept.at < LISTING_MS) return kept.rows;
   const r = tmux(["list-windows", "-t", `=${sessionName(h)}`, "-F", FIELDS.map((f) => `#{${f}}`).join("\t")], opts);
+  // A server that did not answer has not lost its windows: read as gone, the watcher once resumed a worker that
+  // was still running, in a second window. The last listing stands until tmux answers.
+  if (!r.ok && kept && absence(r.err) === "unknown") {
+    listings.set(h, { at: Date.now(), rows: kept.rows }); // asked again in LISTING_MS, not on every call (each would wait out the timeout)
+    return kept.rows;
+  }
   const rows = r.ok
     ? r.out.split("\n").filter(Boolean).map((line) => {
       const [id, name, pane, cmd, dead, tab, style, back, dress] = line.split("\t");
@@ -83,8 +160,27 @@ export function runInWindow(h, name, cwd, argv, { first = false } = {}) {
   const w = windowOf(h, name);
   forget(h);
   if (w) return tmux(["respawn-pane", "-k", "-t", w.pane, "-c", cwd, "--", ...argv]);
-  if (tmux(["has-session", "-t", `=${s}`]).ok) return tmux(["new-window", "-d", ...(first ? ["-b", "-t", `=${s}:^`] : ["-t", `=${s}:`]), "-n", name, "-c", cwd, "--", ...argv]);
-  const made = tmux(["new-session", "-d", "-s", s, "-n", name, "-x", "220", "-y", "50", "-c", cwd, "--", ...argv]);
+  let has = tmux(["has-session", "-t", `=${s}`]);
+  // The socket is gone but its server still runs (something deleted the file): bring the socket back rather
+  // than start a second server, whose windows the first one's terminals would never show.
+  if (!has.ok && absence(has.err) === "server") {
+    const r = revive();
+    if (r === "stuck") return { ok: false, out: "", err: "rollcall's tmux server lost its socket and did not answer SIGUSR1: try again shortly" };
+    if (r === "back") has = tmux(["has-session", "-t", `=${s}`]);
+  }
+  if (has.ok) {
+    // The window may be there after all, on the server revive() brought back.
+    const again = windowOf(h, name);
+    forget(h);
+    if (again) return tmux(["respawn-pane", "-k", "-t", again.pane, "-c", cwd, "--", ...argv]);
+    return tmux(["new-window", "-d", ...(first ? ["-b", "-t", `=${s}:^`] : ["-t", `=${s}:`]), "-n", name, "-c", cwd, "--", ...argv]);
+  }
+  const why = absence(has.err);
+  // A server that did not answer is not missing: new-session would start a second one beside it (tmux does that
+  // when its socket refuses a connection), and its windows would never show in the first one's terminals.
+  if (why === "unknown") return { ok: false, out: "", err: `rollcall's tmux server did not answer (${has.err || "no reply"}): try again shortly` };
+  // -N: only "no server" may start one. With the server up (no session yet), a refused connection fails instead.
+  const made = tmux([...(why === "session" ? ["-N"] : []), "new-session", "-d", "-s", s, "-n", name, "-x", "220", "-y", "50", "-c", cwd, "--", ...argv]);
   if (made.ok) dress();
   return made;
 }
@@ -272,5 +368,5 @@ export const watching = (clients, id) => clients.some((c) => c.window === id && 
 export function attachCommand(h, task) {
   const view = `${sessionName(h)}-${task}-view`;
   const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
-  return `tmux -L ${q(SOCKET())} new-session -A -t ${q(`=${sessionName(h)}`)} -s ${q(view)} \\; set-option destroy-unattached on \\; select-window -t ${q(`=${view}:=${task}`)}`;
+  return `tmux -L ${q(SOCKET())} -N new-session -A -t ${q(`=${sessionName(h)}`)} -s ${q(view)} \\; set-option destroy-unattached on \\; select-window -t ${q(`=${view}:=${task}`)}`;
 }
