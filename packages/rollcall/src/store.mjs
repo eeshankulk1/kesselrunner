@@ -231,6 +231,8 @@ export function workerDir(h, id) {
   mkdirSync(d, { recursive: true });
   return d;
 }
+/** Runs `fn` under a lock of one task's worker, so two callers never bring back its parked worker twice. Null when it stays busy. */
+export const withWorkerLock = (h, id, fn) => withDirLock(join(workerDir(h, id), ".unpark.lock"), fn);
 
 // What a task's worker did, from its hooks: one JSON line per event, newest last.
 const statusPath = (h, id) => join(homeDir(h), "status", `${safeId(id)}.jsonl`);

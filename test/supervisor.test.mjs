@@ -1833,6 +1833,21 @@ test("an idle worker whose task waits on the owner parks: its tab says so, Enter
   assert.equal(w.sup.cli(["task", "set", "t1", "--state", "working"]).code, 0);
   look(w, PARK);
   await until(() => /^\[rollcall\] You were parked \(stopped while idle, to free memory\), and task t1 is being worked again/.test(w.claude.prompts().at(-1) ?? ""), { timeout: 5000 });
+
+  // The owner's words reopen its task, and bring it back themselves. The watcher, finding it parked and its task
+  // worked again in that moment, leaves it to them; past that moment it brings the worker back with the owner's
+  // words as they are, never a notice of rollcall's in their place: a guard waiting on the owner's word skips those.
+  await idle();
+  look(w, PARK);
+  await until(() => w.task().worker.parked, { timeout: 5000 });
+  const said = "Prod (the owner's own words, not one of your options): prod";
+  assert.equal(w.sup.cli(["task", "words", "t1", said]).code, 0);
+  assert.equal(w.task().state, "working");
+  look(w, PARK);
+  assert.equal(w.task().worker.parked, true, "the words get their moment to bring it back");
+  look(w, { ...PARK, ROLLCALL_WORDS_GRACE_MS: "1" });
+  await until(() => w.claude.prompts().at(-1) === said, { timeout: 5000 });
+  assert.deepEqual(w.claude.runs().at(-1).argv.slice(0, 2), ["--resume", sid]);
 });
 
 /** Task t1's PR #9 in its repo's merge queue, as the ship script holds it ("checking"), or out of it (null). */

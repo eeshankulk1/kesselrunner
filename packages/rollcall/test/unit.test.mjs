@@ -13,8 +13,8 @@ import { branch, locate, normalizeRemote, repoKey } from "../src/git.mjs";
 import { globToRegExp, matchScope } from "../src/glob.mjs";
 import { pidAlive, sameProcess, startOf } from "../src/proc.mjs";
 import { isAlive, isHolding } from "../src/session.mjs";
-import { HOME_NAME } from "../src/store.mjs";
-import { CHARACTERS, SHIPS, idOf, nameOf, pickName, running, taskOfQuestion } from "../src/supervisor.mjs";
+import { HOME_NAME, appendStatus } from "../src/store.mjs";
+import { CHARACTERS, SHIPS, idOf, nameOf, pickName, running, taskOfQuestion, unpark } from "../src/supervisor.mjs";
 import { draftIn, watching } from "../src/tmux.mjs";
 import { git, sandbox } from "./helpers.mjs";
 
@@ -351,6 +351,18 @@ test("sameWords: what the hook sees of what was typed", () => {
   assert.ok(!sameWords("keep the icon", "drop the icon"));
   assert.ok(!sameWords("", "anything"), "nothing sent holds nothing");
   assert.ok(!sameWords(null, "anything"));
+});
+
+test("unpark: a worker someone launched since the caller looked is not launched again", (t) => {
+  // The owner's words reopen a parked worker's task, and the watcher brings back a parked worker whose task is
+  // worked again: both looked at the same parked worker, and the second must not start it a second time.
+  const sb = sandbox(t);
+  process.env.ROLLCALL_HOME = sb.home;
+  t.after(() => { delete process.env.ROLLCALL_HOME; });
+  const task = { home: "alpha", id: "t1", sessions: [{ id: "s1", tmux: true }], worktree: sb.main };
+  const looked = { parked: true, session: "s1", launchedAt: Date.now() - 60_000 };
+  appendStatus("alpha", "t1", { ev: "launch", session: "s1", resume: true });
+  assert.deepEqual(unpark(task, "prod", looked, { kind: "words" }), { ok: true, already: true });
 });
 
 test("running: one fold of a worker's status log", () => {
