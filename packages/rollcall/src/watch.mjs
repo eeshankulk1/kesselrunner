@@ -47,6 +47,8 @@ const NOTIFY_AFTER = { prompt: 30_000, "needs-you": 60_000, stopped: 60_000 };
 const REMIND_EVERY = 10 * 60_000;
 // A worker gone from its pane counts as gone once it stays gone this long: one tmux read under load can miss a live one.
 const goneMs = () => ms("ROLLCALL_GONE_MS", 15_000);
+// How long the owner's words get to bring a parked worker back themselves before the watcher does it with them.
+const wordsGraceMs = () => ms("ROLLCALL_WORDS_GRACE_MS", 30_000);
 // How often the watcher looks over every task and worker. News a hook queues (a worker's question, a report)
 // wakes it at once through the wake folder; this beat is for what no file announces (a worker that died, a
 // dialog left open, a merged PR, a task free to start) and for a change the OS failed to report.
@@ -382,9 +384,16 @@ export function tick(h, now = Date.now()) {
     try {
       if (isOpen(t) && w?.parked && t.state === "working" && !t.wait) {
         // A parked worker comes back once its task is worked again (the merge queue sent it back, the supervisor
-        // set it working): any news is on its session, and its hooks read it out with this prompt.
+        // set it working): any news is on its session, and its hooks read it out with this prompt. The owner's
+        // words reopen a task too, and bring its worker back themselves a moment later (deliverWords): the watcher
+        // leaves them that moment, and past it brings the worker back with those words as they are, never a notice
+        // of rollcall's in their place (a guard that waits on the owner's word skips a line of rollcall's).
+        const said = (t.words ?? []).filter((x) => x.via === "supervisor" && x.at >= Math.max(w.since ?? 0, w.up ?? 0));
         const n = t.notes.findLast((x) => x.at >= (w.since ?? 0))?.text;
-        unpark(t, `[rollcall] You were parked (stopped while idle, to free memory), and task ${t.id} is being worked again${n ? `: ${store.clip(store.oneLine(n), 300)}` : ""}. Carry on; \`rollcall task show ${t.id}\` has the record.`, w);
+        if (said.length) {
+          // A fresh start already queued carries them in its brief.
+          if (now - said.at(-1).at >= wordsGraceMs() && !t.fresh?.queued) unpark(t, said.map((x) => x.text).join("\n\n"), w, { kind: "words" });
+        } else unpark(t, `[rollcall] You were parked (stopped while idle, to free memory), and task ${t.id} is being worked again${n ? `: ${store.clip(store.oneLine(n), 300)}` : ""}. Carry on; \`rollcall task show ${t.id}\` has the record.`, w);
       } else if (isOpen(t) && prFresh(t, w, now)) {
         // Its PR is open and the ship script has it: the worker stops now, and the next time it is needed a fresh
         // worker starts from the task record, not this long conversation.

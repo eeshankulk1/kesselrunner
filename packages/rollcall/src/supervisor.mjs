@@ -572,9 +572,17 @@ export function relaunchFiles(h, id) {
  * err, fresh }.
  */
 export function unpark(t, prompt, w = workerState(t), { kind = "notice", mode = null } = {}) {
-  const why = freshDue(t, w);
-  if (why) return goFresh(t, w, why, prompt, kind);
-  return launch(t, { prompt, resume: true, mode: mode ?? w?.mode ?? null, model: w?.model, effort: w?.effort });
+  // The watcher and the owner's words can both find the worker parked in the same moment (the words reopen the task,
+  // and the watcher brings back a parked worker whose task is worked again): the first brings it back, and the
+  // other, seeing a launch newer than the worker it looked at, hears `already` and puts what it carries on the
+  // queue, so the owner's words never lose to rollcall's notice.
+  const r = store.withWorkerLock(t.home, t.id, () => {
+    if (w?.launchedAt != null && (running(store.readStatus(t.home, t.id)).launch?.at ?? 0) > w.launchedAt) return { ok: true, already: true };
+    const why = freshDue(t, w);
+    if (why) return goFresh(t, w, why, prompt, kind);
+    return launch(t, { prompt, resume: true, mode: mode ?? w?.mode ?? null, model: w?.model, effort: w?.effort });
+  });
+  return r?.out ?? { ok: true, already: true };
 }
 
 // ---------------------------------------------------------------- fresh starts
@@ -707,6 +715,11 @@ export function deliverWords(t, text, { record, mode = null }) {
   }
   const r = w.parked ? unpark(t, text, w, { kind: "words", mode }) : launch(t, { prompt: text, resume: true, mode: mode ?? w.mode, model: w.model, effort: w.effort });
   if (r.fresh) return { ok: true, how: "fresh" };
+  // Something else brought it back first: the words go in once it runs.
+  if (r.already) {
+    if (!enqueue(t, "words", text)) return { ok: false, why: "the task store stayed busy: your words are on its record, so say them again" };
+    return { ok: true, how: "held", why: "its worker is starting: your words go in once it runs" };
+  }
   return r.ok ? { ok: true, how: "resumed" } : { ok: false, why: `its worker could not be resumed: ${r.err}` };
 }
 
@@ -753,9 +766,12 @@ export function replyOwed(t, log = store.readStatus(t.home, t.id)) {
 export function ring(t) {
   const w = workerState(t);
   // A parked worker comes back to hear it.
-  if (w?.parked && isOpen(t) && unpark(t, DOORBELL, w).ok) return true;
+  if (w?.parked && isOpen(t)) {
+    const r = unpark(t, DOORBELL, w);
+    if (r.ok && !r.already) return true;
+  }
   enqueue(t, "doorbell", DOORBELL);
-  return flush(t, w).typed > 0;
+  return flush(t, workerState(t)).typed > 0;
 }
 
 /**
@@ -767,6 +783,8 @@ export function pump(t, now = Date.now()) {
   const items = waiting(t.home, t.id);
   if (w?.parked && isOpen(t) && items.length) {
     const r = unpark(t, items.map((x) => x.text).join("\n\n"), w);
+    // Brought back by someone else just now: the items stay queued for it.
+    if (r.already) return flush(t, workerState(t, now), now);
     if (r.ok) drop(t, items);
     return { typed: r.ok ? items.length : 0, err: r.ok ? null : r.err, lost: [] };
   }
