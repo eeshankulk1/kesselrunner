@@ -2683,3 +2683,53 @@ test("a live worker that waits on a blocker hears when it clears, typed into its
   await until(() => !w.task().wait, { timeout: 5000 });
   assert.equal(trouble(w).open.disk, undefined);
 });
+
+// ---------------------------------------------------------------- one tmux server
+
+/** tmux.mjs on a private socket of its own, in this process: [module, socket, tmux runner]. */
+async function ownSocket(t) {
+  const socket = `rc-one-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const before = process.env.ROLLCALL_TMUX_SOCKET;
+  process.env.ROLLCALL_TMUX_SOCKET = socket;
+  const dir = join(process.env.TMUX_TMPDIR || "/tmp", `tmux-${process.getuid()}`);
+  const m = await import("../packages/rollcall/src/tmux.mjs");
+  t.after(() => {
+    for (const pid of m.serverPids()) { try { process.kill(pid, "SIGCONT"); process.kill(pid, "SIGKILL"); } catch {} }
+    rmSync(join(dir, socket), { force: true });
+    if (before === undefined) delete process.env.ROLLCALL_TMUX_SOCKET; else process.env.ROLLCALL_TMUX_SOCKET = before;
+    m.forget();
+  });
+  const run = (...a) => spawnSync("tmux", ["-L", socket, ...a], { encoding: "utf8" });
+  return { m, socket, path: join(dir, socket), run };
+}
+
+test("a tmux server that lost its socket gets it back: a new window joins its windows, never a second server", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const { m, path, run } = await ownSocket(t);
+  assert.ok(m.runInWindow("one", "t1", "/", ["sleep", "300"]).ok);
+  const [first] = m.serverPids();
+  assert.ok(first, "the server runs");
+  rmSync(path); // what a temp cleanup, or tmux itself after a refused connect, does to the socket file
+  m.forget();
+  assert.ok(m.runInWindow("one", "t2", "/", ["sleep", "300"]).ok);
+  assert.deepEqual(m.serverPids(), [first], "still one server");
+  assert.deepEqual(run("list-windows", "-t", "=sv-one", "-F", "#{window_name}").stdout.trim().split("\n").sort(), ["t1", "t2"]);
+  // Another home's first window on the same server: no session yet, the server answers, so no new server.
+  assert.ok(m.runInWindow("two", "t1", "/", ["sleep", "300"]).ok);
+  assert.deepEqual(m.serverPids(), [first]);
+});
+
+test("a tmux server that does not answer keeps its windows: nothing reads them as gone and nothing starts a second server", { skip: !HAS_TMUX && "tmux is not installed" }, async (t) => {
+  const { m } = await ownSocket(t);
+  assert.ok(m.runInWindow("one", "t1", "/", ["sleep", "300"]).ok);
+  const [pid] = m.serverPids();
+  assert.ok(m.windowOf("one", "t1"), "a fresh listing");
+  process.kill(pid, "SIGSTOP"); // a server that takes the connection and never answers, as on a Mac under heavy load
+  try {
+    await new Promise((r) => setTimeout(r, 1100)); // past LISTING_MS: the next look asks tmux, which times out
+    assert.ok(m.windowOf("one", "t1"), "the last listing stands");
+    const r = m.runInWindow("one", "t2", "/", ["sleep", "300"]);
+    assert.equal(r.ok, false);
+    assert.match(r.err, /did not answer/);
+    assert.deepEqual(m.serverPids(), [pid], "no second server");
+  } finally { process.kill(pid, "SIGCONT"); }
+});
